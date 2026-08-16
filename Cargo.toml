@@ -1,0 +1,18 @@
+[package]
+name = "iwork"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+description = "Read and write Apple iWork documents (Pages, Numbers, Keynote)"
+license = "MIT"
+repository = "https://github.com/zebra-pig/iwork-rs"
+keywords = ["pages", "numbers", "keynote", "iwork", "iwa"]
+categories = ["parser-implementations", "filesystem"]
+
+[dependencies]
+snap = "1.1"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[[bin]]
+name = "iwork"
+path = "src/bin/iwork.rs"

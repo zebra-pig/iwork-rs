@@ -1,0 +1,229 @@
+//! Integration tests against real documents.
+//!
+//! No iWork files are committed to this repository — they are other people's
+//! documents, and the ones used during development are copyrighted. Drop any
+//! `.pages`, `.numbers` or `.key` files into `tests/fixtures/` (or point
+//! `IWORK_FIXTURES` at a directory) and these tests will exercise every one of
+//! them. With no fixtures present they pass without asserting anything, and say
+//! so.
+
+use std::path::{Path, PathBuf};
+
+use iwork::{iwa, Document, Kind, Package};
+
+fn fixtures() -> Vec<PathBuf> {
+    let dir = std::env::var("IWORK_FIXTURES")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures"));
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut found: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| {
+            matches!(
+                p.extension().and_then(|e| e.to_str()),
+                Some("pages") | Some("numbers") | Some("key")
+            )
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+/// Print once per test run rather than failing, so a fresh clone is green.
+fn require_fixtures() -> Vec<PathBuf> {
+    let found = fixtures();
+    if found.is_empty() {
+        eprintln!("no fixtures in tests/fixtures — skipping (see tests/fixtures/README.md)");
+    }
+    found
+}
+
+#[test]
+fn opens_and_identifies_every_fixture() {
+    for path in require_fixtures() {
+        let doc = Document::open(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        assert_ne!(
+            doc.kind(),
+            Kind::Unknown,
+            "{}: could not identify the document",
+            path.display()
+        );
+        assert!(
+            doc.objects().count() > 0,
+            "{}: no objects decoded",
+            path.display()
+        );
+        assert!(
+            doc.package().contains("Metadata/DocumentIdentifier"),
+            "{}: not an iWork package",
+            path.display()
+        );
+    }
+}
+
+/// Every entry in an iWork package is stored, never deflated, and this crate
+/// must keep it that way — the media is meant to be mappable in place.
+#[test]
+fn writes_only_stored_entries() {
+    for path in require_fixtures() {
+        let doc = Document::open(&path).unwrap();
+        let out = std::env::temp_dir().join(format!(
+            "iwork-stored-{}",
+            path.file_name().unwrap().to_string_lossy()
+        ));
+        doc.save(&out).unwrap();
+
+        let bytes = std::fs::read(&out).unwrap();
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        for i in 0..zip.len() {
+            let entry = zip.by_index(i).unwrap();
+            assert_eq!(
+                entry.compression(),
+                zip::CompressionMethod::Stored,
+                "{}: {} was compressed",
+                path.display(),
+                entry.name()
+            );
+        }
+        let _ = std::fs::remove_file(&out);
+    }
+}
+
+/// Decoding and re-encoding must reproduce each object stream byte for byte.
+/// Only the Snappy block boundaries may move, which no reader can observe.
+#[test]
+fn object_streams_survive_a_roundtrip() {
+    for path in require_fixtures() {
+        let original = Package::read(&path).unwrap();
+        let doc = Document::open(&path).unwrap();
+        let out = std::env::temp_dir().join(format!(
+            "iwork-roundtrip-{}",
+            path.file_name().unwrap().to_string_lossy()
+        ));
+        doc.save(&out).unwrap();
+        let rewritten = Package::read(&out).unwrap();
+
+        assert_eq!(
+            original.names().collect::<Vec<_>>(),
+            rewritten.names().collect::<Vec<_>>(),
+            "{}: entry names or order changed",
+            path.display()
+        );
+
+        for name in original.names() {
+            let before = original.get(name).unwrap();
+            let after = rewritten.get(name).unwrap();
+            if name.ends_with(".iwa") {
+                assert_eq!(
+                    iwa::decompress(before).unwrap(),
+                    iwa::decompress(after).unwrap(),
+                    "{}: {name} changed on re-encode",
+                    path.display()
+                );
+            } else {
+                assert_eq!(before, after, "{}: {name} changed", path.display());
+            }
+        }
+        let _ = std::fs::remove_file(&out);
+    }
+}
+
+/// Editing one storage must leave every other object in the document alone.
+#[test]
+fn editing_text_touches_only_its_own_stream() {
+    for path in require_fixtures() {
+        let doc = Document::open(&path).unwrap();
+        let Some(target) = doc.text_storages().into_iter().next() else {
+            continue; // a document with no text is fine, just not useful here
+        };
+
+        let mut edited = Document::open(&path).unwrap();
+        let replacement = "Ersetzt durch iwork-rs — 🎬";
+        edited.set_text(target.identifier, replacement).unwrap();
+        let out = std::env::temp_dir().join(format!(
+            "iwork-edit-{}",
+            path.file_name().unwrap().to_string_lossy()
+        ));
+        edited.save(&out).unwrap();
+
+        let reopened = Document::open(&out).unwrap();
+        let found = reopened
+            .text_storages()
+            .into_iter()
+            .find(|s| s.identifier == target.identifier)
+            .expect("edited storage is still there");
+        assert_eq!(found.text, replacement, "{}", path.display());
+
+        assert_eq!(
+            reopened.objects().count(),
+            doc.objects().count(),
+            "{}: object count changed",
+            path.display()
+        );
+
+        // Only the stream holding the edited storage may differ.
+        let before = Package::read(&path).unwrap();
+        let after = Package::read(&out).unwrap();
+        for name in before.names().filter(|n| n.ends_with(".iwa")) {
+            if name == target.stream {
+                continue;
+            }
+            assert_eq!(
+                iwa::decompress(before.get(name).unwrap()).unwrap(),
+                iwa::decompress(after.get(name).unwrap()).unwrap(),
+                "{}: {name} changed while editing {}",
+                path.display(),
+                target.stream
+            );
+        }
+        let _ = std::fs::remove_file(&out);
+    }
+}
+
+/// Components must resolve to entries that actually exist. Numbers is the real
+/// test here: it spreads ~100 components over `Index/Tables/`.
+#[test]
+fn components_resolve_to_real_streams() {
+    for path in require_fixtures() {
+        let doc = Document::open(&path).unwrap();
+        for component in doc.components() {
+            let name = component.stream_name();
+            assert!(
+                doc.package().contains(&name),
+                "{}: component {} ({}) points at missing {name}",
+                path.display(),
+                component.identifier,
+                component.preferred_name
+            );
+        }
+    }
+}
+
+/// Media registered in `TSP.PackageMetadata` must be present, except for theme
+/// assets, which are referenced by path and deliberately not stored.
+#[test]
+fn registered_media_is_present() {
+    for path in require_fixtures() {
+        let doc = Document::open(&path).unwrap();
+        for data in doc.data_files() {
+            let Some(entry) = data.entry_name() else {
+                assert!(
+                    !data.asset_path.is_empty(),
+                    "{}: media {} is neither stored nor a theme asset",
+                    path.display(),
+                    data.identifier
+                );
+                continue;
+            };
+            assert!(
+                doc.package().contains(&entry),
+                "{}: media {} points at missing {entry}",
+                path.display(),
+                data.identifier
+            );
+        }
+    }
+}
