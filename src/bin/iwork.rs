@@ -23,6 +23,9 @@ tables
   iwork tables    <file>                   every table: size, headers, geometry
   iwork cells     <file> <table> [--raw]   every cell of one table, with type and format
   iwork csv       <file> <table>           one table as CSV
+  iwork organise  <file> [<table>]         sort rules, filters, categories,
+                                           pivots, conditional highlighting,
+                                           custom cell formats
 
 A <table> is an object id, as printed by `iwork tables`, or a table name.
 
@@ -92,6 +95,8 @@ fn main() -> ExitCode {
         ["cells", file, table] => cells(file, table, false),
         ["cells", file, table, "--raw"] => cells(file, table, true),
         ["csv", file, table] => csv(file, table),
+        ["organise", file] => organise(file, None),
+        ["organise", file, table] => organise(file, Some(table)),
         ["properties"] => properties(),
         ["set-color", file, id, r, g, b, out] => set_color(file, id, r, g, b, out),
         ["paragraphs", file, storage] => {
@@ -258,20 +263,8 @@ fn tables(path: &str) -> Result<(), Error> {
             },
             table.footer_rows
         );
-        let hidden_rows: Vec<String> = table
-            .row_extents
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| e.hidden())
-            .map(|(i, e)| format!("{i}(state {})", e.hiding_state))
-            .collect();
-        let hidden_columns: Vec<String> = table
-            .column_extents
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| e.hidden())
-            .map(|(i, e)| format!("{i}(state {})", e.hiding_state))
-            .collect();
+        let hidden_rows = hidden_list(&table.row_extents);
+        let hidden_columns = hidden_list(&table.column_extents);
         println!(
             "  hidden: {} row(s) ({} by the user, {} by a filter), {} column(s) ({} by the user)",
             table.hidden_rows,
@@ -313,11 +306,310 @@ fn tables(path: &str) -> Result<(), Error> {
                 merge.columns
             );
         }
+        organisation_summary(table, "  ");
         for problem in &table.problems {
             println!("  problem: {problem}");
         }
     }
     Ok(())
+}
+
+/// Hidden rows or columns, each with the reason the model gives.
+fn hidden_list(extents: &[iwork::table::Extent]) -> Vec<String> {
+    extents
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.hidden())
+        .map(|(i, e)| format!("{i} ({})", e.hiding().as_str()))
+        .collect()
+}
+
+/// The one-line-per-feature view `iwork tables` shows; `iwork organise` prints
+/// the same things in full.
+fn organisation_summary(table: &iwork::Table, indent: &str) {
+    if !table.sort_rules.is_empty() {
+        let rules: Vec<String> = table
+            .sort_rules
+            .iter()
+            .map(|rule| {
+                format!(
+                    "{} {}",
+                    column_name(rule.column),
+                    if rule.descending { "desc" } else { "asc" }
+                )
+            })
+            .collect();
+        println!("{indent}sorted by: {}", rules.join(", "));
+    }
+    if let Some(filter) = &table.filter {
+        println!(
+            "{indent}filter: {} rule(s), match {}, {}",
+            filter.rules.len(),
+            if filter.match_any { "any" } else { "all" },
+            if filter.enabled { "on" } else { "off" }
+        );
+    }
+    for category in &table.categories {
+        let columns: Vec<String> = category
+            .columns
+            .iter()
+            .map(|c| column_name(c.column.unwrap_or(usize::MAX)))
+            .collect();
+        println!(
+            "{indent}category: by {}, {} group(s), {} summary assignment(s), {}",
+            columns.join(" then "),
+            category.groups().len(),
+            category.summaries.len(),
+            if category.enabled { "on" } else { "off" }
+        );
+    }
+    if let Some(pivot) = &table.pivot {
+        println!(
+            "{indent}pivot of {:?}: {} row field(s), {} column field(s), {} value(s){}",
+            pivot.source_name,
+            pivot.rows.len(),
+            pivot.columns.len(),
+            pivot.values.len(),
+            if pivot.empty { ", empty" } else { "" }
+        );
+    }
+    let conditional: usize = table
+        .conditional_styles
+        .iter()
+        .map(|set| set.rules.len())
+        .sum();
+    if conditional > 0 {
+        println!(
+            "{indent}conditional highlighting: {conditional} rule(s) in {} set(s)",
+            table.conditional_styles.len()
+        );
+    }
+}
+
+/// A column index as the letter the app shows, or `?` when a UUID did not
+/// resolve to one.
+fn column_name(column: usize) -> String {
+    if column == usize::MAX {
+        return "?".to_string();
+    }
+    let mut name = String::new();
+    let mut n = column + 1;
+    while n > 0 {
+        let digit = (n - 1) % 26;
+        name.insert(0, (b'A' + digit as u8) as char);
+        n = (n - 1) / 26;
+    }
+    name
+}
+
+/// Everything a table is organised by, in full.
+fn organise(path: &str, wanted: Option<&str>) -> Result<(), Error> {
+    let doc = Document::open(path)?;
+    let formats = doc.custom_formats();
+    if !formats.is_empty() {
+        println!("== custom cell formats ({}) ==", formats.len());
+        for format in &formats {
+            println!(
+                "  {:<24} format {} {:?}{}",
+                format.name,
+                format.format_type,
+                format.format_string,
+                match format.conditions {
+                    0 => String::new(),
+                    n => format!(", {n} conditional sub-rule(s)"),
+                }
+            );
+        }
+        println!();
+    }
+
+    let tables: Vec<iwork::Table> = match wanted {
+        Some(name) => vec![doc
+            .table(name)
+            .ok_or_else(|| Error::Format(format!("no table called '{name}' in {path}")))?],
+        None => doc.tables(),
+    };
+    if tables.is_empty() {
+        println!("no tables");
+        return Ok(());
+    }
+
+    for table in &tables {
+        println!("== table {} {} ==", table.identifier, table.name);
+        let hidden_rows = hidden_list(&table.row_extents);
+        let hidden_columns = hidden_list(&table.column_extents);
+        if !hidden_rows.is_empty() {
+            println!("  hidden rows: {}", hidden_rows.join(", "));
+        }
+        if !hidden_columns.is_empty() {
+            println!("  hidden columns: {}", hidden_columns.join(", "));
+        }
+        if !table.row_states.user_hidden.is_empty() || !table.row_states.filtered.is_empty() {
+            println!(
+                "  row hidden-state extent: {} user-hidden, {} filtered",
+                table.row_states.user_hidden.len(),
+                table.row_states.filtered.len()
+            );
+        }
+        if !table.column_states.user_hidden.is_empty() || !table.column_states.filtered.is_empty() {
+            println!(
+                "  column hidden-state extent: user-hidden {:?}, filtered {:?}",
+                table.column_states.user_hidden, table.column_states.filtered
+            );
+        }
+        for rule in &table.sort_rules {
+            println!(
+                "  sort: column {} {}",
+                column_name(rule.column),
+                if rule.descending {
+                    "descending"
+                } else {
+                    "ascending"
+                }
+            );
+        }
+        if let Some(filter) = &table.filter {
+            println!(
+                "  filter set {} — match {}, {}",
+                filter.identifier,
+                if filter.match_any { "any" } else { "all" },
+                if filter.enabled {
+                    "filters on"
+                } else {
+                    "filters off"
+                }
+            );
+            for (at, rule) in filter.rules.iter().enumerate() {
+                println!(
+                    "    rule {at}: column {}, {}, {}",
+                    rule.column.map(column_name).unwrap_or("?".into()),
+                    if rule.enabled { "enabled" } else { "disabled" },
+                    describe(&rule.predicate)
+                );
+            }
+        }
+        for category in &table.categories {
+            println!(
+                "  category {} — {}",
+                category.identifier,
+                if category.enabled { "on" } else { "off" }
+            );
+            for column in &category.columns {
+                println!(
+                    "    grouped by column {} (grouping type {}{})",
+                    column.column.map(column_name).unwrap_or("?".into()),
+                    column.grouping_type,
+                    if column.has_functor { ", bucketed" } else { "" }
+                );
+            }
+            for summary in &category.summaries {
+                println!(
+                    "    summary: column {} at level {} = {}",
+                    summary.column.map(column_name).unwrap_or("?".into()),
+                    summary.level,
+                    summary.function
+                );
+            }
+            print_groups(category, 0);
+        }
+        if let Some(pivot) = &table.pivot {
+            println!(
+                "  pivot {} of table {:?}{}",
+                pivot.identifier,
+                pivot.source_name,
+                if pivot.empty { " — empty" } else { "" }
+            );
+            for (label, fields) in [("rows", &pivot.rows), ("columns", &pivot.columns)] {
+                for field in fields {
+                    println!(
+                        "    {label}: column {} (grouping type {}{})",
+                        field.column.map(column_name).unwrap_or("?".into()),
+                        field.grouping_type,
+                        if field.has_functor { ", bucketed" } else { "" }
+                    );
+                }
+            }
+            for value in &pivot.values {
+                println!(
+                    "    value: column {} = {}{}",
+                    value.column.map(column_name).unwrap_or("?".into()),
+                    value.function,
+                    match value.show_as {
+                        0 => String::new(),
+                        n => format!(" shown as {n}"),
+                    }
+                );
+            }
+            println!(
+                "    grand totals: rows {}, columns {}",
+                if pivot.hide_grand_total_rows {
+                    "hidden"
+                } else {
+                    "shown"
+                },
+                if pivot.hide_grand_total_columns {
+                    "hidden"
+                } else {
+                    "shown"
+                }
+            );
+        }
+        for set in &table.conditional_styles {
+            println!(
+                "  conditional highlighting set {} (key {})",
+                set.identifier,
+                set.key.map(|k| k.to_string()).unwrap_or("—".into())
+            );
+            for rule in &set.rules {
+                println!(
+                    "    {} -> cell style {:?}, text style {:?}",
+                    describe(&rule.predicate),
+                    rule.cell_style,
+                    rule.text_style
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn print_groups(category: &iwork::table::Category, _depth: usize) {
+    let Some(root) = &category.root else { return };
+    fn walk(group: &iwork::table::Group, depth: usize) {
+        for child in &group.children {
+            println!(
+                "    {}group {:?}: {} row(s){}",
+                "  ".repeat(depth),
+                child
+                    .value
+                    .as_ref()
+                    .map(|v| v.to_text())
+                    .unwrap_or_default(),
+                child.rows.len(),
+                if child.collapsed { ", collapsed" } else { "" }
+            );
+            walk(child, depth + 1);
+        }
+    }
+    walk(root, 0);
+}
+
+/// A predicate in one line: its code, and whatever it compares against.
+fn describe(predicate: &iwork::table::Predicate) -> String {
+    let mut text = format!("predicate {}", predicate.kind);
+    if predicate.qualifiers != (0, 0) {
+        text.push_str(&format!(" {:?}", predicate.qualifiers));
+    }
+    for value in &predicate.values {
+        text.push_str(&format!(" {:?}", value.to_text()));
+    }
+    if predicate.has_formula {
+        text.push_str(" (against a formula)");
+    }
+    if predicate.pre_pivot {
+        text.push_str(" [pre-pivot form]");
+    }
+    text
 }
 
 fn find_table(path: &str, wanted: &str) -> Result<iwork::Table, Error> {
