@@ -39,10 +39,6 @@ pub const TYPE_CHARACTER_STYLE: u32 = 2022;
 /// `TSWP.ListStyleArchive`.
 pub const TYPE_LIST_STYLE: u32 = 2023;
 
-/// Message types in the TSS range hold the stylesheets that list styles by
-/// reference. Registering a new style means appearing in one of these.
-pub const STYLESHEET_TYPES: Range<u32> = 5000..6000;
-
 /// How far to descend into nested messages before giving up.
 ///
 /// Style archives nest a handful of levels; anything deeper is either not a
@@ -94,16 +90,29 @@ impl StyleKind {
     }
 }
 
+/// The style's name as the app shows it, e.g. `"Titel"`.
+///
+/// Absent on *variation* styles — the anonymous ones iWork makes when text is
+/// formatted directly rather than by picking a named style. Those carry
+/// [`PARENT`] instead and inherit everything they do not override.
+pub const NAME: &[u32] = &[1, 1];
+/// The style's internal identifier, e.g. `"text-1-paragraphstyle-Title"`. This
+/// is the key the stylesheet's keyed entries use.
+pub const STYLE_IDENTIFIER: &[u32] = &[1, 2];
+/// Reference to the style this one inherits from.
+pub const PARENT: &[u32] = &[1, 3, 1];
+/// Reference to the stylesheet the style belongs to.
+pub const STYLESHEET: &[u32] = &[1, 5, 1];
+
 /// A string carried somewhere inside a style archive, with the field path it
 /// was found at.
 ///
-/// Style archives keep their human-readable name and their internal style
-/// identifier as plain strings, and the name comes first in every layout prior
-/// art describes. That ordering is *inferred*, not proven here — no fixture was
-/// available to check it against — so [`TextStyle::name`] is advisory, and
-/// renaming writes back to exactly the path the string was read from rather
-/// than to an assumed field number. If the first label turns out to be the
-/// wrong one for some document, the rest are right there in `labels`.
+/// This is the exploratory view — every readable string in the archive, wherever
+/// it sits. It is how [`NAME`] was pinned down, and it is worth keeping around:
+/// a style archive holds several strings that are easy to confuse, and taking
+/// simply the first one is wrong. An unnamed variation style has no field 1.1
+/// at all, so its first string is the *font name* in the property bag, and
+/// treating that as the style's name would rename the font.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Label {
     /// Field numbers from the root of the archive down to the string.
@@ -120,21 +129,115 @@ pub struct TextStyle {
     /// Stream the object lives in.
     pub stream: String,
     pub kind: StyleKind,
-    /// Strings the archive carries, in the order they appear.
+    /// Name from [`NAME`]. `None` on a variation style.
+    pub name: Option<String>,
+    /// Internal identifier from [`STYLE_IDENTIFIER`].
+    pub style_identifier: Option<String>,
+    /// Style this one inherits from, from [`PARENT`].
+    ///
+    /// Worth knowing before editing: changing a named style does nothing to
+    /// text whose runs point at a variation that overrides the same field.
+    pub parent: Option<u64>,
+    /// Every readable string the archive carries, with its path.
     pub labels: Vec<Label>,
     /// The style archive exactly as it sits in the document.
     pub archive: Message,
 }
 
 impl TextStyle {
-    /// The style's name, as far as it can be told. See [`Label`].
-    pub fn name(&self) -> Option<&str> {
-        self.labels.first().map(|l| l.text.as_str())
+    /// Name if it has one, else the internal identifier, else the first string
+    /// in the archive — for display only, never for editing.
+    pub fn label(&self) -> Option<&str> {
+        self.name
+            .as_deref()
+            .or(self.style_identifier.as_deref())
+            .or_else(|| self.labels.first().map(|l| l.text.as_str()))
     }
+}
 
-    /// Field path [`crate::Document::rename_text_style`] would write to.
-    pub fn name_path(&self) -> Option<&[u32]> {
-        self.labels.first().map(|l| l.path.as_slice())
+/// Field paths inside a style's property bag, derived by comparing styles whose
+/// names say what they should look like.
+///
+/// This is the one part of the module that claims to know what a field *means*,
+/// and each claim below was checked the way `iwork style` is meant to be used:
+/// against 654 styles in five real documents, correlating each field with names
+/// the app itself assigned. What that method can establish is written down with
+/// each entry; where it establishes less, the entry says so.
+///
+/// None of this is needed to use the crate — every one of these is just a path
+/// for [`crate::Document::set_text_style_property`], and an unlisted field is
+/// reached exactly the same way. They are here because looking them up once,
+/// carefully, beats every caller guessing.
+pub mod property {
+    /// Bold **toggle**, `0` or `1` — not "is this text bold".
+    ///
+    /// Independent of the font's own weight: `Titel` is bold in all four Pages
+    /// documents, and the table-label styles set `HelveticaNeue-Bold` with this
+    /// left at `0`. Read it as the switch the app's B button flips.
+    pub const BOLD: &[u32] = &[11, 1];
+    /// Italic toggle, `0` or `1`. Same character: the only styles setting it in
+    /// the samples are the two `Zitat` styles, whose font is
+    /// `AvenirNext-Medium` — an upright cut — so this is a synthetic slant, not
+    /// a font choice.
+    pub const ITALIC: &[u32] = &[11, 2];
+    /// Font size in points, `f32`.
+    ///
+    /// The clearest of the lot: across the four Pages documents `Titel` is
+    /// 24/24/30/30, `Zwischenüberschrift 1` is 16, and `Text` is 11/11/11/12.
+    pub const FONT_SIZE: &[u32] = &[11, 3];
+    /// PostScript font name, e.g. `"AvenirNext-DemiBold"`. Self-evident from
+    /// the values.
+    pub const FONT_NAME: &[u32] = &[11, 5];
+    /// Font colour, as a message of [`RED`], [`GREEN`], [`BLUE`], [`ALPHA`].
+    ///
+    /// **The weakest claim here.** The shape is certain — four floats in
+    /// `0.0..=1.0` with alpha `1.0` in all 530 samples, and the same shape
+    /// appears at other paths in the same archive. That it is the *font* colour
+    /// rather than some other colour is inference: it is the first such message
+    /// in the property bag and is present on nearly every style. Every sample
+    /// is black, so the samples cannot separate it from another colour that
+    /// happens to be black everywhere too.
+    pub const FONT_COLOR: &[u32] = &[11, 7];
+    pub const RED: &[u32] = &[11, 7, 3];
+    pub const GREEN: &[u32] = &[11, 7, 4];
+    pub const BLUE: &[u32] = &[11, 7, 5];
+    pub const ALPHA: &[u32] = &[11, 7, 6];
+
+    /// The paths above by name, for command lines and config.
+    pub const BY_NAME: &[(&str, &[u32])] = &[
+        ("bold", BOLD),
+        ("italic", ITALIC),
+        ("font-size", FONT_SIZE),
+        ("font-name", FONT_NAME),
+        ("red", RED),
+        ("green", GREEN),
+        ("blue", BLUE),
+        ("alpha", ALPHA),
+        ("name", super::NAME),
+        ("style-identifier", super::STYLE_IDENTIFIER),
+    ];
+
+    pub fn path(name: &str) -> Option<&'static [u32]> {
+        BY_NAME
+            .iter()
+            .find(|(known, _)| *known == name)
+            .map(|(_, path)| *path)
+    }
+}
+
+/// Read a string field at `path`, if it holds readable text.
+pub fn string_at(archive: &Message, path: &[u32]) -> Option<String> {
+    match get_path(archive, path)? {
+        Value::Bytes(raw) => readable(&raw),
+        _ => None,
+    }
+}
+
+/// Read a reference field at `path`, if it holds one.
+pub fn reference_at(archive: &Message, path: &[u32]) -> Option<u64> {
+    match get_path(archive, path)? {
+        Value::Varint(identifier) => Some(identifier),
+        _ => None,
     }
 }
 
@@ -523,16 +626,27 @@ pub fn repoint(table: &mut Message, from: u64, to: Option<u64>) -> usize {
 
 /// Clone every top-level bare reference to `old` as a reference to `new`.
 ///
-/// This is how a duplicated style gets listed wherever its template was: a
-/// stylesheet lists its styles as repeated `TSP.Reference` fields, so the entry
-/// to add is exactly the entry that is already there with one number changed —
-/// no knowledge of the stylesheet's schema required, and nothing to get wrong.
+/// This is how a duplicated style gets listed wherever its template was: the
+/// document stylesheet lists its styles as repeated `TSP.Reference` fields, so
+/// the entry to add is exactly the entry already there with one number changed
+/// — no knowledge of the stylesheet's schema required, and nothing to get
+/// wrong.
 ///
-/// References that are *not* bare — a keyed entry mapping a well-known
-/// identifier like `"body"` to a style, say — are deliberately left alone.
-/// Duplicating one would either collide on the key or invent a new one, and
-/// a second style claiming to be the document's body style is worse than a
-/// style that is merely listed.
+/// **A top-level bare reference is the signature to match on, not a message
+/// type.** The document stylesheet in the samples is type `401`, in the TSP/TSK
+/// range rather than the TSS range its name would suggest, and there is no way
+/// to know that without a document to look at. There is no need to: an
+/// attribute-table entry is `{1: index, 2: reference}` and a style's parent
+/// link is nested, so neither is ever a bare reference at the top level of an
+/// object. Matching the shape finds the list wherever it lives.
+///
+/// References that are *not* bare are deliberately left alone. The samples
+/// carry two other kinds beside the plain list: keyed entries
+/// `{1: "text-1-paragraphstyle-Title", 2: reference}` mapping a well-known
+/// identifier to a style, and grouping entries `{1: reference, 2: reference…}`
+/// tying a style to its variations. Duplicating a keyed entry would either
+/// collide on the key or invent one, and a second style claiming to be the
+/// document's title style is worse than a style that is merely listed.
 pub fn clone_registrations(stylesheet: &mut Message, old: u64, new: u64) -> usize {
     let mut additions = Vec::new();
     for field in &stylesheet.fields {

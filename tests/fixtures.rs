@@ -293,7 +293,7 @@ fn creating_a_style_adds_one_object_and_nothing_else() {
         );
         let new = reopened.text_style(created.identifier).unwrap();
         assert_eq!(new.kind, template.kind, "{}", path.display());
-        assert_eq!(new.name(), Some("iwork-rs"), "{}", path.display());
+        assert_eq!(new.name.as_deref(), Some("iwork-rs"), "{}", path.display());
         assert_eq!(
             reopened.last_object_identifier(),
             Some(created.identifier),

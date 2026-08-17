@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::process::ExitCode;
 
 use iwork::pb::{self, Message, Value};
-use iwork::{registry, Document, Error};
+use iwork::{registry, style, Document, Error};
 
 const USAGE: &str = "\
 iwork — inspect and edit Apple iWork documents (.pages, .numbers, .key)
@@ -28,9 +28,13 @@ text styles
   iwork paragraphs   <file> <storage>                  paragraph ranges, for apply-style
 
 A <path> is a dotted list of protobuf field numbers, as printed by `iwork
-style`. A <value> is varint:N, f32:N, f64:N, str:TEXT, hex:BYTES, or empty to
-remove the field. `name=TEXT` renames the style. Ranges are half-open and
-counted in UTF-16 code units, the unit iWork indexes text in.
+style`, or one of the derived names: bold, italic, font-size, font-name, red,
+green, blue, alpha, name, style-identifier. A <value> is varint:N, f32:N,
+f64:N, str:TEXT, hex:BYTES, or empty to remove the field. Ranges are half-open
+and counted in UTF-16 code units, the unit iWork indexes text in.
+
+  iwork set-style Report.pages 3801 font-size=f32:18 out.pages
+  iwork set-style Report.pages 3801 11.3=f32:18      out.pages   # the same field
 ";
 
 fn main() -> ExitCode {
@@ -223,7 +227,7 @@ fn styles(path: &str) -> Result<(), Error> {
             "  id={:<8} {:<10} {:<34} {:>4} run(s)  {}",
             style.identifier,
             style.kind.as_str(),
-            style.name().unwrap_or("(no name found)"),
+            style.label().unwrap_or("(unnamed variation)"),
             doc.text_style_usage(style.identifier).len(),
             style.stream,
         );
@@ -242,9 +246,21 @@ fn show_style(path: &str, id: u64) -> Result<(), Error> {
         registry::describe(message_type),
         style.stream
     );
-    match (style.name(), style.name_path()) {
-        (Some(name), Some(path)) => println!("name: {name:?} at field {}", dotted(path)),
-        _ => println!("name: none found"),
+    match &style.name {
+        Some(name) => println!("name: {name:?}"),
+        None => println!("name: none — this is a variation style"),
+    }
+    if let Some(identifier) = &style.style_identifier {
+        println!("style identifier: {identifier:?}");
+    }
+    if let Some(parent) = style.parent {
+        let inherited = doc
+            .text_style(parent)
+            .and_then(|s| s.label().map(str::to_string));
+        println!(
+            "inherits from: {parent} {}",
+            inherited.unwrap_or_else(|| "(unnamed)".into())
+        );
     }
 
     println!("\n== fields ==");
@@ -396,21 +412,24 @@ fn identifier(text: &str) -> Result<u64, Error> {
         .map_err(|_| Error::Format(format!("'{text}' is not an object identifier")))
 }
 
-fn dotted(path: &[u32]) -> String {
-    path.iter()
-        .map(u32::to_string)
-        .collect::<Vec<_>>()
-        .join(".")
-}
-
+/// A dotted path of field numbers, or one of the names in
+/// [`iwork::style::property`].
 fn parse_path(text: &str) -> Result<Vec<u32>, Error> {
     if text.is_empty() {
         return Err(Error::Format("empty field path".into()));
     }
+    if let Some(known) = style::property::path(text) {
+        return Ok(known.to_vec());
+    }
     text.split('.')
         .map(|part| {
-            part.parse()
-                .map_err(|_| Error::Format(format!("'{part}' is not a field number")))
+            part.parse().map_err(|_| {
+                let names: Vec<&str> = style::property::BY_NAME.iter().map(|(n, _)| *n).collect();
+                Error::Format(format!(
+                    "'{part}' is not a field number; known names are {}",
+                    names.join(", ")
+                ))
+            })
         })
         .collect()
 }

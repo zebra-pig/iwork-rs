@@ -296,6 +296,9 @@ impl Document {
                 identifier: object.identifier,
                 stream: stream.to_string(),
                 kind,
+                name: style::string_at(&archive, style::NAME),
+                style_identifier: style::string_at(&archive, style::STYLE_IDENTIFIER),
+                parent: style::reference_at(&archive, style::PARENT),
                 labels: style::labels(&archive),
                 archive,
             });
@@ -369,14 +372,12 @@ impl Document {
         let identifier = self.next_object_identifier();
 
         let mut archive = source.archive.clone();
-        if let Some(path) = source.name_path() {
-            style::set_path(
-                &mut archive,
-                path,
-                Some(Value::Bytes(name.as_bytes().to_vec())),
-            )
-            .map_err(|e| Error::Format(format!("style {template}: {e}")))?;
-        }
+        style::set_path(
+            &mut archive,
+            style::NAME,
+            Some(Value::Bytes(name.as_bytes().to_vec())),
+        )
+        .map_err(|e| Error::Format(format!("style {template}: {e}")))?;
 
         // Bump the high-water mark first: if there is no package metadata to
         // bump, no object is added at all.
@@ -390,15 +391,18 @@ impl Document {
             .expect("stream came from the document")
             .insert(index + 1, object);
 
+        // Any object listing the template by plain reference gets the copy
+        // listed beside it. Which object that is follows from the shape, not
+        // from a message type — see `style::clone_registrations`.
         let mut registrations_cloned = 0;
         for objects in self.streams.values_mut() {
             for object in objects.iter_mut() {
+                if object.identifier == identifier {
+                    continue;
+                }
                 let Some(message) = object.messages.first_mut() else {
                     continue;
                 };
-                if !style::STYLESHEET_TYPES.contains(&message.message_type) {
-                    continue;
-                }
                 let Ok(mut sheet) = Message::decode(&message.payload) else {
                     continue;
                 };
@@ -418,25 +422,16 @@ impl Document {
         })
     }
 
-    /// Rewrite a style's name, in the field the name was read from.
+    /// Rewrite a style's name.
     ///
-    /// Fails when the archive carries no readable string to rewrite — better
-    /// than picking a field number and hoping.
+    /// Naming an unnamed variation style is allowed and gives it a name; the
+    /// field is created if it is not there.
     pub fn rename_text_style(&mut self, identifier: u64, name: &str) -> Result<(), Error> {
-        let style = self
-            .text_style(identifier)
-            .ok_or(Error::NoSuchStyle(identifier))?;
-        let path = style.name_path().ok_or_else(|| {
-            Error::Format(format!("style {identifier} carries no name to rewrite"))
-        })?;
-        let mut archive = style.archive.clone();
-        style::set_path(
-            &mut archive,
-            path,
+        self.set_text_style_property(
+            identifier,
+            style::NAME,
             Some(Value::Bytes(name.as_bytes().to_vec())),
         )
-        .map_err(|e| Error::Format(format!("style {identifier}: {e}")))?;
-        self.set_archive(identifier, &archive)
     }
 
     /// Edit a style archive directly.
@@ -552,11 +547,12 @@ impl Document {
                     Some(_) => deletion.runs_repointed += touched,
                     None => deletion.runs_dropped += touched,
                 }
-            } else if style::STYLESHEET_TYPES.contains(&message.message_type) {
-                let removed = style::remove_registrations(&mut edited, identifier);
-                deletion.registrations_removed += removed;
-                touched += removed;
             }
+            // Unlisting is by shape rather than by message type, for the same
+            // reason listing is — see `style::clone_registrations`.
+            let removed = style::remove_registrations(&mut edited, identifier);
+            deletion.registrations_removed += removed;
+            touched += removed;
 
             if style::count_references(&edited, identifier) > 0 {
                 still_referenced.push(object.identifier);

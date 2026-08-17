@@ -166,7 +166,7 @@ fn runs_of(doc: &Document, table: u32) -> Vec<(u64, Option<u64>)> {
 fn names(doc: &Document) -> Vec<(u64, String)> {
     doc.text_styles()
         .into_iter()
-        .map(|s| (s.identifier, s.name().unwrap_or("").to_string()))
+        .map(|s| (s.identifier, s.name.clone().unwrap_or_default()))
         .collect()
 }
 
@@ -189,8 +189,12 @@ fn reads_every_style_with_its_kind_and_name() {
     assert_eq!(heading.kind.attribute_table(), 8);
     assert_eq!(heading.stream, "Index/Document.iwa");
     // The name is found at a path, and the internal identifier after it.
-    assert_eq!(heading.name_path(), Some([1, 1].as_slice()));
-    assert_eq!(heading.labels[1].text, "heading-1");
+    assert_eq!(heading.name.as_deref(), Some("Heading"));
+    assert_eq!(heading.style_identifier.as_deref(), Some("heading-1"));
+    assert_eq!(
+        heading.labels[1].text, "heading-1",
+        "labels still list every string"
+    );
     assert_eq!(doc.text_style(9999).map(|s| s.identifier), None);
 }
 
@@ -243,7 +247,7 @@ fn creating_copies_a_style_and_allocates_an_identifier_above_the_high_water_mark
 
     let doc = reopen(&doc, "create");
     let new = doc.text_style(created.identifier).unwrap();
-    assert_eq!(new.name(), Some("Kicker"));
+    assert_eq!(new.name.as_deref(), Some("Kicker"));
     assert_eq!(new.kind, StyleKind::Character);
     // Everything but the name comes from the template.
     let template = doc.text_style(BODY).unwrap();
@@ -251,7 +255,11 @@ fn creating_copies_a_style_and_allocates_an_identifier_above_the_high_water_mark
         style::get_path(&new.archive, &[11, 12]),
         style::get_path(&template.archive, &[11, 12])
     );
-    assert_eq!(new.labels[1].text, "body", "the rest of the copy is intact");
+    assert_eq!(
+        new.style_identifier.as_deref(),
+        Some("body"),
+        "the rest of the copy is intact"
+    );
 
     // The high-water mark moved, so iWork will not reissue the identifier.
     assert_eq!(doc.last_object_identifier(), Some(created.identifier));
@@ -278,8 +286,8 @@ fn creating_twice_does_not_reuse_an_identifier() {
     assert_ne!(first, second);
 
     let doc = reopen(&doc, "create-twice");
-    assert_eq!(doc.text_style(first).unwrap().name(), Some("One"));
-    assert_eq!(doc.text_style(second).unwrap().name(), Some("Two"));
+    assert_eq!(doc.text_style(first).unwrap().name.as_deref(), Some("One"));
+    assert_eq!(doc.text_style(second).unwrap().name.as_deref(), Some("Two"));
     assert_eq!(doc.text_styles().len(), 5);
 }
 
@@ -303,9 +311,10 @@ fn renaming_writes_to_the_field_the_name_came_from() {
 
     let doc = reopen(&doc, "rename");
     let heading = doc.text_style(HEADING).unwrap();
-    assert_eq!(heading.name(), Some("Grosse Uberschrift"));
+    assert_eq!(heading.name.as_deref(), Some("Grosse Uberschrift"));
     assert_eq!(
-        heading.labels[1].text, "heading-1",
+        heading.style_identifier.as_deref(),
+        Some("heading-1"),
         "the internal identifier is left alone"
     );
 }
@@ -330,7 +339,7 @@ fn setting_and_clearing_a_property_by_path() {
         style::get_path(&body.archive, &[11, 1]),
         Some(Value::Varint(1))
     );
-    assert_eq!(body.name(), Some("Body"), "the name survived");
+    assert_eq!(body.name.as_deref(), Some("Body"), "the name survived");
 
     let emphasis = doc.text_style(EMPHASIS).unwrap();
     assert_eq!(style::get_path(&emphasis.archive, &[11, 12]), None);

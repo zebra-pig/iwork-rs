@@ -25,9 +25,14 @@
 //!
 //! // Text styles are shared objects a range of text points at ([`style`]).
 //! for style in doc.text_styles() {
-//!     println!("{} {} {:?}", style.identifier, style.kind.as_str(), style.name());
+//!     println!("{} {} {:?}", style.identifier, style.kind.as_str(), style.name);
 //! }
 //! let kicker = doc.create_text_style(3712, "Kicker")?;
+//! doc.set_text_style_property(
+//!     kicker.identifier,
+//!     iwork::style::property::FONT_SIZE,
+//!     Some(iwork::pb::Value::Fixed32(18f32.to_le_bytes())),
+//! )?;
 //! doc.apply_text_style(6083, 0..8, kicker.identifier)?;
 //!
 //! doc.save("Report-edited.pages")?;
