@@ -35,14 +35,27 @@ on run argv
 					set end of harvest to "sheet: " & (name of s)
 					repeat with t in tables of s
 						set end of harvest to "table: " & (name of t)
-						set cellText to formatted value of every cell of t
-						repeat with v in cellText
-							try
-								set end of harvest to v as text
-							on error
-								set end of harvest to ""
-							end try
-						end repeat
+						-- **A categorised table will not hand over its cells.**
+						-- `formatted value of every cell` on a table with
+						-- categories switched on answers -10000, "The cell
+						-- formatted value cannot be retrieved" — the app has
+						-- the document open and simply will not enumerate a
+						-- grid that has group and summary rows in it. That is
+						-- not a document this app refuses, which is the
+						-- question this script exists to answer, so the table
+						-- is noted and skipped rather than failing the check.
+						try
+							set cellText to formatted value of every cell of t
+							repeat with v in cellText
+								try
+									set end of harvest to v as text
+								on error
+									set end of harvest to ""
+								end try
+							end repeat
+						on error cellError number cellCode
+							set end of harvest to "cells unavailable (" & cellCode & "): " & cellError
+						end try
 					end repeat
 				end repeat
 			on error message number code
