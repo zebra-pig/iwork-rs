@@ -265,8 +265,28 @@ pub mod property {
     /// produced a colour and a width of `0.36`, with [`TEXT_FILL_NULL`] set.
     pub const TEXT_STROKE: &[u32] = &[11, 44];
     pub const TEXT_FILL_NULL: &[u32] = &[11, 45];
-    /// Fill drawn inside the glyphs.
+    /// Fill drawn inside the glyphs, and the colour inside it.
     pub const TEXT_FILL: &[u32] = &[11, 46];
+    pub const TEXT_FILL_COLOR: &[u32] = &[11, 46, 1];
+
+    /// Every place a style keeps the colour of its own text.
+    ///
+    /// A style does not have one text colour, it has up to four, and they are
+    /// expected to agree. Choosing a colour in Pages writes it to all of them;
+    /// setting only [`FONT_COLOR`] leaves the fill behind, and **the fill is
+    /// what gets drawn** — a title whose `11.7` was set to red and whose
+    /// `11.46.1` stayed black renders black.
+    ///
+    /// [`crate::Document::set_text_style_color`] writes the lot. The text
+    /// background at [`TEXT_BACKGROUND`] and the outline colour inside
+    /// [`TEXT_STROKE`] are deliberately not here: those are different colours
+    /// that happen to share a shape.
+    pub const TEXT_COLOR_PATHS: &[&[u32]] = &[
+        FONT_COLOR,
+        STRIKETHROUGH_COLOR,
+        UNDERLINE_COLOR,
+        TEXT_FILL_COLOR,
+    ];
 
     // -- paragraph properties, field 12 --------------------------------------
     /// Alignment: `1` right, `2` centre, `3` justified. Left is the absence.
@@ -392,6 +412,22 @@ pub mod property {
             .iter()
             .find(|(known, _, _)| *known == name)
             .map(|(_, path, _)| *path)
+    }
+}
+
+/// Does this message look like a colour — `{1: model, 3: r, 4: g, 5: b, 6: a}`
+/// with the channels as floats?
+pub fn is_color(message: &Message) -> bool {
+    [3, 4, 5]
+        .iter()
+        .all(|c| matches!(message.get(*c), Some(Value::Fixed32(_))))
+}
+
+/// Set the channels of a colour message, leaving its model, colour space and
+/// anything else it carries alone.
+pub fn set_channels(colour: &mut Message, red: f32, green: f32, blue: f32, alpha: f32) {
+    for (field, value) in [(3, red), (4, green), (5, blue), (6, alpha)] {
+        colour.set_in_order(field, Value::Fixed32(value.to_le_bytes()));
     }
 }
 

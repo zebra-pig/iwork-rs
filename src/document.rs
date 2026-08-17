@@ -482,6 +482,56 @@ impl Document {
         self.set_archive(identifier, &archive)
     }
 
+    /// Set the colour of a style's text, everywhere the style keeps it.
+    ///
+    /// A style does not have one text colour. It has up to four — the font
+    /// colour, the fill drawn inside the glyphs, and the underline and
+    /// strikethrough colours that follow the text — and Pages writes all of
+    /// them together. Setting only the font colour leaves the fill behind, and
+    /// the fill is what is drawn: a title whose `11.7` says red and whose
+    /// `11.46.1` still says black renders black. That was not a guess; it took
+    /// a document that came back with a bigger title and no red.
+    ///
+    /// Returns how many were set. **Zero means the style keeps no colour at
+    /// all** — nothing was written, because a colour this crate invents is
+    /// missing fields that make Pages refuse the document. Copy the colour from
+    /// a style that has one, with [`Document::copy_text_style_property`].
+    ///
+    /// Channels are `0.0..=1.0`, as the format stores them.
+    pub fn set_text_style_color(
+        &mut self,
+        identifier: u64,
+        red: f32,
+        green: f32,
+        blue: f32,
+        alpha: f32,
+    ) -> Result<usize, Error> {
+        let style = self
+            .text_style(identifier)
+            .ok_or(Error::NoSuchStyle(identifier))?;
+        let mut archive = style.archive;
+        let mut set = 0;
+        for path in style::property::TEXT_COLOR_PATHS {
+            let Some(Value::Bytes(raw)) = style::get_path(&archive, path) else {
+                continue;
+            };
+            let Some(mut colour) = crate::pb::decode_nested(&raw) else {
+                continue;
+            };
+            if !style::is_color(&colour) {
+                continue;
+            }
+            style::set_channels(&mut colour, red, green, blue, alpha);
+            style::set_path(&mut archive, path, Some(Value::Bytes(colour.encode())))
+                .map_err(|e| Error::Format(format!("style {identifier}: {e}")))?;
+            set += 1;
+        }
+        if set > 0 {
+            self.set_archive(identifier, &archive)?;
+        }
+        Ok(set)
+    }
+
     /// Copy one property subtree from another style.
     ///
     /// The way to give a style a property whose container it does not have.

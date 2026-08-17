@@ -339,6 +339,13 @@ one changed field per probe.
 | 12.32 / 12.15 / 12.45 | paragraph border, its colour and width | |
 | 12.40.1 | reference to the paragraph's list style | |
 
+A style keeps its text colour in **more than one place**, and they are expected
+to agree: `11.7` the font colour, `11.46.1` the fill drawn inside the glyphs,
+and `11.23`/`11.29` the strikethrough and underline colours that follow the
+text. Choosing a colour in Pages writes all of them. The fill is what is drawn —
+a title whose `11.7` said red and whose `11.46.1` still said black renders
+black, which is a confusing way to discover this.
+
 A colour is complete or it is nothing: all six fields, every time. A style
 given a colour of `{3: r, 4: g, 5: b}` — no model, no alpha — is a document
 Pages crashes on rather than opens, which is worth knowing before writing one.

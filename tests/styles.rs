@@ -499,6 +499,71 @@ fn setting_a_property_will_not_invent_its_container() {
     );
 }
 
+/// A style keeps its text colour in more than one place, and they must agree.
+///
+/// Setting only the font colour leaves the fill behind, and the fill is what is
+/// drawn — a title whose `11.7` said red and whose `11.46.1` still said black
+/// came back from Pages black.
+#[test]
+fn setting_a_colour_sets_every_place_the_style_keeps_one() {
+    let mut doc = document();
+    let black = |archive: &mut Message, path: &[u32]| {
+        let mut colour = Message::default();
+        colour.set(1, Value::Varint(1));
+        for c in [3, 4, 5] {
+            colour.set(c, Value::Fixed32(0f32.to_le_bytes()));
+        }
+        colour.set(6, Value::Fixed32(1f32.to_le_bytes()));
+        let mut bag = pb::decode_nested(archive.bytes(11).unwrap()).unwrap();
+        // `path` is relative to the bag: 7 for the font colour, 46.1 the fill.
+        if path.len() == 1 {
+            bag.set_in_order(path[0], Value::Bytes(colour.encode()));
+        } else {
+            let mut fill = Message::default();
+            fill.set(1, Value::Bytes(colour.encode()));
+            bag.set_in_order(path[0], Value::Bytes(fill.encode()));
+        }
+        archive.set(11, Value::Bytes(bag.encode()));
+    };
+    doc.update_text_style(BODY, |a| {
+        black(a, &[7]);
+        black(a, &[46, 1]);
+    })
+    .unwrap();
+
+    assert_eq!(
+        doc.set_text_style_color(BODY, 0.85, 0.1, 0.1, 1.0).unwrap(),
+        2
+    );
+
+    let doc = reopen(&doc, "colour-everywhere");
+    let archive = doc.text_style(BODY).unwrap().archive;
+    for path in [style::property::RED, &[11, 46, 1, 3]] {
+        assert_eq!(
+            style::get_path(&archive, path),
+            Some(Value::Fixed32(0.85f32.to_le_bytes())),
+            "{path:?} did not get the colour"
+        );
+    }
+    // The model and alpha of each colour survive untouched.
+    assert_eq!(
+        style::get_path(&archive, &[11, 7, 1]),
+        Some(Value::Varint(1))
+    );
+    assert_eq!(
+        style::get_path(&archive, style::property::ALPHA),
+        Some(Value::Fixed32(1f32.to_le_bytes()))
+    );
+
+    // A style that keeps no colour is left alone and says so.
+    let mut doc = document();
+    assert_eq!(
+        doc.set_text_style_color(EMPHASIS, 1.0, 0.0, 0.0, 1.0)
+            .unwrap(),
+        0
+    );
+}
+
 /// The supported way to get a container you do not have: take a working one.
 #[test]
 fn a_property_subtree_can_be_copied_from_a_style_that_has_one() {

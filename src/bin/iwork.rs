@@ -29,6 +29,7 @@ text styles
                                                        point a range of text at a style
   iwork paragraphs   <file> <storage>                  paragraph ranges, for apply-style
   iwork properties                                     every named style property
+  iwork set-color    <file> <id> <r> <g> <b> <out>     text colour, everywhere the style keeps it
 
 A <path> is a dotted list of protobuf field numbers, as printed by `iwork
 style`, or one of the named properties — `iwork properties` lists them. A
@@ -80,6 +81,7 @@ fn main() -> ExitCode {
             apply_style(file, storage, start, end, style, out)
         }
         ["properties"] => properties(),
+        ["set-color", file, id, r, g, b, out] => set_color(file, id, r, g, b, out),
         ["paragraphs", file, storage] => {
             identifier(storage).and_then(|storage| paragraphs(file, storage))
         }
@@ -414,6 +416,26 @@ fn new_style(path: &str, template: u64, name: &str, out: &str) -> Result<(), Err
         );
     }
     result
+}
+
+/// A style keeps its text colour in up to four places and they must agree, so
+/// setting one of them by path is usually the wrong thing to do.
+fn set_color(path: &str, id: &str, r: &str, g: &str, b: &str, out: &str) -> Result<(), Error> {
+    let id = identifier(id)?;
+    let channel = |text: &str| -> Result<f32, Error> {
+        text.parse::<f32>()
+            .map_err(|_| Error::Format(format!("'{text}' is not a channel value in 0.0..=1.0")))
+    };
+    let mut doc = Document::open(path)?;
+    let set = doc.set_text_style_color(id, channel(r)?, channel(g)?, channel(b)?, 1.0)?;
+    if set == 0 {
+        return Err(Error::Format(format!(
+            "style {id} keeps no colour of its own, and one invented here would \
+             make Pages refuse the document — copy a style that has one"
+        )));
+    }
+    println!("set {set} colour field(s) on style {id}");
+    save(&doc, out)
 }
 
 fn set_style(path: &str, id: u64, assignment: &str, out: &str) -> Result<(), Error> {

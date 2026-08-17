@@ -139,6 +139,17 @@ Some properties come in pairs — the value, and a boolean saying it is
 deliberately *none*. Removing a field means "inherit from the parent style";
 setting the companion means "explicitly nothing". Those are different documents.
 
+**A style does not have one text colour, it has up to four.** The font colour,
+the fill drawn inside the glyphs, and the underline and strikethrough colours
+that follow the text — Pages writes all of them together, and **the fill is what
+gets drawn**. Setting only `red`/`green`/`blue` leaves the fill behind, and the
+text renders in its old colour. Use `set_text_style_color`, or `iwork set-color`,
+which writes every one the style keeps:
+
+```
+iwork set-color Report.pages 2857 0.85 0.10 0.10 out.pages
+```
+
 **Setting a property whose container is missing fails, deliberately.** A style
 with no colour cannot simply be given one: a colour is `{model, r, g, b, a,
 space}`, and a container this crate invents would hold only the channels it was
