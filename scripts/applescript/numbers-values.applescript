@@ -58,9 +58,12 @@ on run argv
 					set value of cell "C8" to "=SUM(B3,B7)"
 
 					-- Away from the header row and column; Numbers refuses to
-					-- merge a range that straddles the header boundary.
-					merge range "D9:E9"
+					-- merge a range that straddles the header boundary. The
+					-- value goes in *before* the merge: written after, the
+					-- cell comes back out of it and the document ends up
+					-- recording a merge of E9 alone.
 					set value of cell "D9" to "verbunden"
+					merge range "D9:E9"
 				end tell
 
 				set extra to make new table with properties {row count:4, column count:3}

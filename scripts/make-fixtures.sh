@@ -155,6 +155,7 @@ build pages-report pages 180
 
 osa_warm numbers
 build numbers-values numbers 180
+build numbers-formats numbers 240
 build numbers-large numbers 300 "$csv" "$(basename "$csv" .csv)"
 
 osa_warm key
