@@ -408,15 +408,19 @@ Layer 4, from one deck:
 
 ```
 1      KN.DocumentArchive      object 1; field 2 -> the show
-2      KN.ShowArchive          3: repeated slide refs   4: {1: 1920.0, 2: 1080.0}
-                               5: -> document stylesheet   2: -> theme
-4      KN.SlideNodeArchive     one per slide, in the show's list; 2 -> the slide
-5      KN.SlideArchive         1 -> its master
-                               4.2.8: {"Transition", "none", 1.0, 0.5}
-9      KN.MasterSlideArchive   one per Index/TemplateSlide-*.iwa
+2      KN.ShowArchive          2: theme  3: slide tree  4: size  5: stylesheet
+4      KN.SlideNodeArchive     one per slide, in the slide tree; 2 -> the slide
+5      KN.SlideArchive         1: style  4: transition  5: title placeholder
+                               31: five body paragraph styles, one per level
+9      (unnamed)               one per Index/TemplateSlide-*.iwa
 10     KN.ThemeArchive         1.3: theme name, e.g. "58_Startup_Simple_PM"
-10024  KN.DropCapStyleArchive  identified "dropcap-style-N" in the TSS base
+10024  drop-cap style          identified "dropcap-style-N" in the TSS base
 ```
+
+The slide's field **31** is the trap: five bare style references, one per
+outline level. It has the shape of a stylesheet's style list and is a
+positional array — adding an entry shifts the mapping rather than listing a
+style.
 
 The slide size is a plain pair of floats in points — 1920 × 1080 in the sample,
 so Keynote stores 16:9 at pixel dimensions rather than the 1024 × 768 of older

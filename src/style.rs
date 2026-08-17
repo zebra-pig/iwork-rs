@@ -115,6 +115,11 @@ pub const STYLE_IDENTIFIER: &[u32] = &[1, 2];
 pub const PARENT: &[u32] = &[1, 3, 1];
 /// Reference to the stylesheet the style belongs to.
 pub const STYLESHEET: &[u32] = &[1, 5, 1];
+/// Set on a variation style — the anonymous kind. Naming one of these and
+/// listing it among the named styles is what Pages refuses to open.
+pub const IS_VARIATION: &[u32] = &[1, 4];
+/// How many properties the style overrides. Not maintained by this crate.
+pub const OVERRIDE_COUNT: &[u32] = &[10];
 
 /// A string carried somewhere inside a style archive, with the field path it
 /// was found at.
@@ -172,37 +177,49 @@ impl TextStyle {
 
 /// Field paths inside a style's property bag.
 ///
-/// These were established by a controlled experiment rather than by
-/// correlation: a Word document was built in which each paragraph differed from
-/// a baseline in exactly one property, with values chosen to be unmistakable —
+/// Field **11** is the character bag. It appears in both kinds of style,
+/// because a paragraph style carries character properties too. Field **12** is
+/// the paragraph bag and only paragraph styles have one. Field **10** is a
+/// count of how many properties the style overrides.
+///
+/// Most of these were established by a controlled experiment rather than by
+/// correlation: a document was built in which each paragraph differed from a
+/// baseline in exactly one property, with values chosen to be unmistakable —
 /// 37pt, `#123456`, 175%, 17pt — and imported into Pages. Diffing each
 /// resulting style against the baseline's leaves exactly one changed field per
 /// probe, and the value is right there. Where a colour was asked for, all four
 /// channels come back to the byte: `#123456` is `0.070588, 0.203922, 0.337255`,
 /// which is `18/255, 52/255, 86/255`.
 ///
-/// Field **11** is the character property bag. It appears in both kinds of
-/// style, because a paragraph style carries character properties too. Field
-/// **12** is the paragraph bag and appears only in paragraph styles.
+/// A few entries below were *not* reached by that experiment and carry names
+/// from public prior art instead; each says so. The distinction is the same one
+/// [`crate::registry`] draws, and it matters for the same reason — a probed
+/// field has been seen to do what it says, a borrowed name has not.
 ///
-/// None of this is needed to use the crate — every one of these is a path for
-/// [`crate::Document::set_text_style_property`], and an unlisted field is
-/// reached exactly the same way.
+/// ### Clearing a property is not the same as removing it
+///
+/// Several properties come in pairs: the value, and a boolean saying the value
+/// is deliberately *none*. Removing the field means "inherit from the parent
+/// style"; setting the companion means "explicitly nothing". They are different
+/// documents. The companions this module knows are [`FONT_COLOR_NULL`],
+/// [`TEXT_BACKGROUND_NULL`], [`SHADOW_NULL`] and [`PARAGRAPH_BACKGROUND_NULL`].
 pub mod property {
     // -- character properties, field 11 --------------------------------------
     /// Bold **toggle**, `0` or `1` — not "is this text bold".
     ///
-    /// Independent of the font's own weight: importing bold text gives both this
-    /// and a `-Bold` font name, and table-label styles in real documents set
+    /// Independent of the font's own weight: importing bold text sets both this
+    /// and a `-Bold` font name, and table-label styles in real documents use
     /// `HelveticaNeue-Bold` with this left at `0`.
     pub const BOLD: &[u32] = &[11, 1];
     /// Italic toggle, `0` or `1`.
     pub const ITALIC: &[u32] = &[11, 2];
-    /// Font size in points, `f32`. Asked for 37pt, got `37`.
+    /// Font size in points. Asked for 37pt, got `37`.
     pub const FONT_SIZE: &[u32] = &[11, 3];
-    /// PostScript font name, e.g. `"Helvetica-BoldOblique"`, `"CourierNewPSMT"`.
+    /// PostScript font name — `"Helvetica-BoldOblique"`, `"CourierNewPSMT"`.
     pub const FONT_NAME: &[u32] = &[11, 5];
-    /// Font colour. Confirmed: red came back `1, 0, 0` and `#123456` exact.
+    /// The font colour is deliberately none. See the module note on clearing.
+    pub const FONT_COLOR_NULL: &[u32] = &[11, 6];
+    /// Font colour: `{1: model, 3: r, 4: g, 5: b, 6: a}`, channels `0.0..=1.0`.
     pub const FONT_COLOR: &[u32] = &[11, 7];
     pub const RED: &[u32] = &[11, 7, 3];
     pub const GREEN: &[u32] = &[11, 7, 4];
@@ -214,81 +231,167 @@ pub mod property {
     pub const SUPERSCRIPT: &[u32] = &[11, 10];
     /// Underline: `1` single, `2` double.
     pub const UNDERLINE: &[u32] = &[11, 11];
-    /// Strikethrough, `0` or `1`.
+    /// Strikethrough: `1` single.
     pub const STRIKETHROUGH: &[u32] = &[11, 12];
     /// Capitalisation: `1` all caps, `2` small caps.
     pub const CAPITALISATION: &[u32] = &[11, 13];
-    /// Baseline shift. The sample asked for 6pt up and stored `12`.
+    /// Baseline shift. The probe asked for 6pt up and stored `12`.
     pub const BASELINE_SHIFT: &[u32] = &[11, 14];
-    /// Text background — a highlight behind the characters. `#ABCDEF` exact.
+    /// Kerning. Not reached by the probe; name from prior art.
+    pub const KERNING: &[u32] = &[11, 15];
+    /// The shadow is deliberately none.
+    pub const SHADOW_NULL: &[u32] = &[11, 20];
+    /// Text shadow: colour, angle, offset, opacity. The probe produced
+    /// `45°, offset 1, opacity 0.5`.
+    pub const SHADOW: &[u32] = &[11, 21];
+    /// Strikethrough colour, and its width. Both appeared alongside a
+    /// strikethrough in the probe, taking the text colour.
+    pub const STRIKETHROUGH_COLOR: &[u32] = &[11, 23];
+    pub const STRIKETHROUGH_WIDTH: &[u32] = &[11, 24];
+    /// The text background is deliberately none.
+    pub const TEXT_BACKGROUND_NULL: &[u32] = &[11, 25];
+    /// Highlight behind the characters. `#ABCDEF` came back exact.
     pub const TEXT_BACKGROUND: &[u32] = &[11, 26];
-    /// Tracking, as a fraction of the font size: 3pt on 12pt text gave `0.25`.
+    /// Tracking, as a fraction of the font size: 3pt on 12pt gave `0.25`.
     pub const TRACKING: &[u32] = &[11, 27];
+    /// Underline colour, and its width. Both appeared alongside an underline.
+    pub const UNDERLINE_COLOR: &[u32] = &[11, 29];
+    pub const UNDERLINE_WIDTH: &[u32] = &[11, 30];
+    /// Strike or underline words only, skipping the spaces between them. Both
+    /// appeared set to `0` alongside their decoration.
+    pub const WORD_STRIKETHROUGH: &[u32] = &[11, 31];
+    pub const WORD_UNDERLINE: &[u32] = &[11, 32];
+    /// Stroke drawn around the glyphs — what "outline" text is. The probe
+    /// produced a colour and a width of `0.36`, with [`TEXT_FILL_NULL`] set.
+    pub const TEXT_STROKE: &[u32] = &[11, 44];
+    pub const TEXT_FILL_NULL: &[u32] = &[11, 45];
+    /// Fill drawn inside the glyphs.
+    pub const TEXT_FILL: &[u32] = &[11, 46];
 
     // -- paragraph properties, field 12 --------------------------------------
     /// Alignment: `1` right, `2` centre, `3` justified. Left is the absence.
     pub const ALIGNMENT: &[u32] = &[12, 1];
-    /// Paragraph background fill. `#FEDCBA` exact.
+    /// The paragraph fill is deliberately none.
+    pub const PARAGRAPH_BACKGROUND_NULL: &[u32] = &[12, 5];
+    /// Paragraph background fill. `#FEDCBA` came back exact.
     pub const PARAGRAPH_BACKGROUND: &[u32] = &[12, 6];
     /// First-line indent, points.
     pub const FIRST_LINE_INDENT: &[u32] = &[12, 7];
-    /// Keep with next paragraph, `0` or `1`.
+    /// Hyphenate. Not reached by the probe; name from prior art.
+    pub const HYPHENATE: &[u32] = &[12, 8];
+    /// Keep the paragraph's lines on one page. Not reached by the probe.
+    pub const KEEP_LINES_TOGETHER: &[u32] = &[12, 9];
+    /// Keep with the next paragraph.
     pub const KEEP_WITH_NEXT: &[u32] = &[12, 10];
     /// Left indent, points.
     pub const LEFT_INDENT: &[u32] = &[12, 11];
-    /// Line spacing as a multiple: 175% gave `1.75`.
-    pub const LINE_SPACING: &[u32] = &[12, 13, 2];
-    /// Page break before, `0` or `1`.
+    /// Line spacing. The multiple sits at `12.13.2`: 175% gave `1.75`.
+    pub const LINE_SPACING: &[u32] = &[12, 13];
+    pub const LINE_SPACING_AMOUNT: &[u32] = &[12, 13, 2];
+    /// Page break before the paragraph.
     pub const PAGE_BREAK_BEFORE: &[u32] = &[12, 14];
+    /// Which edges carry a rule, with its offset and width beside it.
+    pub const BORDERS: &[u32] = &[12, 15];
+    pub const RULE_OFFSET: &[u32] = &[12, 17];
+    pub const RULE_WIDTH: &[u32] = &[12, 18];
     /// Right indent, points.
     pub const RIGHT_INDENT: &[u32] = &[12, 19];
-    /// Space after the paragraph, points.
+    /// Space after and before the paragraph, points.
     pub const SPACE_AFTER: &[u32] = &[12, 20];
-    /// Space before the paragraph, points.
     pub const SPACE_BEFORE: &[u32] = &[12, 21];
-    /// Widow and orphan control, `0` or `1`.
+    /// Tab stops. The first stop's position sits at `12.25.1.1`; 144pt gave
+    /// `144`.
+    pub const TABS: &[u32] = &[12, 25];
+    /// Widow and orphan control.
     pub const WIDOW_CONTROL: &[u32] = &[12, 26];
+    /// Outline depth, for a heading. Not reached by the probe.
+    pub const OUTLINE_LEVEL: &[u32] = &[12, 27];
+    /// Stroke used to draw the paragraph's rule.
+    pub const PARAGRAPH_STROKE: &[u32] = &[12, 32];
+    /// The list style is deliberately none.
+    pub const LIST_STYLE_NULL: &[u32] = &[12, 39];
     /// Reference to the list style a bulleted or numbered paragraph uses.
     pub const LIST_STYLE: &[u32] = &[12, 40, 1];
 
-    /// The paths above by name, for command lines and config.
-    pub const BY_NAME: &[(&str, &[u32])] = &[
-        ("bold", BOLD),
-        ("italic", ITALIC),
-        ("font-size", FONT_SIZE),
-        ("font-name", FONT_NAME),
-        ("red", RED),
-        ("green", GREEN),
-        ("blue", BLUE),
-        ("alpha", ALPHA),
-        ("language", LANGUAGE),
-        ("superscript", SUPERSCRIPT),
-        ("underline", UNDERLINE),
-        ("strikethrough", STRIKETHROUGH),
-        ("capitalisation", CAPITALISATION),
-        ("baseline-shift", BASELINE_SHIFT),
-        ("text-background", TEXT_BACKGROUND),
-        ("tracking", TRACKING),
-        ("alignment", ALIGNMENT),
-        ("paragraph-background", PARAGRAPH_BACKGROUND),
-        ("first-line-indent", FIRST_LINE_INDENT),
-        ("keep-with-next", KEEP_WITH_NEXT),
-        ("left-indent", LEFT_INDENT),
-        ("line-spacing", LINE_SPACING),
-        ("page-break-before", PAGE_BREAK_BEFORE),
-        ("right-indent", RIGHT_INDENT),
-        ("space-after", SPACE_AFTER),
-        ("space-before", SPACE_BEFORE),
-        ("widow-control", WIDOW_CONTROL),
-        ("name", super::NAME),
-        ("style-identifier", super::STYLE_IDENTIFIER),
+    /// How far each name below can be trusted, in the same terms
+    /// [`crate::registry`] uses.
+    pub use crate::registry::Confidence;
+
+    /// Every named path, with what backs the name.
+    pub const BY_NAME: &[(&str, &[u32], Confidence)] = &[
+        ("bold", BOLD, Confidence::Confirmed),
+        ("italic", ITALIC, Confidence::Confirmed),
+        ("font-size", FONT_SIZE, Confidence::Confirmed),
+        ("font-name", FONT_NAME, Confidence::Confirmed),
+        ("font-color-null", FONT_COLOR_NULL, Confidence::Unverified),
+        ("red", RED, Confidence::Confirmed),
+        ("green", GREEN, Confidence::Confirmed),
+        ("blue", BLUE, Confidence::Confirmed),
+        ("alpha", ALPHA, Confidence::Confirmed),
+        ("language", LANGUAGE, Confidence::Confirmed),
+        ("superscript", SUPERSCRIPT, Confidence::Confirmed),
+        ("underline", UNDERLINE, Confidence::Confirmed),
+        ("strikethrough", STRIKETHROUGH, Confidence::Confirmed),
+        ("capitalisation", CAPITALISATION, Confidence::Confirmed),
+        ("baseline-shift", BASELINE_SHIFT, Confidence::Confirmed),
+        ("kerning", KERNING, Confidence::Unverified),
+        (
+            "strikethrough-width",
+            STRIKETHROUGH_WIDTH,
+            Confidence::Inferred,
+        ),
+        ("text-background", TEXT_BACKGROUND, Confidence::Confirmed),
+        ("tracking", TRACKING, Confidence::Confirmed),
+        ("underline-width", UNDERLINE_WIDTH, Confidence::Inferred),
+        (
+            "word-strikethrough",
+            WORD_STRIKETHROUGH,
+            Confidence::Inferred,
+        ),
+        ("word-underline", WORD_UNDERLINE, Confidence::Inferred),
+        ("alignment", ALIGNMENT, Confidence::Confirmed),
+        (
+            "paragraph-background",
+            PARAGRAPH_BACKGROUND,
+            Confidence::Confirmed,
+        ),
+        (
+            "first-line-indent",
+            FIRST_LINE_INDENT,
+            Confidence::Confirmed,
+        ),
+        ("hyphenate", HYPHENATE, Confidence::Unverified),
+        (
+            "keep-lines-together",
+            KEEP_LINES_TOGETHER,
+            Confidence::Unverified,
+        ),
+        ("keep-with-next", KEEP_WITH_NEXT, Confidence::Confirmed),
+        ("left-indent", LEFT_INDENT, Confidence::Confirmed),
+        ("line-spacing", LINE_SPACING_AMOUNT, Confidence::Confirmed),
+        (
+            "page-break-before",
+            PAGE_BREAK_BEFORE,
+            Confidence::Confirmed,
+        ),
+        ("right-indent", RIGHT_INDENT, Confidence::Confirmed),
+        ("space-after", SPACE_AFTER, Confidence::Confirmed),
+        ("space-before", SPACE_BEFORE, Confidence::Confirmed),
+        ("widow-control", WIDOW_CONTROL, Confidence::Confirmed),
+        ("outline-level", OUTLINE_LEVEL, Confidence::Unverified),
+        ("name", super::NAME, Confidence::Confirmed),
+        (
+            "style-identifier",
+            super::STYLE_IDENTIFIER,
+            Confidence::Confirmed,
+        ),
     ];
 
     pub fn path(name: &str) -> Option<&'static [u32]> {
         BY_NAME
             .iter()
-            .find(|(known, _)| *known == name)
-            .map(|(_, path)| *path)
+            .find(|(known, _, _)| *known == name)
+            .map(|(_, path, _)| *path)
     }
 }
 

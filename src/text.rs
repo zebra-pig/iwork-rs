@@ -4,12 +4,14 @@
 //!
 //! | Field | Contents |
 //! |-------|----------|
+//! | 1     | what the storage is for — body, header, footnote, text box, cell … |
 //! | 2     | reference to the owning stylesheet |
 //! | 3     | the text, UTF-8, repeated — long text is split across several runs |
-//! | 5     | character-attribute table |
-//! | 6     | packed paragraph/bidi flags |
+//! | 5     | **paragraph**-style table |
+//! | 6     | packed per-paragraph data, a different shape |
 //! | 7     | list-style table |
-//! | 8     | paragraph-style table |
+//! | 8     | **character**-style table |
+//! | 9, 11, 12, 15, 16, 17 | further tables: attachments, smart fields, layout, bookmarks, footnotes, sections |
 //!
 //! Every attribute table has the same shape: repeated entries of
 //! `{1: character_index, 2: reference to a style object}`, strictly increasing
@@ -22,14 +24,20 @@
 
 use crate::pb::{Field, Message, Value};
 
-/// Field numbers holding attribute tables. Field 6 is packed flags rather than
-/// a table and is deliberately excluded.
+/// Field numbers holding attribute tables — lists of
+/// `{character_index, reference}` runs.
 ///
-/// Fields 5, 7 and 8 are the character, list and paragraph style tables — see
-/// [`crate::style`]. The rest are the same shape and are treated the same way
-/// without a claim about what they point at, which is what lets a style be
-/// deleted without leaving a dangling reference behind in one of them.
-pub const ATTRIBUTE_TABLES: &[u32] = &[5, 7, 8, 9, 10, 11];
+/// 5, 7 and 8 are the paragraph, list and character style tables (see
+/// [`crate::style`]); the rest are the same shape pointing at things this crate
+/// does not model, and are listed so that deleting a style cannot leave a
+/// dangling reference behind in one of them.
+///
+/// Field 6 is a differently-shaped table of packed paragraph data, and field 10
+/// is not a table at all — it is a lone boolean, and was in this list until the
+/// storage archive's own field numbering was checked. Nothing broke, because
+/// every operation here skips a field that is not length-delimited, but a run
+/// table that was never there is not something to go looking for.
+pub const ATTRIBUTE_TABLES: &[u32] = &[5, 7, 8, 9, 11, 12, 15, 16, 17];
 
 /// Characters that end a paragraph.
 ///

@@ -28,12 +28,13 @@ text styles
   iwork apply-style  <file> <storage> <start> <end> <style> <out>
                                                        point a range of text at a style
   iwork paragraphs   <file> <storage>                  paragraph ranges, for apply-style
+  iwork properties                                     every named style property
 
 A <path> is a dotted list of protobuf field numbers, as printed by `iwork
-style`, or one of the derived names: bold, italic, font-size, font-name, red,
-green, blue, alpha, name, style-identifier. A <value> is varint:N, f32:N,
-f64:N, str:TEXT, hex:BYTES, or empty to remove the field. Ranges are half-open
-and counted in UTF-16 code units, the unit iWork indexes text in.
+style`, or one of the named properties — `iwork properties` lists them. A
+<value> is varint:N, f32:N, f64:N, str:TEXT, hex:BYTES, or empty to remove the
+field. Ranges are half-open and counted in UTF-16 code units, the unit iWork
+indexes text in.
 
   iwork set-style Report.pages 3801 font-size=f32:18 out.pages
   iwork set-style Report.pages 3801 11.3=f32:18      out.pages   # the same field
@@ -78,6 +79,7 @@ fn main() -> ExitCode {
         ["apply-style", file, storage, start, end, style, out] => {
             apply_style(file, storage, start, end, style, out)
         }
+        ["properties"] => properties(),
         ["paragraphs", file, storage] => {
             identifier(storage).and_then(|storage| paragraphs(file, storage))
         }
@@ -204,6 +206,27 @@ fn objects(path: &str, filter: Option<u32>) -> Result<(), Error> {
             message_type,
             registry::describe_in(doc.kind(), message_type),
             object.payload().len()
+        );
+    }
+    Ok(())
+}
+
+/// The named style properties, with how far each name can be trusted.
+fn properties() -> Result<(), Error> {
+    println!("  {:<24} {:<12} evidence", "name", "path");
+    for (name, path, confidence) in style::property::BY_NAME {
+        let dotted = path
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(".");
+        println!(
+            "  {name:<24} {dotted:<12} {}",
+            match confidence {
+                registry::Confidence::Confirmed => "measured in an imported document",
+                registry::Confidence::Inferred => "observed changing alongside a measured one",
+                registry::Confidence::Unverified => "name only, not observed here",
+            }
         );
     }
     Ok(())
@@ -494,7 +517,10 @@ fn parse_path(text: &str) -> Result<Vec<u32>, Error> {
     text.split('.')
         .map(|part| {
             part.parse().map_err(|_| {
-                let names: Vec<&str> = style::property::BY_NAME.iter().map(|(n, _)| *n).collect();
+                let names: Vec<&str> = style::property::BY_NAME
+                    .iter()
+                    .map(|(n, _, _)| *n)
+                    .collect();
                 Error::Format(format!(
                     "'{part}' is not a field number; known names are {}",
                     names.join(", ")

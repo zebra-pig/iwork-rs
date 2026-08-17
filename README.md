@@ -51,6 +51,7 @@ iwork set-style    Report.pages 3801 11.3=f32:18       out.pages   # the same fi
 iwork apply-style  Report.pages 6083 0 8 3801 out.pages
 iwork delete-style Report.pages 3801 3712 out.pages    # 3712 replaces it
 iwork paragraphs   Report.pages 6083      # paragraph ranges, for apply-style
+iwork properties                          # every named style property, and its evidence
 ```
 
 ## How it works
@@ -118,18 +119,25 @@ iwork style     Report.pages 2857                        # what is in there
 iwork set-style Report.pages 2857 font-size=f32:18 out.pages
 ```
 
-Twenty-seven of them: `bold`, `italic`, `font-size`, `font-name`, the colour
-channels, `underline`, `strikethrough`, `tracking`, `alignment`, the indents,
-`line-spacing`, `space-before`/`space-after` and the rest, each recorded in
-[`style::property`](src/style.rs).
+`iwork properties` lists them, with what backs each name:
 
-They were established by experiment rather than by correlation. A document was
+```
+  bold                     11.1         measured in an imported document
+  underline-width          11.30        observed changing alongside a measured one
+  outline-level            12.27        name only, not observed here
+```
+
+Most were established by experiment rather than by correlation. A document was
 built in which every paragraph differed from a baseline in exactly one property
 — 37pt, `#123456`, 175%, 17pt — and imported into Pages; diffing each resulting
 style against the baseline's leaves one changed field per probe. All four probe
 colours came back byte-exact, which is what turned the colour field from a guess
 into a fact. `bold` and `italic` are *toggles*, independent of the font's own
 weight.
+
+Some properties come in pairs — the value, and a boolean saying it is
+deliberately *none*. Removing a field means "inherit from the parent style";
+setting the companion means "explicitly nothing". Those are different documents.
 
 Creating by copying is the same rule [`FORMAT.md`](FORMAT.md) gives for whole
 documents, for the same reason: the Pages sample spends 313 objects on its

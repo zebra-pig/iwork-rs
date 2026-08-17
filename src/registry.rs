@@ -312,20 +312,20 @@ const ENTRIES: &[Entry] = &[
         confidence: Confirmed,
         app: InKeynote,
     },
-    // Object 1 field 2 points at it, and it is the presentation: a list of slide
-    // references, the slide size (1920 × 1080 in the sample), and references to
-    // the theme and the document stylesheet.
+    // Object 1 field 2 points at it, and it is the presentation: field 2 the
+    // theme, field 3 the slide tree, field 4 the slide size (1920 × 1080 in the
+    // sample), field 5 the document stylesheet.
     Entry {
         message_type: 2,
         name: "KN.ShowArchive",
-        confidence: Inferred,
+        confidence: Confirmed,
         app: InKeynote,
     },
-    // One per slide, in the show's list; field 2 points at the slide itself.
+    // One per slide, in the show's slide tree; field 2 points at the slide.
     Entry {
         message_type: 4,
         name: "KN.SlideNodeArchive",
-        confidence: Inferred,
+        confidence: Confirmed,
         app: InKeynote,
     },
     // The slide. Carries its transition — `{"Transition", "none", 1.0, 0.5}` —
@@ -337,11 +337,14 @@ const ENTRIES: &[Entry] = &[
         confidence: Confirmed,
         app: InKeynote,
     },
-    // What a slide's field 1 points at, one per `Index/TemplateSlide-*.iwa`.
+    // One per `Index/TemplateSlide-*.iwa`, and what a slide's field 1 points at.
+    // `KN.MasterSlideArchive` was the obvious guess and is not a message that
+    // exists; the role is clear from the document, the name is not, so it does
+    // not get one.
     Entry {
         message_type: 9,
-        name: "KN.MasterSlideArchive",
-        confidence: Inferred,
+        name: "KN slide-template archive",
+        confidence: Unverified,
         app: InKeynote,
     },
     // Names itself: field 1.3 is the theme name, `"58_Startup_Simple_PM"`.
@@ -351,12 +354,14 @@ const ENTRIES: &[Entry] = &[
         confidence: Confirmed,
         app: InKeynote,
     },
-    // Seven of them, and every one identifies itself as `dropcap-style-N` or
-    // `drop-cap-style-default` in the TSS base at field 1.2.
+    // Seven of them, every one identifying itself as `dropcap-style-N` or
+    // `drop-cap-style-default` in the TSS base at field 1.2. The archive is a
+    // TSWP one rather than a KN one, so the number being in the app range is the
+    // app registering a framework message rather than defining its own.
     Entry {
         message_type: 10024,
-        name: "KN.DropCapStyleArchive",
-        confidence: Confirmed,
+        name: "TSWP.DropCapStyleArchive",
+        confidence: Inferred,
         app: InKeynote,
     },
 ];
@@ -436,7 +441,7 @@ mod tests {
     #[test]
     fn confidence_shows_in_the_label() {
         assert_eq!(describe_in(Kind::Keynote, 5), "KN.SlideArchive");
-        assert_eq!(describe_in(Kind::Keynote, 2), "KN.ShowArchive?");
+        assert_eq!(describe_in(Kind::Keynote, 9), "KN slide-template archive??");
         assert_eq!(describe_in(Kind::Numbers, 2), "TN.SheetArchive??");
         assert_eq!(describe(999999), "? #999999");
     }
@@ -447,6 +452,9 @@ mod tests {
         assert_eq!(describe_in(Kind::Keynote, 10000), "app #10000");
         assert_eq!(describe_in(Kind::Pages, 10000), "TP.DocumentArchive");
         assert_eq!(describe_in(Kind::Pages, 10024), "app #10024");
-        assert_eq!(describe_in(Kind::Keynote, 10024), "KN.DropCapStyleArchive");
+        assert_eq!(
+            describe_in(Kind::Keynote, 10024),
+            "TSWP.DropCapStyleArchive?"
+        );
     }
 }
