@@ -23,6 +23,10 @@ const METADATA: u64 = 30;
 
 const TEXT: &str = "Hallo Welt\nZweiter Absatz\n";
 
+/// Storage fields the two tables live in. Not what the field order suggests.
+const PARA_TABLE: u32 = 5;
+const CHAR_TABLE: u32 = 8;
+
 fn object(identifier: u64, message_type: u32, payload: &Message) -> ArchiveObject {
     ArchiveObject {
         identifier,
@@ -114,12 +118,15 @@ fn build(outline_array: bool) -> Document {
         .fields
         .push(nested(2, &style::reference(STYLESHEET)));
     storage.set(3, Value::Bytes(TEXT.as_bytes().to_vec()));
+    // Character styles live in table 8 and paragraph styles in table 5 — the
+    // opposite of what the field order suggests, and the opposite of what this
+    // crate believed until the probe document settled it.
     storage
         .fields
-        .push(nested(5, &attribute_table(&[(0, BODY), (6, EMPHASIS)])));
+        .push(nested(8, &attribute_table(&[(0, BODY), (6, EMPHASIS)])));
     storage
         .fields
-        .push(nested(8, &attribute_table(&[(0, HEADING), (11, HEADING)])));
+        .push(nested(5, &attribute_table(&[(0, HEADING), (11, HEADING)])));
 
     let mut metadata = Message::default();
     metadata.set(1, Value::Varint(METADATA));
@@ -204,7 +211,7 @@ fn reads_every_style_with_its_kind_and_name() {
 
     let heading = doc.text_style(HEADING).unwrap();
     assert_eq!(heading.kind, StyleKind::Paragraph);
-    assert_eq!(heading.kind.attribute_table(), 8);
+    assert_eq!(heading.kind.attribute_table(), 5);
     assert_eq!(heading.stream, "Index/Document.iwa");
     // The name is found at a path, and the internal identifier after it.
     assert_eq!(heading.name.as_deref(), Some("Heading"));
@@ -222,7 +229,7 @@ fn reads_where_a_style_is_used() {
     let used = doc.text_style_usage(EMPHASIS);
     assert_eq!(used.len(), 1);
     assert_eq!(used[0].storage, STORAGE);
-    assert_eq!(used[0].table, 5);
+    assert_eq!(used[0].table, 8);
     // "Hallo " is styled Body, the rest of the storage Emphasis.
     assert_eq!(used[0].range, 6..26);
 
@@ -489,7 +496,7 @@ fn applying_a_character_style_splits_the_run_and_restores_the_tail() {
 
     let doc = reopen(&doc, "apply");
     assert_eq!(
-        runs_of(&doc, 5),
+        runs_of(&doc, CHAR_TABLE),
         vec![
             (0, Some(BODY)),
             (2, Some(created)),
@@ -515,11 +522,11 @@ fn applying_a_paragraph_style_uses_the_paragraph_table() {
 
     let doc = reopen(&doc, "apply-paragraph");
     assert_eq!(
-        runs_of(&doc, 8),
+        runs_of(&doc, PARA_TABLE),
         vec![(0, Some(HEADING)), (11, Some(created.identifier))]
     );
     assert_eq!(
-        runs_of(&doc, 5),
+        runs_of(&doc, CHAR_TABLE),
         vec![(0, Some(BODY)), (6, Some(EMPHASIS))],
         "the character table is untouched"
     );
@@ -529,7 +536,10 @@ fn applying_a_paragraph_style_uses_the_paragraph_table() {
 fn applying_past_the_end_of_the_text_is_clamped() {
     let mut doc = document();
     doc.apply_text_style(STORAGE, 20..9_000, EMPHASIS).unwrap();
-    assert_eq!(runs_of(&doc, 5), vec![(0, Some(BODY)), (6, Some(EMPHASIS))]);
+    assert_eq!(
+        runs_of(&doc, CHAR_TABLE),
+        vec![(0, Some(BODY)), (6, Some(EMPHASIS))]
+    );
 }
 
 #[test]
@@ -560,7 +570,7 @@ fn deleting_repoints_runs_at_a_replacement() {
     assert!(doc.text_style(EMPHASIS).is_none());
     assert_eq!(doc.text_styles().len(), 2);
     // Both runs now say Body, so they are one run.
-    assert_eq!(runs_of(&doc, 5), vec![(0, Some(BODY))]);
+    assert_eq!(runs_of(&doc, CHAR_TABLE), vec![(0, Some(BODY))]);
 
     // Nothing anywhere still points at the style that is gone.
     for (_, object) in doc.objects() {
@@ -583,7 +593,7 @@ fn deleting_without_a_replacement_drops_the_runs() {
 
     let doc = reopen(&doc, "delete-drop");
     // The Body run now extends over the text the deleted style covered.
-    assert_eq!(runs_of(&doc, 5), vec![(0, Some(BODY))]);
+    assert_eq!(runs_of(&doc, CHAR_TABLE), vec![(0, Some(BODY))]);
 }
 
 /// Deleting must not leave a reference behind anywhere — iWork is unforgiving
@@ -607,7 +617,10 @@ fn deleting_a_style_something_else_refers_to_is_refused() {
     // And the document is exactly as it was.
     let doc = reopen(&doc, "delete-refused");
     assert_eq!(names(&doc).len(), 3);
-    assert_eq!(runs_of(&doc, 5), vec![(0, Some(BODY)), (6, Some(EMPHASIS))]);
+    assert_eq!(
+        runs_of(&doc, CHAR_TABLE),
+        vec![(0, Some(BODY)), (6, Some(EMPHASIS))]
+    );
     let (_, stylesheet) = doc.object(STYLESHEET).unwrap();
     assert_eq!(
         style::count_references(&Message::decode(stylesheet.payload()).unwrap(), BODY),
@@ -638,7 +651,7 @@ fn a_full_crud_cycle_returns_the_document_to_its_original_shape() {
         .objects()
         .map(|(_, o)| (o.identifier, o.message_type()))
         .collect();
-    let before_runs: Vec<(u64, Option<u64>)> = runs_of(&original, 5);
+    let before_runs: Vec<(u64, Option<u64>)> = runs_of(&original, CHAR_TABLE);
 
     let mut doc = document();
     let created = doc.create_text_style(BODY, "Kicker").unwrap().identifier;
@@ -654,7 +667,7 @@ fn a_full_crud_cycle_returns_the_document_to_its_original_shape() {
         .map(|(_, o)| (o.identifier, o.message_type()))
         .collect();
     assert_eq!(after, before);
-    assert_eq!(runs_of(&doc, 5), before_runs);
+    assert_eq!(runs_of(&doc, CHAR_TABLE), before_runs);
     // Only the high-water mark is left changed, and deliberately so: it records
     // that an identifier was handed out, even though nothing holds it now.
     assert_eq!(doc.last_object_identifier(), Some(created));

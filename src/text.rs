@@ -31,6 +31,16 @@ use crate::pb::{Field, Message, Value};
 /// deleted without leaving a dangling reference behind in one of them.
 pub const ATTRIBUTE_TABLES: &[u32] = &[5, 7, 8, 9, 10, 11];
 
+/// Characters that end a paragraph.
+///
+/// `\n` is the obvious one. `U+0005` is not obvious and matters: it appears
+/// where a Pages document changes layout mid-storage, and the paragraph-style
+/// table puts a run immediately after it. Reading it as ordinary text splits the
+/// paragraphs one character wrong, which is enough to make a paragraph style
+/// land in the wrong place. Verified in a Pages article at `…\n\n\u{5}Features\n`,
+/// where the run sits on the `F`.
+pub const PARAGRAPH_BREAKS: &[u16] = &[0x000A, 0x0005];
+
 /// Length of a storage's text in UTF-16 code units — the unit run indices are
 /// counted in.
 pub fn length(text: &str) -> u64 {
@@ -39,17 +49,17 @@ pub fn length(text: &str) -> u64 {
 
 /// Character ranges of the paragraphs in `text`, in UTF-16 code units.
 ///
-/// Paragraphs are `\n` inside one storage and the newline belongs to the
-/// paragraph it ends, so the ranges tile the text with no gaps. A paragraph
-/// style applies to whole paragraphs, and this is how to name them. Empty text
-/// has no paragraphs.
+/// A paragraph ends at `\n`, or at one of the break characters in
+/// [`PARAGRAPH_BREAKS`]. The terminator belongs to the paragraph it ends, so the
+/// ranges tile the text with no gaps. A paragraph style applies to whole
+/// paragraphs, and this is how to name them. Empty text has no paragraphs.
 pub fn paragraph_ranges(text: &str) -> Vec<std::ops::Range<u64>> {
     let mut out = Vec::new();
     let mut start = 0u64;
     let mut index = 0u64;
     for unit in text.encode_utf16() {
         index += 1;
-        if unit == u16::from(b'\n') {
+        if PARAGRAPH_BREAKS.contains(&unit) {
             out.push(start..index);
             start = index;
         }
@@ -265,6 +275,15 @@ mod tests {
         write(&mut s, "xyz");
         assert_eq!(s.all(3).count(), 1);
         assert_eq!(read(&s), "xyz");
+    }
+
+    #[test]
+    fn a_layout_break_ends_a_paragraph_too() {
+        // "…ende\n\n\u{5}Features" — the next paragraph starts on the F.
+        assert_eq!(
+            paragraph_ranges("ab\n\n\u{5}Fe"),
+            vec![0..3, 3..4, 4..5, 5..7]
+        );
     }
 
     #[test]

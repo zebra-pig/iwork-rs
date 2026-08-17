@@ -8,22 +8,22 @@
 //!
 //! | Storage field | Points at | Message type |
 //! |---|---|---|
-//! | 5 | character styles | 2022 `TSWP.CharacterStyleArchive` |
+//! | 5 | paragraph styles | 2022 `TSWP.ParagraphStyleArchive` |
 //! | 7 | list styles | 2023 `TSWP.ListStyleArchive` |
-//! | 8 | paragraph styles | 2021 `TSWP.ParagraphStyleArchive` |
+//! | 8 | character styles | 2021 `TSWP.CharacterStyleArchive` |
 //!
 //! The tables are the solid part. Their shape is asserted by the test suite,
 //! it is the same in all three apps, and everything in this module that
 //! *changes* which style applies to which text works on them alone.
 //!
-//! What a style archive **contains** is a different matter. Apple publishes no
-//! `.proto` files, so this module deliberately does not claim to know that bold
-//! is field 1 or that the font size is field 12 — a wrong guess there would not
-//! be an advisory mislabel like [`crate::registry`], it would write wrong bytes
-//! into someone's document. Instead a style is treated as what it demonstrably
-//! is: a tree of wire fields you can read, address by path and rewrite. New
-//! styles are made by **copying one that already works**, which is the same
-//! rule `FORMAT.md` gives for whole documents, and for the same reason.
+//! What a style archive **contains** was worked out by experiment rather than
+//! assumed — see [`property`]. What is not in that list is left unnamed rather
+//! than guessed at: a wrong field number writes wrong bytes, where a wrong name
+//! in [`crate::registry`] only prints wrong. So a style is handled as what it
+//! demonstrably is — a tree of wire fields you can read, address by path and
+//! rewrite — and new styles are made by **copying one that already works**,
+//! which is the rule `FORMAT.md` gives for whole documents and for the same
+//! reason.
 //!
 //! `iwork style <file> <id>` prints that tree with the path of every field, so
 //! the numbers can be discovered from the document at hand rather than assumed.
@@ -32,10 +32,16 @@ use std::ops::Range;
 
 use crate::pb::{self, Field, Message, Value};
 
-/// `TSWP.ParagraphStyleArchive`.
-pub const TYPE_PARAGRAPH_STYLE: u32 = 2021;
 /// `TSWP.CharacterStyleArchive`.
-pub const TYPE_CHARACTER_STYLE: u32 = 2022;
+///
+/// Note the numbering against [`TYPE_PARAGRAPH_STYLE`]: the character archive is
+/// the *lower* number. Public prior art has these the other way round and this
+/// crate copied that, until 241 styles across six documents were asked what they
+/// call themselves — every type 2021 identifies as `character-style-…`, every
+/// type 2022 as `…-paragraphstyle-…`.
+pub const TYPE_CHARACTER_STYLE: u32 = 2021;
+/// `TSWP.ParagraphStyleArchive`. See [`TYPE_CHARACTER_STYLE`].
+pub const TYPE_PARAGRAPH_STYLE: u32 = 2022;
 /// `TSWP.ListStyleArchive`.
 pub const TYPE_LIST_STYLE: u32 = 2023;
 
@@ -73,11 +79,17 @@ impl StyleKind {
 
     /// Field of `TSWP.StorageArchive` whose attribute table points at styles of
     /// this kind.
+    ///
+    /// Field 5 holds the **paragraph** table and field 8 the **character** one,
+    /// which is the opposite of what this crate assumed and of what the field
+    /// order suggests. The tell was there from the beginning: `FORMAT.md`
+    /// recorded that field 5's run indices "are exactly the paragraph starts"
+    /// and called it the character table anyway.
     pub fn attribute_table(self) -> u32 {
         match self {
-            StyleKind::Character => 5,
+            StyleKind::Paragraph => 5,
             StyleKind::List => 7,
-            StyleKind::Paragraph => 8,
+            StyleKind::Character => 8,
         }
     }
 
@@ -158,53 +170,86 @@ impl TextStyle {
     }
 }
 
-/// Field paths inside a style's property bag, derived by comparing styles whose
-/// names say what they should look like.
+/// Field paths inside a style's property bag.
 ///
-/// This is the one part of the module that claims to know what a field *means*,
-/// and each claim below was checked the way `iwork style` is meant to be used:
-/// against 654 styles in five real documents, correlating each field with names
-/// the app itself assigned. What that method can establish is written down with
-/// each entry; where it establishes less, the entry says so.
+/// These were established by a controlled experiment rather than by
+/// correlation: a Word document was built in which each paragraph differed from
+/// a baseline in exactly one property, with values chosen to be unmistakable —
+/// 37pt, `#123456`, 175%, 17pt — and imported into Pages. Diffing each
+/// resulting style against the baseline's leaves exactly one changed field per
+/// probe, and the value is right there. Where a colour was asked for, all four
+/// channels come back to the byte: `#123456` is `0.070588, 0.203922, 0.337255`,
+/// which is `18/255, 52/255, 86/255`.
 ///
-/// None of this is needed to use the crate — every one of these is just a path
-/// for [`crate::Document::set_text_style_property`], and an unlisted field is
-/// reached exactly the same way. They are here because looking them up once,
-/// carefully, beats every caller guessing.
+/// Field **11** is the character property bag. It appears in both kinds of
+/// style, because a paragraph style carries character properties too. Field
+/// **12** is the paragraph bag and appears only in paragraph styles.
+///
+/// None of this is needed to use the crate — every one of these is a path for
+/// [`crate::Document::set_text_style_property`], and an unlisted field is
+/// reached exactly the same way.
 pub mod property {
+    // -- character properties, field 11 --------------------------------------
     /// Bold **toggle**, `0` or `1` — not "is this text bold".
     ///
-    /// Independent of the font's own weight: `Titel` is bold in all four Pages
-    /// documents, and the table-label styles set `HelveticaNeue-Bold` with this
-    /// left at `0`. Read it as the switch the app's B button flips.
+    /// Independent of the font's own weight: importing bold text gives both this
+    /// and a `-Bold` font name, and table-label styles in real documents set
+    /// `HelveticaNeue-Bold` with this left at `0`.
     pub const BOLD: &[u32] = &[11, 1];
-    /// Italic toggle, `0` or `1`. Same character: the only styles setting it in
-    /// the samples are the two `Zitat` styles, whose font is
-    /// `AvenirNext-Medium` — an upright cut — so this is a synthetic slant, not
-    /// a font choice.
+    /// Italic toggle, `0` or `1`.
     pub const ITALIC: &[u32] = &[11, 2];
-    /// Font size in points, `f32`.
-    ///
-    /// The clearest of the lot: across the four Pages documents `Titel` is
-    /// 24/24/30/30, `Zwischenüberschrift 1` is 16, and `Text` is 11/11/11/12.
+    /// Font size in points, `f32`. Asked for 37pt, got `37`.
     pub const FONT_SIZE: &[u32] = &[11, 3];
-    /// PostScript font name, e.g. `"AvenirNext-DemiBold"`. Self-evident from
-    /// the values.
+    /// PostScript font name, e.g. `"Helvetica-BoldOblique"`, `"CourierNewPSMT"`.
     pub const FONT_NAME: &[u32] = &[11, 5];
-    /// Font colour, as a message of [`RED`], [`GREEN`], [`BLUE`], [`ALPHA`].
-    ///
-    /// **The weakest claim here.** The shape is certain — four floats in
-    /// `0.0..=1.0` with alpha `1.0` in all 530 samples, and the same shape
-    /// appears at other paths in the same archive. That it is the *font* colour
-    /// rather than some other colour is inference: it is the first such message
-    /// in the property bag and is present on nearly every style. Every sample
-    /// is black, so the samples cannot separate it from another colour that
-    /// happens to be black everywhere too.
+    /// Font colour. Confirmed: red came back `1, 0, 0` and `#123456` exact.
     pub const FONT_COLOR: &[u32] = &[11, 7];
     pub const RED: &[u32] = &[11, 7, 3];
     pub const GREEN: &[u32] = &[11, 7, 4];
     pub const BLUE: &[u32] = &[11, 7, 5];
     pub const ALPHA: &[u32] = &[11, 7, 6];
+    /// Language tag, e.g. `"fr"`.
+    pub const LANGUAGE: &[u32] = &[11, 9];
+    /// Vertical position: `1` superscript, `2` subscript.
+    pub const SUPERSCRIPT: &[u32] = &[11, 10];
+    /// Underline: `1` single, `2` double.
+    pub const UNDERLINE: &[u32] = &[11, 11];
+    /// Strikethrough, `0` or `1`.
+    pub const STRIKETHROUGH: &[u32] = &[11, 12];
+    /// Capitalisation: `1` all caps, `2` small caps.
+    pub const CAPITALISATION: &[u32] = &[11, 13];
+    /// Baseline shift. The sample asked for 6pt up and stored `12`.
+    pub const BASELINE_SHIFT: &[u32] = &[11, 14];
+    /// Text background — a highlight behind the characters. `#ABCDEF` exact.
+    pub const TEXT_BACKGROUND: &[u32] = &[11, 26];
+    /// Tracking, as a fraction of the font size: 3pt on 12pt text gave `0.25`.
+    pub const TRACKING: &[u32] = &[11, 27];
+
+    // -- paragraph properties, field 12 --------------------------------------
+    /// Alignment: `1` right, `2` centre, `3` justified. Left is the absence.
+    pub const ALIGNMENT: &[u32] = &[12, 1];
+    /// Paragraph background fill. `#FEDCBA` exact.
+    pub const PARAGRAPH_BACKGROUND: &[u32] = &[12, 6];
+    /// First-line indent, points.
+    pub const FIRST_LINE_INDENT: &[u32] = &[12, 7];
+    /// Keep with next paragraph, `0` or `1`.
+    pub const KEEP_WITH_NEXT: &[u32] = &[12, 10];
+    /// Left indent, points.
+    pub const LEFT_INDENT: &[u32] = &[12, 11];
+    /// Line spacing as a multiple: 175% gave `1.75`.
+    pub const LINE_SPACING: &[u32] = &[12, 13, 2];
+    /// Page break before, `0` or `1`.
+    pub const PAGE_BREAK_BEFORE: &[u32] = &[12, 14];
+    /// Right indent, points.
+    pub const RIGHT_INDENT: &[u32] = &[12, 19];
+    /// Space after the paragraph, points.
+    pub const SPACE_AFTER: &[u32] = &[12, 20];
+    /// Space before the paragraph, points.
+    pub const SPACE_BEFORE: &[u32] = &[12, 21];
+    /// Widow and orphan control, `0` or `1`.
+    pub const WIDOW_CONTROL: &[u32] = &[12, 26];
+    /// Reference to the list style a bulleted or numbered paragraph uses.
+    pub const LIST_STYLE: &[u32] = &[12, 40, 1];
 
     /// The paths above by name, for command lines and config.
     pub const BY_NAME: &[(&str, &[u32])] = &[
@@ -216,6 +261,25 @@ pub mod property {
         ("green", GREEN),
         ("blue", BLUE),
         ("alpha", ALPHA),
+        ("language", LANGUAGE),
+        ("superscript", SUPERSCRIPT),
+        ("underline", UNDERLINE),
+        ("strikethrough", STRIKETHROUGH),
+        ("capitalisation", CAPITALISATION),
+        ("baseline-shift", BASELINE_SHIFT),
+        ("text-background", TEXT_BACKGROUND),
+        ("tracking", TRACKING),
+        ("alignment", ALIGNMENT),
+        ("paragraph-background", PARAGRAPH_BACKGROUND),
+        ("first-line-indent", FIRST_LINE_INDENT),
+        ("keep-with-next", KEEP_WITH_NEXT),
+        ("left-indent", LEFT_INDENT),
+        ("line-spacing", LINE_SPACING),
+        ("page-break-before", PAGE_BREAK_BEFORE),
+        ("right-indent", RIGHT_INDENT),
+        ("space-after", SPACE_AFTER),
+        ("space-before", SPACE_BEFORE),
+        ("widow-control", WIDOW_CONTROL),
         ("name", super::NAME),
         ("style-identifier", super::STYLE_IDENTIFIER),
     ];

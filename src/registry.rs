@@ -116,22 +116,28 @@ const ENTRIES: &[Entry] = &[
         confidence: Inferred,
         app: App::Any,
     },
+    // 2021 and 2022 are the other way round from what public prior art says.
+    // Settled by asking the styles: across six documents, every type 2021 has an
+    // internal identifier of the form `character-style-…` (12 of them) and every
+    // type 2022 `…-paragraphstyle-…` (229). A type 2022 also carries paragraph
+    // properties — alignment, indents, tab stops — which a character style has
+    // no use for.
     Entry {
         message_type: 2021,
-        name: "TSWP.ParagraphStyleArchive",
-        confidence: Inferred,
+        name: "TSWP.CharacterStyleArchive",
+        confidence: Confirmed,
         app: App::Any,
     },
     Entry {
         message_type: 2022,
-        name: "TSWP.CharacterStyleArchive",
-        confidence: Inferred,
+        name: "TSWP.ParagraphStyleArchive",
+        confidence: Confirmed,
         app: App::Any,
     },
     Entry {
         message_type: 2023,
         name: "TSWP.ListStyleArchive",
-        confidence: Inferred,
+        confidence: Confirmed,
         app: App::Any,
     },
     Entry {

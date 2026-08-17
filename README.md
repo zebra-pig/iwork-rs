@@ -80,8 +80,10 @@ consequences worth knowing:
 
 A `TSWP.StorageArchive` holds no formatting. It holds *attribute tables* —
 lists of `{character_index, reference}` entries, each run reaching to the next —
-and the objects those references land on are the styles. Fields 5, 7 and 8 point
-at character, list and paragraph styles respectively.
+and the objects those references land on are the styles. Field 5 points at
+**paragraph** styles, field 7 at list styles and field 8 at **character** styles
+— the opposite of what the field order suggests, and of what this crate assumed
+until a probe document settled it.
 
 [`style`](src/style.rs) gives you CRUD over them, and it splits along exactly
 that line:
@@ -109,12 +111,18 @@ iwork style     Report.pages 2857                        # what is in there
 iwork set-style Report.pages 2857 font-size=f32:18 out.pages
 ```
 
-`bold`, `italic`, `font-size`, `font-name`, `red`, `green`, `blue`, `alpha`,
-`name`, `style-identifier` — each recorded in
-[`style::property`](src/style.rs) with the evidence behind it, and with what the
-evidence does not reach. `bold` and `italic` are *toggles*, independent of the
-font's own weight; the colour's shape is certain but that it is the font's
-colour is inference.
+Twenty-seven of them: `bold`, `italic`, `font-size`, `font-name`, the colour
+channels, `underline`, `strikethrough`, `tracking`, `alignment`, the indents,
+`line-spacing`, `space-before`/`space-after` and the rest, each recorded in
+[`style::property`](src/style.rs).
+
+They were established by experiment rather than by correlation. A document was
+built in which every paragraph differed from a baseline in exactly one property
+— 37pt, `#123456`, 175%, 17pt — and imported into Pages; diffing each resulting
+style against the baseline's leaves one changed field per probe. All four probe
+colours came back byte-exact, which is what turned the colour field from a guess
+into a fact. `bold` and `italic` are *toggles*, independent of the font's own
+weight.
 
 Creating by copying is the same rule [`FORMAT.md`](FORMAT.md) gives for whole
 documents, for the same reason: the Pages sample spends 313 objects on its

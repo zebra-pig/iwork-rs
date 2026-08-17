@@ -256,6 +256,95 @@ fn attribute_tables_point_at_styles_of_the_matching_kind() {
     }
 }
 
+/// Styles say what kind they are, in their own internal identifier, and the
+/// message types must agree.
+///
+/// This is the check that settles 2021 against 2022. Public prior art has them
+/// the other way round and this crate copied that; across six documents every
+/// type 2021 calls itself `character-style-…` and every type 2022
+/// `…-paragraphstyle-…`, with no exceptions in either direction.
+#[test]
+fn style_types_match_the_identifiers_the_styles_give_themselves() {
+    let mut counted = 0;
+    for path in require_fixtures() {
+        let doc = Document::open(&path).unwrap();
+        for style in doc.text_styles() {
+            let Some(identifier) = &style.style_identifier else {
+                continue;
+            };
+            let lower = identifier.to_ascii_lowercase();
+            let claimed = if lower.contains("characterstyle") || lower.contains("character-style") {
+                StyleKind::Character
+            } else if lower.contains("paragraphstyle") || lower.contains("paragraph-style") {
+                StyleKind::Paragraph
+            } else if lower.contains("liststyle") || lower.contains("list-style") {
+                StyleKind::List
+            } else {
+                continue;
+            };
+            counted += 1;
+            assert_eq!(
+                style.kind,
+                claimed,
+                "{}: style {} calls itself {identifier:?} but is message type {}",
+                path.display(),
+                style.identifier,
+                style.kind.message_type()
+            );
+        }
+    }
+    if counted > 0 {
+        eprintln!("{counted} styles agreed with their own identifiers");
+    }
+}
+
+/// The two tables are the other way round from what the field order suggests:
+/// field 5 is the paragraph table, field 8 the character one.
+///
+/// The check that shows it: every entry in field 5 sits at a paragraph boundary.
+/// A character-attribute table has no reason to, and field 8's does not.
+#[test]
+fn the_paragraph_table_holds_entries_at_paragraph_starts() {
+    for path in require_fixtures() {
+        let doc = Document::open(&path).unwrap();
+        for (_, object) in doc.objects() {
+            if object.message_type() != iwork::TYPE_STORAGE {
+                continue;
+            }
+            let Ok(storage) = Message::decode(object.payload()) else {
+                continue;
+            };
+            let text = doc.storage_text(object.identifier).unwrap();
+            let starts: Vec<u64> = iwork::text::paragraph_ranges(&text)
+                .into_iter()
+                .map(|r| r.start)
+                .collect();
+            if starts.len() < 2 {
+                continue;
+            }
+            let Some(table) = storage
+                .bytes(StyleKind::Paragraph.attribute_table())
+                .and_then(iwork::pb::decode_nested)
+            else {
+                continue;
+            };
+            let length = iwork::text::length(&text);
+            for run in style::runs(&table) {
+                // A trailing entry at the very end of the text is normal — it is
+                // where the style of a paragraph yet to be typed comes from.
+                assert!(
+                    starts.contains(&run.start) || run.start == length,
+                    "{}: storage {} paragraph run at {} is neither a paragraph start \
+                     nor the end of the text ({length}) ({starts:?})",
+                    path.display(),
+                    object.identifier,
+                    run.start
+                );
+            }
+        }
+    }
+}
+
 /// Copying a style must add exactly one object, leave the text alone, take an
 /// identifier the document has not used, and keep the copy the same *kind* of
 /// style as the template — named or variation, not a mix of the two.

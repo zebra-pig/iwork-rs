@@ -193,10 +193,10 @@ The same in all three apps. Text and formatting are stored separately.
 |---|---|
 | 2 | reference to the owning stylesheet |
 | 3 | the text, UTF-8, **repeated** — long text is split into several runs |
-| 5 | character-attribute table |
+| 5 | **paragraph**-style table |
 | 6 | packed paragraph/bidi flags |
 | 7 | list-style table |
-| 8 | paragraph-style table |
+| 8 | **character**-attribute table |
 
 Every attribute table has the same shape: repeated entries of
 `{1: character_index, 2: reference to a style object}`, strictly increasing by
@@ -205,6 +205,22 @@ index. A run starts at its index and continues until the next entry.
 Paragraphs are `\n` within a single storage; there is no per-paragraph object.
 Each shape on the page owns its own storage — the Pages sample has 62 of them
 for the body, headline, pull quotes, captions, chart labels and credits.
+
+> **Fields 5 and 8 are the other way round from what the order suggests.** The
+> evidence is right here: the run indices of field 5 "are exactly the paragraph
+> starts", as recorded below — a character-attribute table has no reason to sit
+> on paragraph boundaries and field 8's does not. Confirmed independently by
+> importing a document in which each paragraph varied one property: alignment
+> and indents landed in the style referenced from field 5, bold and font size in
+> the one from field 8.
+>
+> A paragraph table may also carry a final entry at the *end* of the text, which
+> is where the style of a paragraph not yet typed comes from.
+
+Paragraphs end at `\n` — and also at **`U+0005`**, which appears where a
+document changes layout mid-storage. The paragraph table puts a run immediately
+after it, so reading it as ordinary text splits the paragraphs one character
+wrong.
 
 **Run indices are character offsets, not byte offsets.** In a storage reading
 `"Von Benjamin Keller\nVeröffentlicht am 07.09.2017\nim Magazin …"` the
@@ -226,9 +242,15 @@ consistent across the samples:
 
 | Storage field | Points at | Type |
 |---|---|---|
-| 5 | character styles | 2022 `TSWP.CharacterStyleArchive` |
+| 5 | paragraph styles | 2022 `TSWP.ParagraphStyleArchive` |
 | 7 | list styles | 2023 `TSWP.ListStyleArchive` |
-| 8 | paragraph styles | 2021 `TSWP.ParagraphStyleArchive` |
+| 8 | character styles | 2021 `TSWP.CharacterStyleArchive` |
+
+**2021 is the character archive and 2022 the paragraph one** — the opposite of
+what public prior art says. Across six documents, all 12 styles of type 2021
+carry an internal identifier of the form `character-style-…` and all 229 of type
+2022 `…-paragraphstyle-…`; type 2022 also carries paragraph properties, which a
+character style has no use for.
 
 Fields 9, 10 and 11 are further tables of the same shape whose targets have not
 been identified. Field 6 is packed flags, not a table.
@@ -277,19 +299,52 @@ care, but a rewritten archive that appends a field at the end no longer looks
 like anything the app would have produced, and "looks like what the app writes"
 is the only correctness standard available without a Mac in the loop.
 
-The property bag is field 11. These were derived by comparing 654 styles
-against names the app assigned them, and are the only fields whose *meaning* is
-claimed here:
+Field **11** is the character property bag — present in both kinds, because a
+paragraph style carries character properties too. Field **12** is the paragraph
+bag, and only paragraph styles have one.
 
-| Field | Meaning | How well established |
+These were settled by experiment: a document was built in which every paragraph
+differed from a baseline in exactly one property, with unmistakable values, and
+imported into Pages. Diffing each resulting style against the baseline leaves
+one changed field per probe.
+
+| Field | Meaning | Asked for → stored |
 |---|---|---|
-| 11.1 | bold toggle, 0/1 | good — set on every `Titel`; independent of the font's own weight, so a style on `HelveticaNeue-Bold` may leave it 0 |
-| 11.2 | italic toggle, 0/1 | good — the only styles setting it are the `Zitat` ones, whose font is an upright cut |
-| 11.3 | font size, points, f32 | strong — `Titel` 24/24/30/30, `Zwischenüberschrift 1` 16, `Text` 11/11/11/12 |
-| 11.5 | PostScript font name | certain — the values are font names |
-| 11.7 | colour: `{3: r, 4: g, 5: b, 6: a}`, floats 0–1 | shape certain, meaning inferred. Every one of 530 samples is opaque black, so they cannot show whether it is the *font's* colour |
+| 11.1 | bold toggle | bold → `1`, plus a `-Bold` font name |
+| 11.2 | italic toggle | italic → `1`, plus `-Oblique` |
+| 11.3 | font size, points | 37pt → `37` |
+| 11.5 | PostScript font name | Courier New → `"CourierNewPSMT"` |
+| 11.7 | **font colour** `{3: r, 4: g, 5: b, 6: a}` | `#123456` → `0.070588, 0.203922, 0.337255` |
+| 11.9 | language | fr-FR → `"fr"` |
+| 11.10 | 1 superscript, 2 subscript | |
+| 11.11 | 1 underline, 2 double underline | |
+| 11.12 | strikethrough | |
+| 11.13 | 1 all caps, 2 small caps | |
+| 11.14 | baseline shift | 6pt up → `12` |
+| 11.21 | shadow `{1: colour, 2: angle, 3: offset, 5: opacity}` | → `45°, 1, 0.5` |
+| 11.26 | text background | `#ABCDEF` → `0.670588, 0.803922, 0.937255` |
+| 11.27 | tracking, as a fraction of font size | 3pt on 12pt → `0.25` |
+| 11.44 | outline `{1: colour, 2: width}`, with 11.45 the switch | |
+| 12.1 | alignment: 1 right, 2 centre, 3 justified | |
+| 12.6 | paragraph background | `#FEDCBA` → `0.996078, 0.862745, 0.729412` |
+| 12.7 | first-line indent, points | 36pt → `36` |
+| 12.10 | keep with next | |
+| 12.11 | left indent, points | 72pt → `72` |
+| 12.13.2 | line spacing, as a multiple | 175% → `1.75` |
+| 12.14 | page break before | |
+| 12.19 | right indent, points | 48pt → `48` |
+| 12.20 / 12.21 | space after / before, points | 23pt, 17pt |
+| 12.25.1.1 | tab stop position, points | 144pt → `144` |
+| 12.26 | widow and orphan control | |
+| 12.32 / 12.15 / 12.45 | paragraph border, its colour and width | |
+| 12.40.1 | reference to the paragraph's list style | |
 
-Everything else in the bag is left unnamed rather than guessed at — a wrong
+All four colours came back byte-exact — `#123456` is `18/255, 52/255, 86/255` —
+which is what makes the colour fields certain rather than merely plausible.
+Horizontal character scaling was asked for and did not survive the import, so
+either Pages does not store it or it lands somewhere this method cannot see.
+
+Everything else in the bags is left unnamed rather than guessed at: a wrong
 field number writes wrong bytes, where a wrong name in the registry only prints
 wrong. `iwork style <file> <id>` prints the whole tree with a path per field,
 which is how the table above was built and how the rest can be.
