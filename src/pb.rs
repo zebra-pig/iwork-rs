@@ -153,6 +153,35 @@ impl Message {
             None => self.fields.push(Field { number, value }),
         }
     }
+
+    /// Remove every occurrence of `number`. Returns how many were removed.
+    pub fn clear(&mut self, number: u32) -> usize {
+        let before = self.fields.len();
+        self.fields.retain(|f| f.number != number);
+        before - self.fields.len()
+    }
+}
+
+/// Decode `bytes` as a nested message, accepting the result only when
+/// re-encoding it reproduces the input exactly.
+///
+/// A length-delimited field is ambiguous on the wire: a submessage, a UTF-8
+/// string and a packed repeated field are all just bytes, and a short string
+/// decodes as a message by accident often enough to matter — `"(\x01"` is a
+/// perfectly good `{5: 1}`. Requiring a byte-exact round-trip is what makes
+/// descending into a nested message safe: anything that is not really a message
+/// either fails to decode or fails to reproduce itself, and non-canonical
+/// varints are caught the same way.
+///
+/// This is the one primitive every recursive walk in this crate is built on, so
+/// that a wrong guess about a payload's shape cannot rewrite it into something
+/// else.
+pub fn decode_nested(bytes: &[u8]) -> Option<Message> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let message = Message::decode(bytes).ok()?;
+    (message.encode() == bytes).then_some(message)
 }
 
 pub fn write_varint(out: &mut Vec<u8>, mut value: u64) {
@@ -250,5 +279,52 @@ mod tests {
     #[test]
     fn group_wire_types_are_rejected() {
         assert!(Message::decode(&[0x0b]).is_err());
+    }
+
+    #[test]
+    fn clear_removes_every_occurrence() {
+        let mut message = Message::default();
+        for _ in 0..3 {
+            message.fields.push(Field {
+                number: 1,
+                value: Value::Varint(7),
+            });
+        }
+        message.set(2, Value::Varint(1));
+        assert_eq!(message.clear(1), 3);
+        assert_eq!(message.fields.len(), 1);
+        assert_eq!(message.clear(1), 0);
+    }
+
+    #[test]
+    fn decode_nested_accepts_a_real_message() {
+        let mut inner = Message::default();
+        inner.set(1, Value::Varint(4242));
+        inner.set(2, Value::Bytes(b"Body".to_vec()));
+        assert_eq!(decode_nested(&inner.encode()), Some(inner));
+    }
+
+    /// The whole point of the round-trip check: text that happens to parse as a
+    /// message must not be treated as one.
+    #[test]
+    fn decode_nested_rejects_text_and_junk() {
+        assert_eq!(decode_nested(b""), None);
+        assert_eq!(decode_nested(b"Grosse Uberschrift"), None);
+        // Valid framing, but a non-canonical varint, so it cannot re-encode to
+        // the same bytes.
+        assert_eq!(decode_nested(&[0x08, 0x81, 0x00]), None);
+        // Truncated length-delimited field.
+        assert_eq!(decode_nested(&[0x0a, 0x05, b'a']), None);
+    }
+
+    /// A short ASCII string that *is* accepted by `Message::decode` — the case
+    /// the round-trip check exists for. `"(\x01"` decodes as `{5: 1}`.
+    #[test]
+    fn decode_nested_is_not_fooled_by_a_shape_that_merely_parses() {
+        assert!(Message::decode(b"(\x01").is_ok());
+        // It really does re-encode identically, so this one is genuinely
+        // ambiguous and the caller sees a message. Anything longer is not.
+        assert!(decode_nested(b"Body text").is_none());
+        assert!(decode_nested(b"Titel").is_none());
     }
 }

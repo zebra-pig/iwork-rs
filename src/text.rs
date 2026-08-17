@@ -24,7 +24,41 @@ use crate::pb::{Field, Message, Value};
 
 /// Field numbers holding attribute tables. Field 6 is packed flags rather than
 /// a table and is deliberately excluded.
-const ATTRIBUTE_TABLES: &[u32] = &[5, 7, 8, 9, 10, 11];
+///
+/// Fields 5, 7 and 8 are the character, list and paragraph style tables — see
+/// [`crate::style`]. The rest are the same shape and are treated the same way
+/// without a claim about what they point at, which is what lets a style be
+/// deleted without leaving a dangling reference behind in one of them.
+pub const ATTRIBUTE_TABLES: &[u32] = &[5, 7, 8, 9, 10, 11];
+
+/// Length of a storage's text in UTF-16 code units — the unit run indices are
+/// counted in.
+pub fn length(text: &str) -> u64 {
+    text.encode_utf16().count() as u64
+}
+
+/// Character ranges of the paragraphs in `text`, in UTF-16 code units.
+///
+/// Paragraphs are `\n` inside one storage and the newline belongs to the
+/// paragraph it ends, so the ranges tile the text with no gaps. A paragraph
+/// style applies to whole paragraphs, and this is how to name them. Empty text
+/// has no paragraphs.
+pub fn paragraph_ranges(text: &str) -> Vec<std::ops::Range<u64>> {
+    let mut out = Vec::new();
+    let mut start = 0u64;
+    let mut index = 0u64;
+    for unit in text.encode_utf16() {
+        index += 1;
+        if unit == u16::from(b'\n') {
+            out.push(start..index);
+            start = index;
+        }
+    }
+    if start < index {
+        out.push(start..index);
+    }
+    out
+}
 
 /// Concatenate the text runs of a storage archive.
 pub fn read(storage: &Message) -> String {
@@ -85,7 +119,7 @@ pub fn write(storage: &mut Message, new_text: &str) {
     // NSString-backed, which makes astral characters count as two — if that
     // turns out to be wrong it only matters for text containing emoji or
     // similar, and only past the first such character.
-    let limit = new_text.encode_utf16().count() as u64;
+    let limit = length(new_text);
     for field in &mut storage.fields {
         if !ATTRIBUTE_TABLES.contains(&field.number) {
             continue;
@@ -215,6 +249,22 @@ mod tests {
         write(&mut s, "xyz");
         assert_eq!(s.all(3).count(), 1);
         assert_eq!(read(&s), "xyz");
+    }
+
+    #[test]
+    fn paragraphs_tile_the_text_and_keep_their_newline() {
+        assert_eq!(paragraph_ranges("one\ntwo\nthree"), vec![0..4, 4..8, 8..13]);
+        assert_eq!(paragraph_ranges("one\ntwo\n"), vec![0..4, 4..8]);
+        assert_eq!(paragraph_ranges("no newline"), vec![0..10]);
+        assert_eq!(paragraph_ranges("\n"), vec![0..1]);
+        assert!(paragraph_ranges("").is_empty());
+    }
+
+    /// Paragraph ranges are counted the same way run indices are.
+    #[test]
+    fn paragraphs_count_utf16_code_units() {
+        assert_eq!(paragraph_ranges("\u{1F600}\nx"), vec![0..3, 3..4]);
+        assert_eq!(length("\u{1F600}\nx"), 4);
     }
 
     /// Indices are UTF-16 code units, so astral characters count as two.

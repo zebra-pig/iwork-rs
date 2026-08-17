@@ -9,7 +9,8 @@
 
 use std::path::{Path, PathBuf};
 
-use iwork::{iwa, Document, Kind, Package};
+use iwork::pb::Message;
+use iwork::{iwa, style, Document, Kind, Package, StyleKind};
 
 fn fixtures() -> Vec<PathBuf> {
     let dir = std::env::var("IWORK_FIXTURES")
@@ -199,6 +200,186 @@ fn components_resolve_to_real_streams() {
                 component.preferred_name
             );
         }
+    }
+}
+
+/// Every style a run of text points at must be an object that exists, and the
+/// three tables must point at the kind of style this crate says they do. This
+/// is the claim `style::StyleKind::attribute_table` rests on, so a document
+/// that disagrees should fail loudly rather than be edited on a wrong premise.
+#[test]
+fn attribute_tables_point_at_styles_of_the_matching_kind() {
+    for path in require_fixtures() {
+        let doc = Document::open(&path).unwrap();
+        let styles: Vec<_> = doc
+            .text_styles()
+            .into_iter()
+            .map(|s| (s.identifier, s.kind))
+            .collect();
+
+        for (stream, object) in doc.objects() {
+            if object.message_type() != iwork::TYPE_STORAGE {
+                continue;
+            }
+            let Ok(storage) = Message::decode(object.payload()) else {
+                continue;
+            };
+            for kind in [StyleKind::Character, StyleKind::Paragraph, StyleKind::List] {
+                let Some(table) = storage
+                    .bytes(kind.attribute_table())
+                    .and_then(iwork::pb::decode_nested)
+                else {
+                    continue;
+                };
+                for run in style::runs(&table) {
+                    let Some(target) = run.style else { continue };
+                    assert!(
+                        doc.object(target).is_some(),
+                        "{}: {stream} storage {} points at missing object {target}",
+                        path.display(),
+                        object.identifier
+                    );
+                    if let Some((_, found)) = styles.iter().find(|(id, _)| *id == target) {
+                        assert_eq!(
+                            *found,
+                            kind,
+                            "{}: storage {} field {} points at a {} style",
+                            path.display(),
+                            object.identifier,
+                            kind.attribute_table(),
+                            found.as_str()
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Copying a style must add exactly one object, leave the text alone, and take
+/// an identifier the document has not used.
+#[test]
+fn creating_a_style_adds_one_object_and_nothing_else() {
+    for path in require_fixtures() {
+        let doc = Document::open(&path).unwrap();
+        let Some(template) = doc.text_styles().into_iter().next() else {
+            continue; // a document with no styles is fine, just not useful here
+        };
+        let used: Vec<u64> = doc.objects().map(|(_, o)| o.identifier).collect();
+
+        let mut edited = Document::open(&path).unwrap();
+        let created = edited
+            .create_text_style(template.identifier, "iwork-rs")
+            .unwrap();
+        assert!(
+            !used.contains(&created.identifier),
+            "{}: identifier {} was already in use",
+            path.display(),
+            created.identifier
+        );
+
+        let out = std::env::temp_dir().join(format!(
+            "iwork-new-style-{}",
+            path.file_name().unwrap().to_string_lossy()
+        ));
+        edited.save(&out).unwrap();
+
+        let reopened = Document::open(&out).unwrap();
+        assert_eq!(
+            reopened.objects().count(),
+            doc.objects().count() + 1,
+            "{}: object count",
+            path.display()
+        );
+        let new = reopened.text_style(created.identifier).unwrap();
+        assert_eq!(new.kind, template.kind, "{}", path.display());
+        assert_eq!(new.name(), Some("iwork-rs"), "{}", path.display());
+        assert_eq!(
+            reopened.last_object_identifier(),
+            Some(created.identifier),
+            "{}: high-water mark was not bumped",
+            path.display()
+        );
+
+        let before: Vec<_> = doc.text_storages().into_iter().map(|s| s.text).collect();
+        let after: Vec<_> = reopened
+            .text_storages()
+            .into_iter()
+            .map(|s| s.text)
+            .collect();
+        assert_eq!(before, after, "{}: text changed", path.display());
+        let _ = std::fs::remove_file(&out);
+    }
+}
+
+/// Applying a style must change which style a range uses and nothing else —
+/// not the text, not the object count, not the other streams.
+#[test]
+fn applying_a_style_touches_only_its_own_stream() {
+    for path in require_fixtures() {
+        let doc = Document::open(&path).unwrap();
+        let Some(target) = doc.text_storages().into_iter().next() else {
+            continue;
+        };
+        let Some(style) = doc
+            .text_styles()
+            .into_iter()
+            .find(|s| s.kind == StyleKind::Character)
+        else {
+            continue;
+        };
+
+        let mut edited = Document::open(&path).unwrap();
+        let range = 0..1.min(target.text.encode_utf16().count() as u64);
+        if range.is_empty() {
+            continue;
+        }
+        edited
+            .apply_text_style(target.identifier, range.clone(), style.identifier)
+            .unwrap();
+        let out = std::env::temp_dir().join(format!(
+            "iwork-apply-style-{}",
+            path.file_name().unwrap().to_string_lossy()
+        ));
+        edited.save(&out).unwrap();
+
+        let reopened = Document::open(&out).unwrap();
+        assert_eq!(
+            reopened.storage_text(target.identifier).unwrap(),
+            doc.storage_text(target.identifier).unwrap(),
+            "{}: text changed",
+            path.display()
+        );
+        assert_eq!(
+            reopened.objects().count(),
+            doc.objects().count(),
+            "{}: object count changed",
+            path.display()
+        );
+        assert!(
+            reopened
+                .text_style_usage(style.identifier)
+                .iter()
+                .any(|u| u.storage == target.identifier && u.range.start == range.start),
+            "{}: the run was not applied",
+            path.display()
+        );
+
+        let before = Package::read(&path).unwrap();
+        let after = Package::read(&out).unwrap();
+        for name in before.names().filter(|n| n.ends_with(".iwa")) {
+            if name == target.stream {
+                continue;
+            }
+            assert_eq!(
+                iwa::decompress(before.get(name).unwrap()).unwrap(),
+                iwa::decompress(after.get(name).unwrap()).unwrap(),
+                "{}: {name} changed while styling {}",
+                path.display(),
+                target.stream
+            );
+        }
+        let _ = std::fs::remove_file(&out);
     }
 }
 

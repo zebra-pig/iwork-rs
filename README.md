@@ -16,6 +16,14 @@ for storage in doc.text_storages() {
 }
 
 doc.set_text(6083, "A new headline")?;
+
+// Text styles, by copy-and-adjust
+for style in doc.text_styles() {
+    println!("{} {} {:?}", style.identifier, style.kind.as_str(), style.name());
+}
+let kicker = doc.create_text_style(3712, "Kicker")?;
+doc.apply_text_style(6083, 0..8, kicker.identifier)?;  // UTF-16 code units
+
 doc.save("Report-edited.pages")?;
 ```
 
@@ -30,6 +38,14 @@ iwork set-text  Report.pages 6083 "…" out.pages
 iwork objects   Budget.numbers 2001       # every object of one message type
 iwork extract   Report.pages ./media      # embedded media, byte-identical
 iwork roundtrip Report.pages out.pages    # decode and re-encode every object
+
+iwork styles       Report.pages           # every text style, with its object id
+iwork style        Report.pages 3712      # one style, field by field, and what uses it
+iwork new-style    Report.pages 3712 Kicker out.pages
+iwork set-style    Report.pages 3801 11.12=f32:18 out.pages
+iwork apply-style  Report.pages 6083 0 8 3801 out.pages
+iwork delete-style Report.pages 3801 3712 out.pages    # 3712 replaces it
+iwork paragraphs   Report.pages 6083      # paragraph ranges, for apply-style
 ```
 
 ## How it works
@@ -55,6 +71,37 @@ consequences worth knowing:
   `Unverified`. It feeds human-readable output only; a wrong name cannot
   break parsing.
 
+## Text styles
+
+A `TSWP.StorageArchive` holds no formatting. It holds *attribute tables* —
+lists of `{character_index, reference}` entries, each run reaching to the next —
+and the objects those references land on are the styles. Fields 5, 7 and 8 point
+at character, list and paragraph styles respectively.
+
+[`style`](src/style.rs) gives you CRUD over them, and it splits along exactly
+that line:
+
+|  | How it works |
+|---|---|
+| **Read** | enumerate styles, their names, their fields, and every run that uses them |
+| **Create** | **copy** an existing style, allocate an identifier above `PackageMetadata` field 1, list the copy wherever the template was listed |
+| **Update** | rewrite a field by path (`11.12`), or hand the decoded archive to a closure |
+| **Delete** | re-point or drop the runs, unlist it, refuse if a reference would be left dangling |
+| **Apply** | point a character range at a style, splitting the run table and restoring what followed |
+
+Everything that decides *which text gets which style* works on the attribute
+tables, whose shape is asserted by the test suite. Nothing decides what is
+*inside* a style: this crate does not claim to know that bold is field 1 or the
+font size field 12, because unlike a wrong name in the registry, a wrong field
+number there would write wrong bytes into your document. So `iwork style` prints
+the field tree with a path for every field, and `iwork set-style` takes those
+paths — the numbers come from the document in front of you, not from a guess.
+
+Creating by copying is the same rule [`FORMAT.md`](FORMAT.md) gives for whole
+documents, for the same reason: the Pages sample spends 313 objects on its
+stylesheet, and a style that already works is a better starting point than a
+synthesised one.
+
 ## What is verified
 
 Everything below is asserted by `cargo test` when you supply fixtures.
@@ -67,6 +114,17 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | Media registry resolves | ✅ | — (no media in samples) | ❔ |
 | Text extraction | ✅ | ✅ | ❔ |
 | Edit text, leave every other object alone | ✅ | ✅ | ❔ |
+| Attribute tables point at styles of the matching kind | ❔ | ❔ | ❔ |
+| Copy a style: one new object, text untouched | ❔ | ❔ | ❔ |
+| Apply a style, leave every other stream alone | ❔ | ❔ | ❔ |
+
+The three style rows are asserted by `cargo test` like everything else above
+them, but no fixture was available when they were written, so none has yet been
+run against a real document — hence ❔ rather than ✅ even for Pages. The style
+*logic* is covered without fixtures by `tests/styles.rs`, which builds a
+document in memory and runs the whole cycle through the real ZIP and IWA
+writers; what the fixture rows would add is the confirmation that real documents
+are shaped the way that synthetic one assumes.
 
 Developed against one real Pages document (a 15 MB German magazine article,
 485 objects, two TIFFs and two charts) and two Numbers spreadsheets from
@@ -117,6 +175,15 @@ repeated-field ordering, and objects straddling a Snappy block boundary.
 - **Editing text truncates styling past the edit.** Attribute runs are clamped
   into the new length, not remapped onto the new wording. See
   [`text::write`](src/text.rs).
+- **Styles are edited by field number, not by name.** There is no
+  `set_bold(true)`: the meaning of a style archive's fields is not published, so
+  [`style`](src/style.rs) will not guess at it. Read the field tree with `iwork
+  style`, compare two styles that differ in the way you want, and set the field
+  that moved. New styles come from copying, so the fields you never touch stay
+  whatever the template had.
+- **Deleting a style is refused rather than forced.** If a reference this crate
+  cannot account for would be left dangling, the delete fails and says which
+  objects still hold one.
 - **No layout, no rendering, no formula evaluation.** This reads and rewrites
   the document; it does not understand it.
 - **"iWork opens it" is not tested here.** The tests prove the bytes are
