@@ -29,6 +29,20 @@ doc.apply_text_style(6083, 0..8, kicker.identifier)?;                   // UTF-1
 doc.save("Report-edited.pages")?;
 ```
 
+Tables are read the same way, and are cross-app — a Numbers sheet, a Pages page
+and a Keynote slide all hold the same `TST` archives:
+
+```rust
+let doc = iwork::Document::open("Budget.numbers")?;
+for table in doc.tables() {
+    println!("{} — {}×{} on {:?}", table.name, table.rows, table.columns, table.sheet);
+    for cell in table.cells() {
+        println!("  r{} c{}  {}  [{}]", cell.row, cell.column,
+                 cell.value.to_text(), cell.format);
+    }
+}
+```
+
 ## CLI
 
 ```
@@ -42,6 +56,11 @@ iwork dump      Talk.key 1                # one object, field by field
 iwork check     Report.pages              # look for a broken object graph
 iwork extract   Report.pages ./media      # embedded media, byte-identical
 iwork roundtrip Report.pages out.pages    # decode and re-encode every object
+
+iwork tables    Budget.numbers            # every table: size, headers, merges, geometry
+iwork cells     Budget.numbers Zellarten  # every cell, with its type and data format
+iwork cells     Budget.numbers 904769 --raw   # …and the cell record behind each one
+iwork csv       Budget.numbers Zellarten  # one table as CSV
 
 iwork styles       Report.pages           # every text style, with its object id
 iwork style        Report.pages 3712      # one style, field by field, and what uses it
@@ -165,6 +184,34 @@ only there. Bare style references elsewhere can be positions rather than
 memberships (a Keynote slide's five outline levels are exactly that), and adding
 an entry to one of those corrupts it.
 
+### Tables
+
+A table's cells are the one part of the format that is not protobuf. They are
+fixed-layout byte records concatenated into a `bytes` field, sliced by an array
+of signed 16-bit offsets, and every record holds *keys* rather than content:
+its text is a number pointing into the table's string list, and so are its
+format, its style and its formula. `doc.tables()` resolves all of that;
+[`FORMAT.md`](FORMAT.md) §Tables writes down the layout.
+
+Three things are worth knowing before trusting a table reader, including this
+one:
+
+**A Numbers document has no text storages at all.** `iwork text` reads nothing
+out of a spreadsheet whose cells the app reads 2711 values from. Pages and
+Keynote tables are the other way round, and their cells point at
+`TSWP.StorageArchive`s.
+
+**A value without its format is only half the cell.** `0.25` shown as `25%`,
+`19.99` shown as `CHF 19.99`, `TRUE` shown as a checkbox — and the difference
+between a cell that *holds* a number and a cell the user *made* a number is one
+bit in the record. Value and format are read together.
+
+**The app is the oracle.** `tests/tables.rs` asks Numbers, through AppleScript,
+for the value, the data format and the formula of every cell of every table of
+three spreadsheets and compares them with what this crate decoded: 2943 cells,
+all agreeing. Run it with `IWORK_APP_CHECK=1 cargo test`. It found real bugs —
+the format model above is what survived it.
+
 ## What is verified
 
 Everything below is asserted by `cargo test` when you supply fixtures.
@@ -181,6 +228,17 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | Copy a style: one new object, text untouched | ✅ | ✅ | ✅ |
 | Apply a style, leave every other stream alone | ✅ | ✅ | ✅ |
 | A copy keeps the template's kind (named vs variation) | ✅ | ✅ | ✅ |
+| Tables: names, sizes, header/footer counts, freeze flags | ✅ | ✅ | — (no fixture) |
+| Cell values: text, number, boolean, date, duration, currency, rich text | ✅ | ✅ | — |
+| Data formats and control cells (checkbox, rating, slider, stepper, pop-up) | ✅ | ✅ | — |
+| Merged ranges | — (none) | ✅ | — |
+| Every cell record consumed to the byte (2515 of them) | ✅ | ✅ | — |
+| **Every cell agrees with the app** (2943 compared) | — | ✅ | — |
+
+Tables are read, not written: nothing in this crate changes a cell. Keynote is
+the gap in that block for one reason only — neither AppleScript nor any bundled
+theme will put a table on a slide, so there is no fixture. The archives are the
+same ones Pages uses.
 
 Developed against one real Pages document (a 15 MB German magazine article,
 485 objects, two TIFFs and two charts) and two Numbers spreadsheets from

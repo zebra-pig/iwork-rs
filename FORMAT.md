@@ -445,13 +445,19 @@ downscaled, filtered, filtered thumbnail — and chooses per context.
 Numbers is the same format with a different graph shape:
 
 - Components are spread over `Index/Tables/` — `DataList`, `Tile`,
-  `HeaderStorageBucket` — roughly one stream per table column or region. A
-  two-sheet document produced 97 streams.
-- The 6000s (TST) range dominates: `6004` and `6005` account for over 150
-  objects in a small spreadsheet.
-- `Index/CalculationEngine.iwa` holds the 4000s (TSCE) objects.
-- Cell text still lives in `TSWP.StorageArchive`, so text extraction needs no
-  special casing.
+  `HeaderStorageBucket` — roughly one stream per table side table. A two-sheet
+  document produced 97 streams.
+- The 6000s (TST) range dominates: `6004` (cell styles) and `6005` (data lists)
+  account for over 150 objects in a small spreadsheet.
+- `Index/CalculationEngine.iwa` holds the 4000s (TSCE) objects — **and, in every
+  Numbers document written by 15.3.1 here, the `TST.TableInfoArchive` and
+  `TST.TableModelArchive` objects too.** The table's tiles and data lists are in
+  `Index/Tables/`; the model that points at them is not.
+- **Cell text is not in `TSWP.StorageArchive`.** `iwork text` finds zero text
+  storages in a Numbers document the app reads 2711 cell values out of: a
+  Numbers cell's text is an integer key into the table's own string list. See
+  §Tables. (Pages and Keynote tables are the other way round — their cells
+  point at `TSWP.StorageArchive`s through the rich-text list.)
 
 ### Keynote
 
@@ -490,6 +496,283 @@ Beware the outline levels: `KN.SlideArchive` field 31 is five bare style
 references, one per outline level. It looks exactly like a stylesheet's style
 list and is a *positional array* — an entry added to it does not list a style,
 it shifts the mapping from level to style.
+
+---
+
+## 5. Tables — `TST`
+
+The one part of the format that is not protobuf all the way down. `TST` is
+cross-app: a Numbers sheet, a Pages page and a Keynote slide all hold the same
+archives, and the only difference is what the table's drawable hangs off.
+
+Everything below was read out of documents written by Numbers 15.3.1 and Pages
+15.3.1, and the cell-level claims were then put to Numbers itself: `tests/tables.rs`
+asks the app for the value, the data format and the formula of every cell of
+every table of three spreadsheets through AppleScript and compares — **2943
+cells, all agreeing**. Where something is stated without that backing it says
+so.
+
+### The object graph
+
+```
+TST.TableInfoArchive (6000)          the drawable: geometry, parent, caption
+  1  TSD.DrawableArchive super
+     2  parent           -> the sheet (Numbers) or the containing drawable
+  2  TSP.Reference       -> TST.TableModelArchive
+  7  TSP.UUID group_by_uuid          categories
+  8  TSP.UUID hidden_states_uuid
+
+TST.TableModelArchive (6001)
+  1  string  table_id            uppercase UUID, e.g. "68B384C7-9E7F-…"
+  4  TST.DataStore               INLINE, not a reference
+  6  uint32  number_of_rows      counting headers and footers
+  7  uint32  number_of_columns
+  8  string  table_name          "Zellarten"
+  9  uint32  number_of_header_rows          0–5
+  10 uint32  number_of_header_columns       0–5
+  11 uint32  number_of_footer_rows
+  12 bool    header_rows_frozen
+  13 bool    header_columns_frozen
+  14 uint32  number_of_hidden_rows          user + filtered
+  15 uint32  number_of_hidden_columns
+  16 double  default_row_height             19.929931640625 in a new table
+  17 double  default_column_width           98
+  40 uint32  number_of_filtered_rows
+  41 uint32  number_of_user_hidden_rows     filter-hidden and user-hidden are
+  42 uint32  number_of_user_hidden_columns  separate counts, not one
+  47 TST.MergeOwnerArchive        INLINE — the merges live here (below)
+  70 TST.HiddenStatesOwnerArchive INLINE
+  84 TSCE.HauntedOwnerArchive     the table's identity for cross-table formulas
+
+TST.DataStore (inline at TableModelArchive #4)
+  1  HeaderStorage rowHeaders     INLINE: {1: hash fn, 2: repeated Reference}
+  2  Reference     columnHeaders  a SINGLE HeaderStorageBucket, not a storage
+  3  TileStorage   tiles          INLINE: {1: repeated {1: tileid, 2: Reference},
+                                           2: tile_size (256), 3: wide rows}
+  4  Reference  stringTable       -> TableDataList, listType 1  STRING
+  5  Reference  styleTable                          listType 4  STYLE
+  6  Reference  formula_table                       listType 3  FORMULA
+  12 Reference  formulaErrorTable                   listType 5
+  13 Reference  merge_region_map   ** absent from every document seen here **
+  17 Reference  rich_text_table                     listType 8  RICH_TEXT
+  21 Reference  control_cell_spec_table             listType 12 CONTROL_CELL_SPEC
+  22 Reference  format_table                        listType 2  FORMAT
+```
+
+The row/column asymmetry at `DataStore` 1 and 2 is real and is Apple's: rows get
+a list of bucket references, columns get one bucket.
+
+`TST.HeaderStorageBucket` (6006) holds repeated `{1: index, 2: float size,
+3: hidingState, 4: numberOfCells, 5: cell_style, 6: text_style}`. **Field 2 is a
+literal `0` for a row or column still at the table's default**, and the entry is
+missing altogether for a row or column with no cells; a size of its own means
+the user dragged it. In `numbers-formats.numbers` exactly one column carries
+`150` and one row carries `40`, and every other row and column of every other
+table in the corpus carries `0` or nothing. `hidingState` is 0 throughout the
+corpus — nothing here can hide a row from a script, so filter-hidden versus
+user-hidden is not yet separated at this level.
+
+`TST.TableDataList` (6005, and 6201 as a second registration) is the interning
+mechanism the whole cell format rests on: `{1: listType, 2: nextListID,
+3: repeated ListEntry}`, where a `ListEntry` is `{1: key, 2: refcount}` plus one
+payload field — `3` a string, `4` a reference, `5` a formula, `6` a
+`TSK.FormatStructArchive`, `9` a rich-text payload reference, `12` a
+`TST.CellSpecArchive`. **Keys start at 1 and a stored key of 0 means "none"**, so
+it is a map and not an array.
+
+### Tiles and rows
+
+`TST.Tile` (6002) holds `{1: maxColumn, 2: maxRow, 3: numCells, 4: numrows,
+5: repeated TileRowInfo, 6: storage_version, 7: last_saved_in_BNC,
+8: should_use_wide_rows}`. A tile covers `tile_size` = **256** rows; the 301-row
+fixture has two, and a row's absolute index is
+`tileid * tile_size + tile_row_index`. Rows with no cells have no `TileRowInfo`
+at all, so counting them is not an alternative.
+
+**Numbers 15.3.1 writes neither field 6 nor field 7 on the tile.** The published
+advice is to refuse a tile whose `last_saved_in_BNC` is not `true`; every tile
+in this corpus would be refused by that rule. The version that is actually there
+is `TileRowInfo` field 5, and it says 5.
+
+`TST.TileRowInfo`:
+
+| # | Contents |
+|---|---|
+| 1 | `tile_row_index`, within the tile |
+| 2 | `cell_count` — non-empty cells in the row |
+| 3, 4 | the pre-BNC buffer and offsets. `required`, always present, **meaningless** |
+| 5 | `storage_version` — 5 |
+| 6 | `cell_storage_buffer` — the cell records, concatenated |
+| 7 | `cell_offsets` — `int16[]`, little-endian, **signed**, one per column |
+| 8 | `has_wide_offsets` — offsets count groups of four bytes |
+
+Slicing a row: `-1` means the column has no cell, and a record runs to the
+**next non-negative** offset, not to the next one. The array is padded out with
+`-1` well past the table's width — 255 entries for a five-column table.
+
+### The cell record
+
+Fixed 12-byte header, then optional payloads.
+
+| Byte | Contents |
+|---|---|
+| 0 | storage version. **5**, or this is not the layout below |
+| 1 | cell type, `TST.CellType` (below) |
+| 2–5 | zero in all 2515 records read here |
+| 6 | which data format the user *chose* (below) |
+| 7 | undecoded. `0x08` on currency cells; `0x00` otherwise |
+| 8–11 | `u32` flag word, little-endian |
+
+Each set bit of the flag word introduces one payload, and **the payloads follow
+the header in ascending bit order**:
+
+| Bit | Bytes | Field |
+|---|--:|---|
+| `0x00000001` | 16 | decimal128 value — number and currency |
+| `0x00000002` | 8 | `double` — boolean (`> 0.0`) and duration (seconds) |
+| `0x00000004` | 8 | `double` — date, seconds since 2001-01-01, timezone-naive |
+| `0x00000008` | 4 | key into STRING |
+| `0x00000010` | 4 | key into RICH_TEXT_PAYLOAD |
+| `0x00000020` | 4 | cell style key |
+| `0x00000040` | 4 | text style key |
+| `0x00000080` | 4 | conditional style key |
+| `0x00000100` | 4 | conditional rule key |
+| `0x00000200` | 4 | key into FORMULA |
+| `0x00000400` | 4 | key into CONTROL_CELL_SPEC |
+| `0x00000800` | 4 | key into FORMULA_ERROR |
+| `0x00001000` | 4 | **format kind** — which of the six format slots is this cell's own |
+| `0x00002000` | 4 | number format key |
+| `0x00004000` | 4 | currency format key |
+| `0x00008000` | 4 | date format key |
+| `0x00010000` | 4 | duration format key |
+| `0x00020000` | 4 | text format key |
+| `0x00040000` | 4 | boolean format key |
+| `0x00080000` | 4 | comment key |
+| `0x00100000` | 4 | import-warning key |
+
+The empty cell is the header with `flags = 0`:
+`05 00 00 00 00 00 00 00 00 00 00 00`.
+
+**The order is load-bearing and it is not the only order in the record.** A bit
+whose meaning is of no interest still advances the cursor by its width, and byte
+6 numbers the same formats differently — duration is `0x04` there and `0x10000`
+here, date is `0x08` there and `0x8000` here. A decoder that took its field
+positions from byte 6 would return two keys swapped with every length still
+adding up. Two things say the order above is the right one, and neither is a
+proto file: every one of 2515 records in the corpus ends exactly on its last
+field (`every_cell_record_is_consumed_to_the_byte`), and the `0x1000` payload —
+1 number, 2 currency, 3 date, 4 duration, 5 text, 6 boolean — numbers the six
+format slots in exactly this sequence.
+
+Byte 1, `TST.CellType`: `0` empty, `1` span, `2` number, `3` text, `4` formula,
+`5` date, `6` boolean, `7` duration, `8` error, `9` rich text, and **`10`
+currency, which is in no published enum**. This is *not* `TST.CellValueType`,
+which the protobuf form of a cell uses and which numbers almost every case
+differently.
+
+decimal128 is Apple's layout, not IEEE 754's: sign is bit 7 of byte 15, a
+14-bit exponent is bits 6–0 of byte 15 followed by bits 7–1 of byte 14, biased
+by `0x1820`, and a 113-bit mantissa is bytes 0–13 plus bit 0 of byte 14, little
+endian. Numbers normalises to fifteen significant digits — `3.14159` is stored
+as `314159000000000 × 10⁻¹⁴` — so a reader that prints the mantissa without
+trimming gets the right number spelled wrong.
+
+### Data formats
+
+A cell's format is a `TSK.FormatStructArchive` interned in the FORMAT list, and
+`format_type` (field 1) is what names it. The values start at 256:
+
+| | | | |
+|--:|---|--:|---|
+| 256 | number | 262 | fraction |
+| 257 | currency | 263 | checkbox |
+| 258 | percent | 267 | rating |
+| 259 | scientific | 268 | duration |
+| 260 | automatic | 269 | numeral system |
+| 261 | date and time | | |
+
+Each was read off a cell whose format Numbers then named through AppleScript.
+264, 265 and 266 are unclaimed: three gaps between checkbox and rating, and
+exactly the three remaining controls, but nothing here produced one — a pop-up,
+stepper or slider cell carries a plain **number** format and a control
+definition instead.
+
+Which format a cell displays takes three things, and the first two are easy to
+miss:
+
+1. **A control wins.** A slider cell is `format_type` 256 plus a
+   `TST.CellSpecArchive` whose `interaction_type` is 5, and Numbers calls it a
+   slider.
+2. **Byte 6 says whether any format was chosen at all** — `0x01` number,
+   `0x02` currency, `0x04` duration, `0x08` date, `0x20` boolean, `0x80` text.
+   Every cell carries a format key in some slot; a plain text cell points at
+   `format_type` 260. Without byte 6 there is nothing separating a cell that
+   holds a number from a cell the user made a number, and both would report the
+   same format. (The distilled prior art calls byte 6 a second presence mask
+   over the same keys. It is not: it is zero on cells that do carry keys.)
+3. **The chosen slot has to be the cell's own**, which is what the `0x1000`
+   payload says. The header of a column formatted as currency is a *text* cell
+   carrying a currency key with the currency bit set, and Numbers draws plain
+   text and reports `automatic`.
+
+The text slot is its own answer: Numbers writes `format_type` 260 into it, which
+everywhere else means automatic, and calls the cell text.
+
+Control cells are `TST.CellSpecArchive` in the CONTROL_CELL_SPEC list:
+`{1: interaction_type, 2: formula, 3/4/5: range min/max/increment,
+6: pop-up menu model, 7: start with first}`. Observed values of
+`interaction_type`: **4** stepper, **5** slider, **6** rating, **7** pop-up menu
+(with a `TST.PopUpMenuModel`, 6206, holding the items), **8** checkbox.
+
+### Merged ranges
+
+A merge is stored nowhere near the cells it covers. The covered cells have no
+record at all — not even a `spanCellType` one — and their offsets are the plain
+`-1` of an empty cell, so nothing about a cell says it is merged away.
+
+What Numbers 15.3.1 writes instead is a **formula per merged range**, in the
+formula store of the table's `merge_owner` (`TableModelArchive` field 47):
+
+```
+47 MergeOwnerArchive
+   1 CFUUIDArchive owner_id
+   2 FormulaStoreArchive
+     2 next_formula_index
+     3 repeated FormulaStorePair { 1: index, 2: TSCE.FormulaArchive }
+                                          1: ASTNodeArrayArchive
+                                             1: repeated ASTNodeArchive
+```
+
+The first node of each formula carries the range. `COLON_TRACT_NODE` (type 67)
+puts it in `AST_colon_tract` (field 40) as absolute column (3) and row (4)
+ranges of `{1: range_begin, 2: range_end?}` — an absent `range_end` means the
+same as `range_begin`. `CELL_REFERENCE_NODE` (type 36) puts a single cell in
+`AST_column` (26) and `AST_row` (27), **zigzag-encoded**, which is a merge one
+cell square: Numbers really does write those, and the way to get one is to type
+into the top-left cell of a merge, which pulls that cell back out of it.
+
+`DataStore.merge_region_map` — the form the published references describe, with
+`CellID.packedData` = `(column << 16) | row` — is read as a fallback and is
+**unverified here**: nothing this repository can produce writes it. The same
+goes for the merge owner's `TSCE.FormulaOwnerDependenciesArchive`
+back-dependencies, which mirror the ranges and are read by nothing.
+
+The app confirms the ranges without ever offering a merge property: **a
+merged-away cell is reported by AppleScript under the name, value and format of
+the cell the merge began in.** `B2:D2` comes back as `B2 B2 B2`, which is a
+merge map by another route, and `tests/tables.rs` checks the decoded merges
+against it.
+
+### What a Numbers document does not have
+
+No `TSWP.StorageArchive` anywhere: `iwork text` reads nothing out of a
+spreadsheet whose cells the app reads 2711 values out of. Pages and Keynote
+tables are the opposite — their cells are `automaticCellType` (9) with a
+rich-text key into the RICH_TEXT_PAYLOAD list, whose entries are
+`TST.RichTextPayloadArchive` (6218) `{1: storage, 2: range, 3: cellid}`, and the
+text is in that storage. The Pages fixture's table mixes both: cells the
+template wrote are rich text, cells a script wrote are plain strings in the
+string table.
 
 ---
 

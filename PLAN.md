@@ -84,26 +84,31 @@ The largest missing area of the format. `TST` is cross-app: Pages and
 Keynote tables use the same archives, so every claim gets three oracles,
 not one.
 
-- [ ] Decode the table object graph: `TST.TableInfoArchive`,
+- [x] Decode the table object graph: `TST.TableInfoArchive`,
       `TST.TableModelArchive`, `TST.TableDataStore`, tiles, row/column
       headers; map table → sheet → document (and table → page/slide in
       Pages/Keynote).
-- [ ] Decode cell storage (the current tile cell format): empty, text
+- [x] Decode cell storage (the current tile cell format): empty, text
       (string-table indirection), number, boolean, date, duration, error,
-      rich-text cells, currency; merged-cell ranges.
-- [ ] Structure state: header row *and column* counts (0–5 each), freeze
+      rich-text cells, currency; merged-cell ranges. *(Error cells are
+      decoded from the type byte and their formula-error key; no fixture
+      produces one, so the value carries no message.)*
+- [x] Structure state: header row *and column* counts (0–5 each), freeze
       flags, hidden rows/columns (filter-hidden and manually-hidden are
       different persisted states), explicit row/column sizes, table names.
-- [ ] Cell data formats, read alongside values: number/currency/percentage/
+      *(The two hidden counts are read separately from the model; the
+      per-row `hidingState` is zero everywhere in the corpus, because
+      nothing in Numbers' scripting interface hides a row — see 1b.)*
+- [x] Cell data formats, read alongside values: number/currency/percentage/
       fraction/scientific/date-time/duration/text/automatic, stored per cell
       and per column; cell controls (checkbox, star rating, slider, stepper,
       pop-up menu with its item list) at least identified.
-- [ ] API: `doc.tables()`, `table.cell(row, col)`, typed `CellValue`.
-- [ ] CLI: `iwork tables <doc>`, `iwork cells <doc> <table-id>`,
+- [x] API: `doc.tables()`, `table.cell(row, col)`, typed `CellValue`.
+- [x] CLI: `iwork tables <doc>`, `iwork cells <doc> <table-id>`,
       `iwork csv <doc> <table-id>`.
-- [ ] Cross-check against AppleScript: the harness reads the same cells via
+- [x] Cross-check against AppleScript: the harness reads the same cells via
       Numbers and the values must agree — the app is the oracle.
-- [ ] FORMAT.md: new §Tables with the tile/cell layout as observed.
+- [x] FORMAT.md: new §Tables with the tile/cell layout as observed.
 
 ## Phase 1b — Table data organisation: read
 
@@ -369,6 +374,117 @@ fixture, and what the app accepted.
     document to appear. Likewise `close every document saving no` came back
     -10699 on a restored Numbers session that then refused `every document`
     with -1728, while closing `document 1` in a loop went through all three.
+
+- 2026-08-18 — **Phase 1 complete (tables, read).** New module `src/table.rs`,
+  `doc.tables()` / `table.cell(row, col)` / typed `CellValue`, `iwork tables |
+  cells [--raw] | csv`, FORMAT.md §5 Tables, and the TST registry block rebuilt from four entries to
+  sixteen — two of the four were wrong (6004 is the cell style, 6005 the data
+  list). `cargo test
+  --all-targets` green: 68 unit + 15 fixture + 34 style + 13 table tests;
+  `cargo fmt --check` and `cargo clippy -D warnings` clean; the byte-identity
+  and `iwork check` tests over the whole corpus are untouched and still pass.
+  Nothing writes to a table.
+
+  **What the oracle proved.** `tests/tables.rs::every_cell_agrees_with_numbers`
+  (`IWORK_APP_CHECK=1`) drives `scripts/table-oracle.sh` →
+  `applescript/table-oracle.applescript`, which reports name, class, value,
+  formatted value, data format and formula for every cell of every table, plus
+  row heights, column widths and header counts — six Apple events per table.
+  Compared against the decoder: **2943 cells across three spreadsheets, every
+  one agreeing** on value, on data format, and on whether it holds a formula;
+  plus 9 tables agreeing on name, row and column count, and header-row,
+  header-column and footer-row counts. Values are compared numerically where
+  AppleScript's rendering is locale-dependent, and dates against the app's
+  *formatted* value, since `value` comes back in the machine's timezone while
+  the stored seconds are naive.
+
+  Structural evidence that needs no app: `every_cell_record_is_consumed_to_the_byte`
+  decodes **2515 records** from four documents and every one ends exactly on
+  its last field, with bytes 2–5 zero throughout. That is what pins the flag
+  word's twenty-one widths and their order.
+
+  **The two bit orders, settled.** The payloads are consumed in ascending
+  flag-word bit order; byte 6 is *not* a second presence mask over the same
+  keys, as the distilled reference has it — it says which data format the user
+  **chose**, and it is zero on most cells, all of which do carry format keys.
+  Two independent confirmations of the flag-word order: the byte-exact record
+  lengths above, and the `0x1000` payload, which numbers the six format slots
+  1 number, 2 currency, 3 date, 4 duration, 5 text, 6 boolean — the flag word's
+  sequence, not byte 6's. That payload is what the reference calls `suggest_id`;
+  it is the cell's *current* format slot, and it is the third thing needed to
+  report a format the way the app does.
+
+  **Data-format codes, read off cells the app then named:** 256 number,
+  257 currency, 258 percent, 259 scientific, 260 automatic, 261 date and time,
+  262 fraction, 263 checkbox, 267 rating, 268 duration, 269 numeral system.
+  264–266 unclaimed — three gaps, and exactly the three remaining controls,
+  but a pop-up/stepper/slider cell carries a plain *number* format plus a
+  `TST.CellSpecArchive`, so nothing here produced one. Control interaction
+  types observed: 4 stepper, 5 slider, 6 rating, 7 pop-up menu, 8 checkbox.
+
+  **Merges resisted the documented route and were solved another way.**
+  `DataStore.merge_region_map` is absent from every document these apps write,
+  the merge owner's `FormulaOwnerDependenciesArchive` back-dependencies are
+  empty, and a merged-away cell has *no cell record at all* — not even a
+  `spanCellType` one. What Numbers 15.3.1 writes is one formula per merged
+  range in `TableModelArchive.merge_owner.formula_store`: a `COLON_TRACT_NODE`
+  carrying absolute column and row ranges, or a `CELL_REFERENCE_NODE` (zigzag)
+  for a one-cell merge. The region-map path is implemented as a fallback and is
+  **Unverified**. Confirming this needed a trick, because AppleScript exposes no
+  merge property: **a merged-away cell is reported under the name, value and
+  format of the cell the merge began in**, so `B2:D2` comes back as `B2 B2 B2`,
+  and the test checks the decoded merges against those names.
+
+  Two app behaviours found on the way, both now recorded in the fixture
+  scripts: writing a value into the top-left cell of an existing merge **pulls
+  that cell back out of the merge** (`merge range "B2:D2"` then `set value of
+  cell "B2"` leaves the app reporting a merge of C2:D2), so fixtures write
+  values first; and `Tile.last_saved_in_BNC` is simply **not written** by
+  15.3.1, so the published "refuse any tile without it" rule refuses every tile
+  in this corpus. The version that is there is `TileRowInfo.storage_version`.
+
+  New fixture `numbers-formats.numbers` (three tables): fifteen data formats
+  applied by script, five control cells, four merges of four shapes including
+  one whose anchor was never given a value, and one row and one column resized
+  by hand — the last of which proves that a header entry's `size` of `0` means
+  "the table's default", which is what every other row and column in the corpus
+  carries. `numbers-values.numbers` was rebuilt with its merge written the
+  other way round, so D9:E9 is now a real two-cell merge.
+
+  Corpus decode summary — `iwork tables`, no app involved:
+
+  | Fixture | Tables | Cells decoded | Merges |
+  |---|--:|--:|--:|
+  | `numbers-values.numbers` | 3 | 37 | 1 |
+  | `numbers-formats.numbers` | 3 | 43 | 4 |
+  | `numbers-large.numbers` | 1 (301×9, two tiles) | 2411 | 0 |
+  | `pages-report.pages` | 1 (6×4, rich text) | 24 | 0 |
+
+  What Phase 1b and Phase 2 should know:
+
+  - **Keynote has no table fixture and cannot get one from a script.** Neither
+    AppleScript nor any bundled theme puts a table on a slide; the archives are
+    the same ones Pages uses, and the Pages fixture exercises them. UI scripting
+    was left on the table as the bonus it was flagged as.
+  - **Hidden rows and columns are decoded but never exercised.** Numbers'
+    scripting dictionary has no `hidden` on a row or a column and no sort or
+    filter command, so `hidingState` is 0 everywhere and the filter-hidden /
+    user-hidden distinction is read from the model's counts only. 1b needs a
+    UI-scripted or hand-made fixture — or `TST.FilterSetArchive` objects, of
+    which the corpus already has seven per document with `is_enabled` and no
+    rules.
+  - **The cell record is understood well enough to write one.** Every field's
+    width and order is pinned by the length check, and the three things a
+    written cell must carry beside its value are now named: the format key in
+    the right slot, byte 6 if the format is to be the user's choice, and the
+    `0x1000` format-kind payload. Numbers writes `0x1000` on *every* cell.
+  - **Formulas are keys, not text.** A formula cell carries only a key into the
+    FORMULA `TableDataList`; `Cell::has_formula` says a formula is there and
+    Phase 5 is what turns it into `=SUM(B3,B7)`. The cached value is in the
+    cell like any other value, which is why the oracle agrees on `84` for
+    `=B3*2` without anything here understanding the formula.
+  - **`iwork cells --raw`** prints the record header and every key for each
+    cell. It is the tool for the next question about this format.
 
 ## Execution notes
 
