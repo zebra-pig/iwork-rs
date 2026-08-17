@@ -37,12 +37,19 @@ the crate, and Numbers evaluates formulas we can read back as an oracle.
    registry (`Inferred` until this repo's own tests observe the field), and
    a claim from them never enters FORMAT.md as Confirmed without a local
    probe backing it.
-7. **The app's UI defines the feature list.** AppleScript covers a fraction
-   of what the apps can put in a document. Features are enumerated from the
-   apps' menus/inspectors and from Apple's published user guides, and probe
-   documents exercising them are produced by driving the UI (System Events
-   UI scripting) when plain AppleScript cannot — then analysed with
-   `iwork dump` to pin down what they write.
+7. **The app's UI defines the feature list — but the screen is locked.**
+   AppleScript covers a fraction of what the apps can put in a document,
+   and System Events UI scripting is unavailable here: a locked screen
+   exposes zero AXWindows, menu items validate as disabled, `activate`
+   never returns (established during Phase 1b; accessibility permission
+   itself is fine). The working substitute is **template mining**: Apple
+   ships 79 `.nmbtemplate` bundles (and Pages/Keynote equivalents) built
+   around exactly the features AppleScript cannot create — scan them with
+   the crate for the type IDs you need, instantiate by template *id* (the
+   bundle path, stable across Macs; names are localised), and the current
+   app writes the whole structure out fresh. Features are enumerated from
+   Apple's user guides (reference/features.md); probes are analysed with
+   `iwork dump` diffs between incremental saves.
 8. **Some features are read-and-pass-through, never authored.** Recorded
    presentations, smart annotations (iPad Pencil ink), EndNote citations,
    live-data cells, live video sources: the crate must carry them intact and
