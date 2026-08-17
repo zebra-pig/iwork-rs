@@ -58,7 +58,7 @@ the crate, and Numbers evaluates formulas we can read back as an oracle.
 
 The foundation every later phase stands on.
 
-- [ ] `scripts/make-fixtures.sh` (+ AppleScript sources): generates a corpus
+- [x] `scripts/make-fixtures.sh` (+ AppleScript sources): generates a corpus
       into `tests/fixtures/generated/` using Pages and Numbers:
       - Pages: plain text, multi-paragraph styled text, lists, a table,
         an inserted image, non-Latin text (German umlauts + CJK + emoji for
@@ -68,14 +68,14 @@ The foundation every later phase stands on.
         a second table styled differently.
       - Keynote: several slides from different master layouts, titles, body
         bullets, presenter notes, an image slide, a skipped slide.
-- [ ] `scripts/app-check.sh <doc> [expected-text]`: opens the document in the
+- [x] `scripts/app-check.sh <doc> [expected-text]`: opens the document in the
       owning app via AppleScript with a timeout, fails loudly if the app
       refuses/crashes/dialogs, optionally reads body text / cell values back
       to confirm an edit, closes without saving. Must be callable from tests
       (`IWORK_APP_CHECK=1 cargo test`) and by later agents.
-- [ ] Integration tests pick up `tests/fixtures/generated/**` (recursive or
+- [x] Integration tests pick up `tests/fixtures/generated/**` (recursive or
       flattened) and the whole existing suite passes against the new corpus.
-- [ ] Baseline recorded: object census per fixture, so later phases can see
+- [x] Baseline recorded: object census per fixture, so later phases can see
       what they unlocked.
 
 ## Phase 1 — Tables: read
@@ -121,6 +121,10 @@ Everything layered on top of the cells; depends only on Phase 1.
 
 ## Phase 2 — Tables: write
 
+- [ ] **Precondition: pin down the `type == 0` diff/merge mechanism.** The
+      distilled references show both Python parsers implement it incorrectly
+      and incompatibly; before any table write, spec it from local probes
+      and teach the test suite what it means.
 - [ ] Edit an existing cell in place: text and number values first, then
       boolean/date; string-table maintenance; tile re-encode with the
       byte-identity rule for untouched tiles/streams. A written cell keeps
@@ -279,6 +283,93 @@ fixture, and what the app accepted.
   pass; AppleScript → Pages 15.3.1 → `.pages` → `iwork inspect|text` loop
   confirmed working end to end (probe document, 6 components, text extracted).
 
+- 2026-08-17 — **Phase 0 complete.** `scripts/make-fixtures.sh` builds seven
+  documents with the three apps; `scripts/app-check.sh` opens one and reads it
+  back; `tests/fixtures.rs` finds fixtures recursively and gained one test
+  (`every_fixture_opens_in_the_app_that_owns_it`, `IWORK_APP_CHECK=1`).
+  `cargo test` is green over the whole corpus: 52 unit + 15 fixture + 34 style
+  + 2 doc tests.
+
+  Baseline census — `iwork inspect|text|styles|check|roundtrip` over every
+  fixture. `check` found no problems anywhere and `roundtrip` re-encoded every
+  object of every document with the identifiers unchanged.
+
+  | Fixture | Kind | Objects | Streams | Data entries | Media registered | Text storages | Styles |
+  |---|---|--:|--:|--:|--:|--:|--:|
+  | `pages-plain.pages` | Pages | 575 | 7 | 0 | 4 | 1 | 259 |
+  | `pages-styled.pages` | Pages | 578 | 7 | 0 | 4 | 1 | 262 |
+  | `pages-unicode.pages` | Pages | 575 | 7 | 0 | 4 | 1 | 259 |
+  | `pages-report.pages` | Pages | 706 | 37 | 1 | 4 | 7 | 196 |
+  | `numbers-values.numbers` | Numbers | 797 | 97 | 0 | 3 | 0 | 256 |
+  | `numbers-large.numbers` | Numbers | 638 | 38 | 0 | 3 | 0 | 256 |
+  | `keynote-deck.key` | Keynote | 1069 | 30 | 25 | 35 | 44 | 240 |
+
+  What the corpus holds: `pages-plain` one paragraph; `pages-styled` four
+  paragraphs at three faces, sizes and a colour; `pages-unicode` umlauts, CJK,
+  emoji (surrogate pairs), a ZWJ sequence, a flag and a combining mark;
+  `pages-report` a document from the "Project Proposal" template — a 6×4 table
+  with cells written by script, a photo, two section breaks;
+  `numbers-values` two sheets and three tables with text, number, boolean,
+  date, duration, decimal, a merged range and five formulas (including one
+  reaching across tables); `numbers-large` a 301×9 table imported from CSV,
+  with `SUM` and `AVERAGE` over whole columns; `keynote-deck` five slides on
+  four layouts, titles, bullets, presenter notes on all of them, a skipped
+  slide and an image slide.
+
+  App acceptance: all seven documents open in the app that owns them and read
+  back their text (`scripts/app-check.sh`, one per fixture). `--self-test`
+  passes for `.pages`, `.numbers` and `.key`: a copy with one `Index/*.iwa`
+  replaced by random bytes of the same length — still a valid ZIP, every entry
+  stored and present — is refused by all three apps, so the harness is looking.
+
+  **One crate bug, found by the corpus and fixed here.** `pages-report.pages`
+  broke `the_paragraph_table_holds_entries_at_paragraph_starts`: a paragraph
+  run at character 146 where no paragraph started. The text there reads
+  `…123-4567\n\u{4}Company Name\n` — **`U+0004` is a section break and ends a
+  paragraph**, exactly as `U+0005` ends one at a layout change, and the
+  paragraph table puts its run on the character after it. Added to
+  `text::PARAGRAPH_BREAKS` with a unit test and written up in FORMAT.md §Text.
+  Both occurrences in that document are section boundaries; it is the same
+  character FORMAT.md already recorded appearing *alone* in a body storage.
+
+  What Phase 1 should know:
+
+  - **Numbers table text is not in `TSWP` storages.** `iwork text` finds zero
+    text storages in both Numbers fixtures, while the app reads back 117 and
+    2711 cell values from the same documents. Cell strings live in the table's
+    own storage, and finding them is Phase 1's job.
+  - `numbers-values.numbers` spends 97 streams on 797 objects and
+    `numbers-large.numbers` 38 on 638 — the per-table components the README
+    already notes. The 301-row table is deliberately past any plausible
+    single-tile capacity.
+  - The app is the oracle and is already wired up: `formatted value of every
+    cell of <table>` is one Apple event per table (2400 cells in about a
+    second), which is what `scripts/applescript/check-numbers.applescript`
+    uses. `value` and `formula` are equally readable — Numbers returns `84.0`
+    and `=B1×2` for a cell written as `=B1*2`.
+
+  What the apps would not do, probed against the dictionaries rather than
+  assumed, and worth not re-litigating:
+
+  - Pages will not create a table, an image, a shape or a text item from a
+    script — `make new table` answers "Don't know how to create
+    TMAScriptTableInfoProxy". Choosing the *template* a new document starts
+    from is scriptable, so the fixture with a table and a photo comes from
+    "Project Proposal", and its cells are then written by script.
+  - Pages has no bold and no italic: rich text carries `font`, `size` and
+    `color` only, so weight and slant go through the face name.
+  - Keynote 15.3.1 has no master slides. Slides have a `base layout` and the
+    document has `slide layout` elements; `skipped` must be set after the
+    slide exists, because passing it to `make new slide` is accepted and
+    ignored.
+  - Numbers refuses to merge a range straddling the header row or column.
+  - **`open` does not always answer.** Told to open a document — a `.pages` or
+    an imported `.csv` — the app opens it and then never replies to the event.
+    Everything here therefore hands the file to `open(1)` and polls for the
+    document to appear. Likewise `close every document saving no` came back
+    -10699 on a restored Numbers session that then refused `every document`
+    with -1728, while closing `document 1` in a loop went through all three.
+
 ## Execution notes
 
 - **Reference material lives in `reference/` (gitignored, like fixtures):**
@@ -288,7 +379,11 @@ fixture, and what the app accepted.
   mined from the extracted protos of numbers-parser, keynote-parser and
   iWorkFileFormat (clones in the session scratchpad under `reference/`).
   Every phase agent reads its domain's distilled file and its features
-  section before touching code.
+  section before touching code. Known thin spots in the distilled set: TP/
+  Pages (only a 2013 extraction exists anywhere — being remedied by
+  extracting descriptors from the installed 15.3.1 binaries), TST
+  categories/pivots (IDs known, field tables missing), and the `type == 0`
+  diff mechanism (now a named Phase 2 precondition).
 - Parallelizable work (proto mining, feature enumeration, independent
   probes) runs as multi-agent workflows — authorized by the user
   ("ultracode"). Implementation phases that touch the tree stay sequential
