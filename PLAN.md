@@ -379,11 +379,20 @@ fixture, and what the app accepted.
   mined from the extracted protos of numbers-parser, keynote-parser and
   iWorkFileFormat (clones in the session scratchpad under `reference/`).
   Every phase agent reads its domain's distilled file and its features
-  section before touching code. Known thin spots in the distilled set: TP/
-  Pages (only a 2013 extraction exists anywhere — being remedied by
-  extracting descriptors from the installed 15.3.1 binaries), TST
-  categories/pivots (IDs known, field tables missing), and the `type == 0`
-  diff mechanism (now a named Phase 2 precondition).
+  section before touching code. `reference/protos-15.3/` holds the CURRENT
+  schemas: descriptors carved from the installed 15.3.1 binaries (121 files;
+  1300+ messages and a registry-dump of 580–633 type IDs per app, verified
+  four independent ways) — prefer these over the older mined tables. That
+  extraction closed the distilled set's thin spots: the TP/Pages 2013 gap
+  (63→75 messages; the "page master"→"section template" rename plus a list
+  of field-number reuses that silently mis-decode under 2013 schemas — see
+  its NOTES.md before Phase 4b), and the TST category/pivot field tables
+  (byte-identical 14.5→15.3.1). Confirmed renumberings: 5120→5143,
+  5121→5142, 3046→220, 139→111. Outside TP the mined ID registry had zero
+  errors. Two finds relevant to existing code: `TSP.Color` field 13
+  `headroom` (HDR, default 1), and four new version-keyed style buckets in
+  `TSS.StylesheetArchive` (fields 23–26). Still open: the `type == 0` diff
+  mechanism (a named Phase 2 precondition).
 - Parallelizable work (proto mining, feature enumeration, independent
   probes) runs as multi-agent workflows — authorized by the user
   ("ultracode"). Implementation phases that touch the tree stay sequential
