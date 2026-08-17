@@ -907,6 +907,22 @@ impl UidMap {
         self.rows.get(&uid).copied()
     }
 
+    /// UUID of the column at an index — the lookup the other way round.
+    pub fn column_uid(&self, index: usize) -> Option<Uuid> {
+        self.columns
+            .iter()
+            .find(|(_, &at)| at == index)
+            .map(|(&uid, _)| uid)
+    }
+
+    /// UUID of the row at an index.
+    pub fn row_uid(&self, index: usize) -> Option<Uuid> {
+        self.rows
+            .iter()
+            .find(|(_, &at)| at == index)
+            .map(|(&uid, _)| uid)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.columns.is_empty() && self.rows.is_empty()
     }
@@ -1733,6 +1749,16 @@ impl Table {
             .and_then(|e| e.size)
             .map(f64::from)
             .unwrap_or(self.default_column_width)
+    }
+
+    /// The UUID a column is known by outside the cell grid.
+    pub fn column_uid(&self, column: usize) -> Option<Uuid> {
+        self.uids.column_uid(column)
+    }
+
+    /// The UUID a row is known by outside the cell grid.
+    pub fn row_uid(&self, row: usize) -> Option<Uuid> {
+        self.uids.row_uid(row)
     }
 
     /// The merge starting at a position, if one does.

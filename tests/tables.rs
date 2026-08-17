@@ -351,6 +351,381 @@ fn a_simple_merge_is_found_in_the_values_fixture() {
     );
 }
 
+// -- how a table is organised ------------------------------------------------
+//
+// The four fixtures here are documents Apple wrote and Numbers 15.3.1 saved
+// again — nothing in Numbers' scripting interface can sort, filter, categorise,
+// highlight or pivot a table, so a script cannot build them. See
+// `scripts/applescript/from-template.applescript`.
+//
+// The oracle for these is inside the documents. A pivot table's *cells* are the
+// app's own rendering of the pivot rules beside them, so the decoded fields can
+// be checked against the labels Numbers itself drew; a category's summary row
+// holds the number the aggregate produced.
+
+#[test]
+fn a_category_names_its_column_its_groups_and_its_summary() {
+    let doc = fixture!("numbers-categories.numbers");
+    let tables = doc.tables();
+    let t = tables
+        .iter()
+        .find(|t| !t.categories.is_empty())
+        .expect("the categories fixture has a category");
+    let category = &t.categories[0];
+
+    assert!(category.enabled, "the category is switched on");
+    assert_eq!(
+        category
+            .columns
+            .iter()
+            .map(|c| c.column)
+            .collect::<Vec<_>>(),
+        vec![Some(1)],
+        "grouped by column B — the one holding the names"
+    );
+
+    let groups = category.groups();
+    let values: Vec<String> = groups
+        .iter()
+        .map(|g| g.value.as_ref().map(|v| v.to_text()).unwrap_or_default())
+        .collect();
+    assert_eq!(values, vec!["Andy", "Chloe"]);
+    // The values in column B, read back through the cells: the group's rows are
+    // exactly the rows holding its value, which is what a category *is*.
+    for group in &groups {
+        let wanted = group.value.as_ref().unwrap().to_text();
+        assert!(!group.rows.is_empty(), "{wanted}: no rows");
+        for &row in &group.rows {
+            assert_eq!(
+                t.value(row, 1).to_text(),
+                wanted,
+                "row {row} is in group {wanted}"
+            );
+        }
+    }
+
+    assert_eq!(category.summaries.len(), 1);
+    let summary = &category.summaries[0];
+    assert_eq!(summary.column, Some(4), "the Amount column is summarised");
+    assert_eq!(summary.function, iwork::table::Aggregate::Sum);
+    assert_eq!(summary.level, 1);
+}
+
+/// A pivot's fields name columns of the table it summarises, not of itself.
+///
+/// The check is against the pivot table's own cells, which Numbers rendered
+/// from these rules: the header reads `Power`/`Product` down the side,
+/// `Date (Month)` across the top and `Units (Sum)` for the values, and each of
+/// those is a column of `Sales` at the index the rules resolve to.
+#[test]
+fn a_pivot_resolves_its_fields_against_its_source_table() {
+    let doc = fixture!("numbers-pivot.numbers");
+    let tables = doc.tables();
+    let source = tables
+        .iter()
+        .find(|t| t.name == "Sales" && t.pivot.is_none())
+        .expect("a source table");
+    let pivot_table = tables
+        .iter()
+        .find(|t| t.pivot.as_ref().is_some_and(|p| !p.empty))
+        .expect("a pivot with rules");
+    let pivot = pivot_table.pivot.as_ref().unwrap();
+
+    assert_eq!(pivot.source_name, "Sales");
+    let heading = |column: Option<usize>| source.value(0, column.unwrap()).to_text();
+
+    assert_eq!(
+        pivot
+            .rows
+            .iter()
+            .map(|f| heading(f.column))
+            .collect::<Vec<_>>(),
+        vec!["Power", "Product"]
+    );
+    assert_eq!(
+        pivot
+            .columns
+            .iter()
+            .map(|f| heading(f.column))
+            .collect::<Vec<_>>(),
+        vec!["Date"]
+    );
+    assert!(
+        pivot.columns[0].has_functor,
+        "the date field is bucketed — the app renders it as Date (Month)"
+    );
+    assert_eq!(
+        pivot
+            .values
+            .iter()
+            .map(|v| (heading(v.column), v.function))
+            .collect::<Vec<_>>(),
+        vec![("Units".to_string(), iwork::table::Aggregate::Sum)]
+    );
+    assert!(!pivot.hide_grand_total_rows && !pivot.hide_grand_total_columns);
+
+    // The same document carries a second pivot with nothing assigned. It is
+    // still a pivot table, and saying so is the difference between "no rules
+    // decoded" and "no rules there".
+    let empty = tables
+        .iter()
+        .filter_map(|t| t.pivot.as_ref())
+        .find(|p| p.empty)
+        .expect("the practice sheet's empty pivot");
+    assert!(empty.rows.is_empty() && empty.columns.is_empty() && empty.values.is_empty());
+}
+
+/// `hidingState` finally has both of its values in one document.
+///
+/// Phase 1 could only report the number, because nothing in the scripting
+/// interface hides a row. Here three columns were hidden by hand and a filter
+/// rule hides rows, in the same spreadsheet.
+#[test]
+fn hidden_rows_and_columns_say_who_hid_them() {
+    use iwork::table::Hiding;
+    let doc = fixture!("numbers-rules.numbers");
+    let tables = doc.tables();
+
+    let by_user: Vec<(usize, Hiding)> = tables
+        .iter()
+        .flat_map(|t| t.column_extents.iter().enumerate())
+        .filter(|(_, e)| e.hidden())
+        .map(|(i, e)| (i, e.hiding()))
+        .collect();
+    assert_eq!(
+        by_user,
+        vec![(6, Hiding::User), (11, Hiding::User), (12, Hiding::User)],
+        "the portfolio table hides three columns by hand"
+    );
+
+    let filtered: Vec<Hiding> = tables
+        .iter()
+        .flat_map(|t| t.row_extents.iter())
+        .filter(|e| e.hidden())
+        .map(|e| e.hiding())
+        .collect();
+    assert!(!filtered.is_empty(), "the filter hides rows");
+    assert!(
+        filtered.iter().all(|&h| h == Hiding::Filter),
+        "every hidden row is hidden by the filter, not by hand: {filtered:?}"
+    );
+
+    // The extent agrees about the columns exactly. It does *not* agree about
+    // the rows — it marks every body row, not just the hidden ones — which is
+    // recorded in FORMAT.md rather than asserted away.
+    let columns = tables
+        .iter()
+        .find(|t| !t.column_states.user_hidden.is_empty())
+        .expect("a table with hidden columns");
+    assert_eq!(columns.column_states.user_hidden, vec![6, 11, 12]);
+    assert!(columns.column_states.filtered.is_empty());
+}
+
+#[test]
+fn a_filter_set_carries_its_rules_and_its_switch() {
+    let doc = fixture!("numbers-rules.numbers");
+    let tables = doc.tables();
+    let filter = tables
+        .iter()
+        .find_map(|t| t.filter.as_ref())
+        .expect("the filtered table");
+
+    assert!(filter.enabled, "filters are on");
+    assert!(!filter.match_any, "the set matches All, not Any");
+    assert_eq!(filter.rules.len(), 1);
+    let rule = &filter.rules[0];
+    assert!(rule.enabled);
+    assert_eq!(rule.column, Some(0), "filter_offsets puts the rule on A");
+    assert!(
+        rule.predicate.pre_pivot,
+        "15.3.1 writes filter rules in the pre-pivot slot, whatever the \
+         published references call current"
+    );
+    assert!(
+        rule.predicate.has_formula,
+        "the rule tests a formula, so its value is not an immediate"
+    );
+
+    // Every other table in the corpus has an empty filter set and must report
+    // no filter rather than an empty one.
+    for name in ["numbers-values.numbers", "numbers-formats.numbers"] {
+        let Some(other) = open(name) else { continue };
+        for t in other.tables() {
+            assert!(t.filter.is_none(), "{name}/{}: unexpected filter", t.name);
+        }
+    }
+}
+
+#[test]
+fn conditional_highlighting_rules_carry_the_value_they_compare_against() {
+    let doc = fixture!("numbers-rules.numbers");
+    let tables = doc.tables();
+    let sets: Vec<&iwork::table::ConditionalStyles> = tables
+        .iter()
+        .flat_map(|t| t.conditional_styles.iter())
+        .collect();
+    assert_eq!(sets.len(), 2, "two rule sets");
+
+    let mut seen: Vec<(i64, String)> = Vec::new();
+    for set in &sets {
+        assert!(set.key.is_some(), "a set is reached by a cell's key");
+        for rule in &set.rules {
+            assert!(
+                rule.cell_style.is_some() && rule.text_style.is_some(),
+                "a highlighting rule applies both styles"
+            );
+            assert!(
+                !rule.predicate.pre_pivot,
+                "the current slot wins: only it carries the compared value"
+            );
+            seen.push((
+                rule.predicate.kind,
+                rule.predicate
+                    .values
+                    .first()
+                    .map(|v| v.to_text())
+                    .unwrap_or_default(),
+            ));
+        }
+    }
+    seen.sort();
+    assert_eq!(
+        seen,
+        vec![
+            (7, "0".to_string()),
+            (9, "0".to_string()),
+            (36, "↑".to_string()),
+            (36, "↓".to_string()),
+        ],
+        "two numeric rules against zero and two text rules against arrows"
+    );
+}
+
+#[test]
+fn a_custom_cell_format_is_named_and_document_scoped() {
+    let doc = fixture!("numbers-rules.numbers");
+    let formats = doc.custom_formats();
+    assert_eq!(formats.len(), 1);
+    assert_eq!(formats[0].name, "Millions");
+    assert_eq!(formats[0].format_string, "#,###.##M");
+
+    // Documents without one report none, rather than reporting an empty list
+    // as a format.
+    for name in ["numbers-values.numbers", "numbers-categories.numbers"] {
+        let Some(other) = open(name) else { continue };
+        assert!(other.custom_formats().is_empty(), "{name}");
+    }
+}
+
+#[test]
+fn a_sort_rule_names_a_column_and_a_direction() {
+    let doc = fixture!("numbers-sorted.numbers");
+    let tables = doc.tables();
+    let sorted = tables
+        .iter()
+        .find(|t| !t.sort_rules.is_empty())
+        .expect("the sorted fixture has a sort rule");
+    assert_eq!(
+        sorted.sort_rules,
+        vec![iwork::table::SortRule {
+            column: 2,
+            descending: false
+        }]
+    );
+    // An empty `TableSortOrderArchive` is written on every table in every
+    // document; it must not read as a rule.
+    for name in ["numbers-values.numbers", "numbers-formats.numbers"] {
+        let Some(other) = open(name) else { continue };
+        for t in other.tables() {
+            assert!(t.sort_rules.is_empty(), "{name}/{}", t.name);
+        }
+    }
+}
+
+/// The UUID index is what everything above is addressed through, and it is
+/// **sorted by UUID**, not by index. A map that read it positionally would
+/// still map most columns correctly, so the check is that it maps *all* of
+/// them and that a round trip through it is the identity.
+#[test]
+fn the_uid_map_covers_every_row_and_column() {
+    for name in [
+        "numbers-values.numbers",
+        "numbers-categories.numbers",
+        "numbers-pivot.numbers",
+    ] {
+        let Some(doc) = open(name) else { continue };
+        for t in doc.tables() {
+            if t.uids.is_empty() {
+                continue;
+            }
+            let columns: Vec<usize> = (0..t.columns)
+                .filter(|&c| t.column_uid(c).is_some())
+                .collect();
+            assert_eq!(
+                columns,
+                (0..t.columns).collect::<Vec<_>>(),
+                "{name}/{}: every column has a UUID",
+                t.name
+            );
+            for column in 0..t.columns {
+                let uid = t.column_uid(column).unwrap();
+                assert_eq!(
+                    t.uids.column(uid),
+                    Some(column),
+                    "{name}/{}: column {column} round-trips",
+                    t.name
+                );
+            }
+        }
+    }
+}
+
+/// Nothing in this phase writes to a table, and a save must prove it — on the
+/// documents that carry the features, by name, so that the guarantee is
+/// asserted about *them* and not merely about whatever happens to be in the
+/// fixture directory.
+#[test]
+fn saving_a_document_organised_this_way_changes_no_byte_of_it() {
+    for name in [
+        "numbers-categories.numbers",
+        "numbers-pivot.numbers",
+        "numbers-rules.numbers",
+        "numbers-sorted.numbers",
+    ] {
+        let Some(path) = generated(name) else {
+            continue;
+        };
+        let doc = Document::open(&path).unwrap();
+        // Reading everything this phase decodes, first: a decoder that mutates
+        // what it reads would be caught here and nowhere else.
+        let tables = doc.tables();
+        let _ = doc.custom_formats();
+        assert!(!tables.is_empty(), "{name}: no tables");
+
+        let before = iwork::Package::read(&path).unwrap();
+        assert!(
+            doc.changed_streams().is_empty(),
+            "{name}: reading changed a stream"
+        );
+        let out = std::env::temp_dir().join(format!("iwork-organise-{name}"));
+        doc.save(&out).unwrap();
+        let after = iwork::Package::read(&out).unwrap();
+        assert_eq!(
+            before.names().collect::<Vec<_>>(),
+            after.names().collect::<Vec<_>>(),
+            "{name}: entry names changed"
+        );
+        for entry in before.names() {
+            assert_eq!(
+                before.get(entry),
+                after.get(entry),
+                "{name}: {entry} was rewritten"
+            );
+        }
+        let _ = std::fs::remove_file(&out);
+    }
+}
+
 // -- the oracle --------------------------------------------------------------
 
 /// One cell as Numbers reports it.
