@@ -203,27 +203,110 @@ const ENTRIES: &[Entry] = &[
         app: App::Any,
     },
     // -- tables (Numbers, and tables embedded in Pages/Keynote) --------------
+    // 6001–6006 were guessed here before anything read a table, and two of them
+    // were guessed wrong: 6004 is the cell style and 6005 the interned data
+    // list, one off from what this table used to say. Everything marked
+    // Confirmed below was decoded and then agreed with by Numbers itself, cell
+    // by cell — see `tests/tables.rs`.
+    Entry {
+        message_type: 6000,
+        name: "TST.TableInfoArchive",
+        confidence: Confirmed,
+        app: App::Any,
+    },
     Entry {
         message_type: 6001,
         name: "TST.TableModelArchive",
-        confidence: Unverified,
+        confidence: Confirmed,
         app: App::Any,
     },
     Entry {
         message_type: 6002,
-        name: "TST.TileArchive",
-        confidence: Unverified,
+        name: "TST.Tile",
+        confidence: Confirmed,
+        app: App::Any,
+    },
+    Entry {
+        message_type: 6003,
+        name: "TST.TableStyleArchive",
+        confidence: Inferred,
         app: App::Any,
     },
     Entry {
         message_type: 6004,
-        name: "TST.TableDataList",
+        name: "TST.CellStyleArchive",
         confidence: Inferred,
         app: App::Any,
     },
     Entry {
         message_type: 6005,
+        name: "TST.TableDataList",
+        confidence: Confirmed,
+        app: App::Any,
+    },
+    Entry {
+        message_type: 6006,
         name: "TST.HeaderStorageBucket",
+        confidence: Confirmed,
+        app: App::Any,
+    },
+    Entry {
+        message_type: 6007,
+        name: "TST.WPTableInfoArchive",
+        confidence: Unverified,
+        app: App::Any,
+    },
+    Entry {
+        message_type: 6008,
+        name: "TST.TableStylePresetArchive",
+        confidence: Inferred,
+        app: App::Any,
+    },
+    // The second registration of the data list. Both ids decode as the same
+    // message, so the table has to be many-to-one.
+    Entry {
+        message_type: 6201,
+        name: "TST.TableDataList",
+        confidence: Unverified,
+        app: App::Any,
+    },
+    Entry {
+        message_type: 6204,
+        name: "TST.HiddenStateFormulaOwnerArchive",
+        confidence: Inferred,
+        app: App::Any,
+    },
+    // The item list behind a pop-up-menu cell. One per pop-up cell in the
+    // formats fixture, named by `CellSpecArchive.chooser_control_popup_model`.
+    Entry {
+        message_type: 6206,
+        name: "TST.PopUpMenuModel",
+        confidence: Inferred,
+        app: App::Any,
+    },
+    // Reached from a rich-text cell's key: field 1 is the `TSWP.StorageArchive`
+    // holding the text, which is how a Pages table's cells read back.
+    Entry {
+        message_type: 6218,
+        name: "TST.RichTextPayloadArchive",
+        confidence: Confirmed,
+        app: App::Any,
+    },
+    Entry {
+        message_type: 6220,
+        name: "TST.FilterSetArchive",
+        confidence: Inferred,
+        app: App::Any,
+    },
+    Entry {
+        message_type: 6247,
+        name: "TST.TableStyleNetworkArchive",
+        confidence: Inferred,
+        app: App::Any,
+    },
+    Entry {
+        message_type: 6267,
+        name: "TST.ColumnRowUIDMapArchive",
         confidence: Inferred,
         app: App::Any,
     },
