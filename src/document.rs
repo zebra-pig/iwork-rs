@@ -320,6 +320,14 @@ impl Document {
             .find(|t| Some(t.identifier) == by_id || t.name == wanted)
     }
 
+    /// Every named cell format the document defines.
+    ///
+    /// Custom formats are document-scoped, not table-scoped: cells across every
+    /// table reach into one list by UUID. See [`crate::table::CustomFormat`].
+    pub fn custom_formats(&self) -> Vec<crate::table::CustomFormat> {
+        crate::table::custom_formats(self)
+    }
+
     // -- text styles ---------------------------------------------------------
 
     /// Every character, paragraph and list style in the document.

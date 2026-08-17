@@ -777,13 +777,52 @@ pub struct Extent {
     pub size: Option<f32>,
     /// `hidingState`: 0 is visible. Numbers keeps *why* a row is hidden — the
     /// user hid it, or a filter did — and this is the only per-row trace of it.
+    /// See [`Extent::hiding`] for the codes.
     pub hiding_state: u32,
     pub cell_count: u32,
+}
+
+/// Why a row or column is not on screen.
+///
+/// The codes were read off `numbers-rules.numbers`, where the *same document*
+/// carries both: three columns the template's author hid by hand come back as
+/// `1`, and the nine rows a filter rule excludes come back as `2`. Nothing else
+/// in the corpus is hidden at all, which is why Phase 1 could only report the
+/// number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hiding {
+    Visible,
+    /// The user hid it — Table ▸ Hide Rows, or the row's own menu.
+    User,
+    /// A filter rule excluded it.
+    Filter,
+    /// A `hidingState` this crate has not seen, kept as its code.
+    Other(u32),
+}
+
+impl Hiding {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Hiding::Visible => "visible",
+            Hiding::User => "hidden by the user",
+            Hiding::Filter => "hidden by a filter",
+            Hiding::Other(_) => "hidden",
+        }
+    }
 }
 
 impl Extent {
     pub fn hidden(&self) -> bool {
         self.hiding_state != 0
+    }
+
+    pub fn hiding(&self) -> Hiding {
+        match self.hiding_state {
+            0 => Hiding::Visible,
+            1 => Hiding::User,
+            2 => Hiding::Filter,
+            other => Hiding::Other(other),
+        }
     }
 }
 
@@ -794,6 +833,802 @@ pub struct Merge {
     pub column: usize,
     pub rows: usize,
     pub columns: usize,
+}
+
+// -- how a table is organised ------------------------------------------------
+//
+// Everything from here down is layered *on top of* the cells: the sort rules
+// and filters that decide which rows are on screen and in what order, the
+// categories that group them, the conditional-highlighting rules that recolour
+// them, and the pivot tables that summarise them.
+//
+// One thing separates this half of the format from the cell half. Cells are
+// addressed by index. **Organisation is addressed by UUID** — every row, every
+// column, every group and every owner carries one — because a sort or a filter
+// moves indexes and a UUID survives it. Reading any of it therefore starts by
+// building the index the table keeps for exactly that purpose,
+// `TST.ColumnRowUIDMapArchive`.
+
+/// A `TSP.UUID`: two 64-bit halves, `{1: lower, 2: upper}`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Uuid {
+    pub lower: u64,
+    pub upper: u64,
+}
+
+impl Uuid {
+    pub fn decode(message: &Message) -> Uuid {
+        Uuid {
+            lower: message.varint(1).unwrap_or(0),
+            upper: message.varint(2).unwrap_or(0),
+        }
+    }
+
+    fn read(raw: &[u8]) -> Option<Uuid> {
+        decode_nested(raw).map(|m| Uuid::decode(&m))
+    }
+}
+
+impl std::fmt::Display for Uuid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:016x}{:016x}", self.upper, self.lower)
+    }
+}
+
+/// `TST.ColumnRowUIDMapArchive` (6267) — the join between UUIDs and indexes.
+///
+/// The trap is in the field names, and the mined references do not carry them:
+/// field 1 is `sorted_column_uids`, **sorted by UUID and not by position**, and
+/// field 2 is `column_index_for_uid`, the index each of those is at. Reading
+/// field 1 as "the UUID of column *i*" gives the right answer for every column
+/// that happens to be a fixed point of that permutation — which in a five-column
+/// table is most of them, so the mistake survives a casual check.
+#[derive(Debug, Clone, Default)]
+pub struct UidMap {
+    columns: BTreeMap<Uuid, usize>,
+    rows: BTreeMap<Uuid, usize>,
+}
+
+impl UidMap {
+    pub fn decode(archive: &Message) -> UidMap {
+        UidMap {
+            columns: uid_index(archive, 1, 2),
+            rows: uid_index(archive, 4, 5),
+        }
+    }
+
+    /// Index of the column with this UUID.
+    pub fn column(&self, uid: Uuid) -> Option<usize> {
+        self.columns.get(&uid).copied()
+    }
+
+    /// Index of the row with this UUID.
+    pub fn row(&self, uid: Uuid) -> Option<usize> {
+        self.rows.get(&uid).copied()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.columns.is_empty() && self.rows.is_empty()
+    }
+}
+
+/// Zip a repeated-UUID field against the repeated index field beside it.
+fn uid_index(archive: &Message, uid_field: u32, index_field: u32) -> BTreeMap<Uuid, usize> {
+    let uids = archive.all(uid_field).filter_map(|value| match value {
+        Value::Bytes(raw) => Uuid::read(raw),
+        _ => None,
+    });
+    uids.zip(varints(archive, index_field))
+        .map(|(uid, index)| (uid, index as usize))
+        .collect()
+}
+
+/// A `repeated` scalar field, however it was written.
+///
+/// proto2 leaves `repeated uint32` unpacked by default and Numbers writes it
+/// that way, but the wire format allows either and a packed field arrives as
+/// one `bytes` value. Reading only the unpacked form silently yields an empty
+/// list, which reads as "no rules" rather than as an error.
+fn varints(message: &Message, number: u32) -> Vec<u64> {
+    let mut out = Vec::new();
+    for value in message.all(number) {
+        match value {
+            Value::Varint(n) => out.push(*n),
+            Value::Bytes(raw) => {
+                let mut at = 0usize;
+                while at < raw.len() {
+                    let mut shift = 0u32;
+                    let mut acc = 0u64;
+                    loop {
+                        let Some(&byte) = raw.get(at) else { return out };
+                        at += 1;
+                        acc |= ((byte & 0x7f) as u64) << shift;
+                        if byte & 0x80 == 0 {
+                            break;
+                        }
+                        shift += 7;
+                        if shift > 63 {
+                            return out;
+                        }
+                    }
+                    out.push(acc);
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// A `TSCE.IndexSetArchive` — inclusive `{range_begin, range_end?}` runs.
+fn index_set(message: &Message) -> Vec<usize> {
+    let mut out = Vec::new();
+    for value in message.all(1) {
+        let Value::Bytes(raw) = value else { continue };
+        let Some(entry) = decode_nested(raw) else {
+            continue;
+        };
+        let Some(begin) = entry.varint(1) else {
+            continue;
+        };
+        let end = entry.varint(2).unwrap_or(begin);
+        if end < begin || end - begin > 1_000_000 {
+            continue;
+        }
+        out.extend(begin as usize..=end as usize);
+    }
+    out
+}
+
+/// A `TSCE.CellValueArchive`, which is how a category group names the value it
+/// groups on and how a predicate names the value it compares against.
+fn cell_value(message: &Message) -> Option<CellValue> {
+    match message.varint(1)? {
+        1 => Some(CellValue::Empty),
+        2 => Some(CellValue::Bool(
+            message
+                .bytes(2)
+                .and_then(decode_nested)
+                .and_then(|b| b.varint(1))
+                .unwrap_or(0)
+                != 0,
+        )),
+        3 => Some(CellValue::Date(
+            message
+                .bytes(3)
+                .and_then(decode_nested)
+                .map(|d| double_field(&d, 1))
+                .unwrap_or(0.0),
+        )),
+        4 => {
+            let number = message.bytes(4).and_then(decode_nested)?;
+            Some(CellValue::Number(Decimal {
+                mantissa: double_field(&number, 1) as i128,
+                exponent: 0,
+            }))
+        }
+        5 => Some(CellValue::Text(
+            message
+                .bytes(5)
+                .and_then(decode_nested)
+                .map(|s| string_field(&s, 1))
+                .unwrap_or_default(),
+        )),
+        _ => None,
+    }
+}
+
+/// One rule of `TST.TableSortOrderArchive` — a column and a direction.
+///
+/// `TableModelArchive` field 44. The archive's own `type` field says whether the
+/// rules cover the whole table or a row range; every one observed here is
+/// `entire_table`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SortRule {
+    pub column: usize,
+    pub descending: bool,
+}
+
+/// What a filter or a conditional-highlighting rule tests.
+///
+/// The condition itself is a `predicate_type` code plus up to three arguments,
+/// and the arguments are either immediate values or a `TSCE` formula. This
+/// crate reads the code and the immediate values and leaves the formula to
+/// Phase 5 — a rule that compares against another cell says so through
+/// [`Predicate::has_formula`] rather than being reported as having no argument.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Predicate {
+    /// `predicate_type`. Apple publishes no names for these; the code is
+    /// reported as it stands rather than guessed at.
+    pub kind: i64,
+    pub qualifiers: (i64, i64),
+    pub values: Vec<CellValue>,
+    pub has_formula: bool,
+    /// True for the older `…PrePivot` shape, whose fields are numbered
+    /// differently at the same numbers — see `FORMAT.md`.
+    pub pre_pivot: bool,
+}
+
+impl Predicate {
+    /// `TST.FormulaPredicateArchive` — the current shape, `predicate_type` first.
+    fn decode(message: &Message) -> Predicate {
+        let mut values = Vec::new();
+        for number in 4..=6 {
+            let Some(argument) = message.bytes(number).and_then(decode_nested) else {
+                continue;
+            };
+            if let Some(value) = argument
+                .bytes(2)
+                .and_then(decode_nested)
+                .and_then(|data| predicate_value(&data))
+            {
+                values.push(value);
+            }
+        }
+        Predicate {
+            kind: message.varint(1).unwrap_or(0) as i64,
+            qualifiers: (
+                message.varint(2).unwrap_or(0) as i64,
+                message.varint(3).unwrap_or(0) as i64,
+            ),
+            values,
+            has_formula: message.get(7).is_some(),
+            pre_pivot: false,
+        }
+    }
+
+    /// `TST.FormulaPredicatePrePivotArchive` — the older shape, whose field 1
+    /// is the *formula* and whose `predicate_type` is field 2. The two are
+    /// wire-incompatible at the same field numbers and are told apart by that:
+    /// a length-delimited field 1 is the old one, a varint the new one.
+    fn decode_pre_pivot(message: &Message) -> Predicate {
+        Predicate {
+            kind: message.varint(2).unwrap_or(0) as i64,
+            qualifiers: (
+                message.varint(3).unwrap_or(0) as i64,
+                message.varint(4).unwrap_or(0) as i64,
+            ),
+            values: Vec::new(),
+            has_formula: message.get(1).is_some(),
+            pre_pivot: true,
+        }
+    }
+
+    /// Read whichever shape this is.
+    fn decode_either(message: &Message) -> Predicate {
+        match message.get(1) {
+            Some(Value::Bytes(_)) => Predicate::decode_pre_pivot(message),
+            _ => Predicate::decode(message),
+        }
+    }
+}
+
+/// A `TST.FormulaPredArgDataArchive` — one immediate argument of a predicate.
+fn predicate_value(data: &Message) -> Option<CellValue> {
+    if let Some(text) = data.bytes(4) {
+        return Some(CellValue::Text(String::from_utf8_lossy(text).into_owned()));
+    }
+    if let Some(Value::Varint(flag)) = data.get(8) {
+        return Some(CellValue::Bool(*flag != 0));
+    }
+    if let Some(Value::Fixed64(bits)) = data.get(5) {
+        return Some(CellValue::Date(f64::from_le_bytes(*bits)));
+    }
+    if let Some(Value::Fixed64(bits)) = data.get(6) {
+        return Some(CellValue::Duration(f64::from_le_bytes(*bits)));
+    }
+    if let Some(Value::Fixed64(bits)) = data.get(1) {
+        return Some(CellValue::Number(Decimal {
+            mantissa: f64::from_le_bytes(*bits) as i128,
+            exponent: 0,
+        }));
+    }
+    None
+}
+
+/// One rule of a filter set.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FilterRule {
+    /// Column the rule tests, from `FilterSetArchive.filter_offsets`.
+    pub column: Option<usize>,
+    pub enabled: bool,
+    pub predicate: Predicate,
+}
+
+/// `TST.FilterSetArchive` (6220) — a table's whole filter.
+///
+/// Every table has one whether or not it filters anything: a document with
+/// three tables carries seven of these, all eight bytes long and all empty, and
+/// only the ones with rules mean anything.
+#[derive(Debug, Clone, Default)]
+pub struct FilterSet {
+    pub identifier: u64,
+    /// `false` is "All" — every rule must match; `true` is "Any".
+    pub match_any: bool,
+    /// The Organise pane's filter switch. Defaults to **true** when the field
+    /// is absent, which is what an empty archive means.
+    pub enabled: bool,
+    pub rules: Vec<FilterRule>,
+}
+
+impl FilterSet {
+    pub fn decode(identifier: u64, archive: &Message) -> FilterSet {
+        let offsets = varints(archive, 5);
+        let per_rule = varints(archive, 6);
+        let mut rules = Vec::new();
+        // Field 3 is the pre-pivot slot and field 7 the current one. Numbers
+        // 15.3.1 writes the **pre-pivot** one for filters — the reverse of what
+        // the published references say — so the current slot is preferred where
+        // it exists and the older one is what is actually read here.
+        let current = archive.all(7).count() > 0;
+        for (slot, number) in [(true, 3u32), (false, 7)] {
+            if slot == current {
+                continue;
+            }
+            for value in archive.all(number) {
+                let Value::Bytes(raw) = value else { continue };
+                let Some(rule) = decode_nested(raw) else {
+                    continue;
+                };
+                let Some(predicate) = rule.bytes(1).and_then(decode_nested) else {
+                    continue;
+                };
+                let at = rules.len();
+                rules.push(FilterRule {
+                    column: offsets.get(at).map(|&n| n as usize),
+                    // `disabled` is the old slot's own field; the new slot
+                    // keeps the flag in the set's parallel array instead.
+                    enabled: if slot {
+                        rule.varint(2).unwrap_or(0) == 0
+                    } else {
+                        per_rule.get(at).copied().unwrap_or(1) != 0
+                    },
+                    predicate: Predicate::decode_either(&predicate),
+                });
+            }
+        }
+        FilterSet {
+            identifier,
+            match_any: archive.varint(1).unwrap_or(0) != 0,
+            enabled: archive.varint(2).unwrap_or(1) != 0,
+            rules,
+        }
+    }
+}
+
+/// How a category or a pivot summarises one column.
+///
+/// `agg_type` is Apple's code. **2 is Sum**, proven twice over: the pivot
+/// fixture labels the column Numbers renders from it "Units (Sum)", and the
+/// category fixture's accumulator for the same code holds 275, which is the sum
+/// of its ten values and not their count, mean, minimum or maximum. The others
+/// are reported as codes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Aggregate {
+    Sum,
+    Other(u32),
+}
+
+impl Aggregate {
+    pub fn from_code(code: u32) -> Aggregate {
+        match code {
+            2 => Aggregate::Sum,
+            other => Aggregate::Other(other),
+        }
+    }
+}
+
+impl std::fmt::Display for Aggregate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Aggregate::Sum => write!(f, "sum"),
+            Aggregate::Other(code) => write!(f, "aggregate {code}"),
+        }
+    }
+}
+
+/// `TST.ColumnAggregateArchive` — one summary assignment.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ColumnAggregate {
+    pub column: Option<usize>,
+    pub column_uid: Uuid,
+    /// Which nesting level of the category this summary belongs to; a pivot
+    /// value uses 0.
+    pub level: u32,
+    pub function: Aggregate,
+    /// `show_as_type` — the pivot's "Show As" (running total, % of total…).
+    /// 0 everywhere in this corpus.
+    pub show_as: u32,
+}
+
+impl ColumnAggregate {
+    fn decode(message: &Message, uids: &UidMap) -> ColumnAggregate {
+        let column_uid = message.bytes(1).and_then(Uuid::read).unwrap_or_default();
+        ColumnAggregate {
+            column: uids.column(column_uid),
+            column_uid,
+            level: message.varint(2).unwrap_or(0) as u32,
+            function: Aggregate::from_code(message.varint(3).unwrap_or(0) as u32),
+            show_as: message.varint(4).unwrap_or(0) as u32,
+        }
+    }
+}
+
+/// `TST.GroupColumnArchive` — a column rows are grouped by.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GroupColumn {
+    pub column: Option<usize>,
+    pub column_uid: Uuid,
+    /// How values are bucketed. 0 is "every distinct value"; the date and
+    /// number buckets carry a `TSCE.FunctorArchive` this crate does not read,
+    /// and the pivot fixture's date-by-month column is `7`.
+    pub grouping_type: u32,
+    /// True when a functor is present — i.e. the values are bucketed rather
+    /// than taken as they are.
+    pub has_functor: bool,
+}
+
+impl GroupColumn {
+    fn decode(message: &Message, uids: &UidMap) -> GroupColumn {
+        let column_uid = message.bytes(1).and_then(Uuid::read).unwrap_or_default();
+        GroupColumn {
+            column: uids.column(column_uid),
+            column_uid,
+            grouping_type: message.varint(2).unwrap_or(0) as u32,
+            has_functor: message.get(3).is_some(),
+        }
+    }
+}
+
+/// One node of a category's group tree — `TST.GroupByArchive.GroupNodeArchive`
+/// (6383).
+///
+/// **Field 2 does not exist**; the children are field 3 inline or field 10 by
+/// reference, and 15.3.1 writes both forms in the same document — the tree
+/// inline on the `GroupByArchive` and the same tree again as free-standing
+/// objects.
+#[derive(Debug, Clone, Default)]
+pub struct Group {
+    pub uid: Uuid,
+    /// The value every row in this group shares. Absent on the root.
+    pub value: Option<CellValue>,
+    /// Rows in the group, as the node records them.
+    pub rows: Vec<usize>,
+    /// Whether the group is collapsed, from the row hidden-state extent's
+    /// `collapsed_group_uids`.
+    pub collapsed: bool,
+    pub children: Vec<Group>,
+}
+
+impl Group {
+    fn decode(document: &crate::Document, message: &Message, collapsed: &[Uuid]) -> Group {
+        let uid = message.bytes(1).and_then(Uuid::read).unwrap_or_default();
+        let mut children = Vec::new();
+        for value in message.all(3) {
+            let Value::Bytes(raw) = value else { continue };
+            if let Some(child) = decode_nested(raw) {
+                children.push(Group::decode(document, &child, collapsed));
+            }
+        }
+        for value in message.all(10) {
+            let Value::Bytes(raw) = value else { continue };
+            if let Some(child) = reference(raw).and_then(|id| archive(document, id)) {
+                children.push(Group::decode(document, &child, collapsed));
+            }
+        }
+        // Field 8 is the index set of rows and field 9 the lookup positions;
+        // 15.3.1 writes only 9, whose ranges are row indexes in every document
+        // read here.
+        let rows = message
+            .bytes(8)
+            .or_else(|| message.bytes(9))
+            .and_then(decode_nested)
+            .map(|set| index_set(&set))
+            .unwrap_or_default();
+        Group {
+            uid,
+            value: message
+                .bytes(7)
+                .and_then(decode_nested)
+                .and_then(|v| cell_value(&v)),
+            rows,
+            collapsed: collapsed.contains(&uid),
+            children,
+        }
+    }
+
+    /// Every group under this one, this one included, depth first.
+    pub fn walk(&self) -> Vec<&Group> {
+        let mut out = vec![self];
+        for child in &self.children {
+            out.extend(child.walk());
+        }
+        out
+    }
+}
+
+/// A category — one `TST.GroupByArchive` (6373).
+#[derive(Debug, Clone, Default)]
+pub struct Category {
+    pub identifier: u64,
+    pub uid: Uuid,
+    /// The Organise pane's Categories switch.
+    pub enabled: bool,
+    /// Source columns, outermost group first.
+    pub columns: Vec<GroupColumn>,
+    /// Summary-row assignments, one per (column, level).
+    pub summaries: Vec<ColumnAggregate>,
+    /// The group tree's root. Its children are the top-level groups.
+    pub root: Option<Group>,
+}
+
+impl Category {
+    fn decode(
+        document: &crate::Document,
+        identifier: u64,
+        archive_: &Message,
+        uids: &UidMap,
+        collapsed: &[Uuid],
+    ) -> Category {
+        let root = archive_
+            .bytes(3)
+            .and_then(decode_nested)
+            .or_else(|| {
+                archive_
+                    .bytes(18)
+                    .and_then(reference)
+                    .and_then(|id| archive(document, id))
+            })
+            .map(|node| Group::decode(document, &node, collapsed));
+        Category {
+            identifier,
+            uid: archive_.bytes(1).and_then(Uuid::read).unwrap_or_default(),
+            enabled: archive_.varint(6).unwrap_or(0) != 0,
+            columns: archive_
+                .all(2)
+                .filter_map(|value| match value {
+                    Value::Bytes(raw) => decode_nested(raw),
+                    _ => None,
+                })
+                .map(|column| GroupColumn::decode(&column, uids))
+                .collect(),
+            summaries: archive_
+                .all(5)
+                .filter_map(|value| match value {
+                    Value::Bytes(raw) => decode_nested(raw),
+                    _ => None,
+                })
+                .map(|aggregate| ColumnAggregate::decode(&aggregate, uids))
+                .collect(),
+            root,
+        }
+    }
+
+    /// Every group, depth first, the root excluded.
+    pub fn groups(&self) -> Vec<&Group> {
+        match &self.root {
+            Some(root) => root.children.iter().flat_map(Group::walk).collect(),
+            None => Vec::new(),
+        }
+    }
+}
+
+/// A pivot table's rules — `TST.PivotOwnerArchive` (6370).
+///
+/// **The archive has no field 1.** Rows and columns are two lists of the same
+/// `GroupColumnArchive` type, values are `ColumnAggregateArchive`s, and the two
+/// grand-total switches are separate booleans well past them.
+#[derive(Debug, Clone, Default)]
+pub struct Pivot {
+    pub identifier: u64,
+    pub uid: Uuid,
+    /// Name of the table the pivot summarises, as the pivot itself records it.
+    pub source_name: String,
+    pub source_uid: Uuid,
+    /// Fields dropped in the Rows well.
+    pub rows: Vec<GroupColumn>,
+    /// Fields dropped in the Columns well.
+    pub columns: Vec<GroupColumn>,
+    /// Fields dropped in the Values well, with their summary functions.
+    pub values: Vec<ColumnAggregate>,
+    pub hide_grand_total_rows: bool,
+    pub hide_grand_total_columns: bool,
+    /// A pivot with nothing assigned yet. The fixture has one on purpose.
+    pub empty: bool,
+}
+
+impl Pivot {
+    fn decode(identifier: u64, archive_: &Message, uids: &UidMap) -> Pivot {
+        let group_columns = |number: u32| -> Vec<GroupColumn> {
+            archive_
+                .bytes(number)
+                .and_then(decode_nested)
+                .map(|list| {
+                    list.all(1)
+                        .filter_map(|value| match value {
+                            Value::Bytes(raw) => decode_nested(raw),
+                            _ => None,
+                        })
+                        .map(|column| GroupColumn::decode(&column, uids))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        Pivot {
+            identifier,
+            uid: archive_.bytes(2).and_then(Uuid::read).unwrap_or_default(),
+            source_name: string_field(archive_, 12),
+            source_uid: archive_.bytes(8).and_then(Uuid::read).unwrap_or_default(),
+            rows: group_columns(3),
+            columns: group_columns(4),
+            values: archive_
+                .bytes(5)
+                .and_then(decode_nested)
+                .map(|list| {
+                    list.all(1)
+                        .filter_map(|value| match value {
+                            Value::Bytes(raw) => decode_nested(raw),
+                            _ => None,
+                        })
+                        .map(|aggregate| ColumnAggregate::decode(&aggregate, uids))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            hide_grand_total_rows: archive_.varint(11).unwrap_or(0) != 0,
+            hide_grand_total_columns: archive_.varint(13).unwrap_or(0) != 0,
+            empty: archive_.varint(7).unwrap_or(0) != 0,
+        }
+    }
+}
+
+/// One conditional-highlighting rule.
+#[derive(Debug, Clone, Default)]
+pub struct ConditionalRule {
+    pub predicate: Predicate,
+    /// The cell style applied when the rule matches.
+    pub cell_style: Option<u64>,
+    pub text_style: Option<u64>,
+}
+
+/// `TST.ConditionalStyleSetArchive` (6010) — the ordered rules for one range.
+///
+/// Cells point at one of these through the CONDITIONAL_STYLE data list, which
+/// is why a set is reported with the key that reaches it: a whole column of
+/// highlighted cells shares one set and one key.
+#[derive(Debug, Clone, Default)]
+pub struct ConditionalStyles {
+    pub identifier: u64,
+    /// Key in the table's CONDITIONAL_STYLE `TableDataList`, where one reaches
+    /// this set.
+    pub key: Option<u32>,
+    pub rules: Vec<ConditionalRule>,
+}
+
+impl ConditionalStyles {
+    fn decode(identifier: u64, key: Option<u32>, archive_: &Message) -> ConditionalStyles {
+        let mut rules = Vec::new();
+        // Numbers 15.3.1 writes **both** slots, with the same rules in each:
+        // field 2 in the pre-pivot shape and field 3 wrapping the current one.
+        // They are not equivalent — only the current shape carries the value
+        // the rule compares against, because the pre-pivot shape keeps it
+        // inside a formula — so the current slot wins outright and the older
+        // one is the fallback for a document that has only it.
+        let current: Vec<Message> = archive_
+            .bytes(3)
+            .and_then(decode_nested)
+            .map(|wrapper| {
+                wrapper
+                    .all(1)
+                    .filter_map(|value| match value {
+                        Value::Bytes(raw) => decode_nested(raw),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let raws = if current.is_empty() {
+            archive_
+                .all(2)
+                .filter_map(|value| match value {
+                    Value::Bytes(raw) => decode_nested(raw),
+                    _ => None,
+                })
+                .collect()
+        } else {
+            current
+        };
+        for rule in raws {
+            rules.push(ConditionalRule {
+                predicate: rule
+                    .bytes(1)
+                    .and_then(decode_nested)
+                    .map(|p| Predicate::decode_either(&p))
+                    .unwrap_or_default(),
+                cell_style: rule.bytes(2).and_then(reference),
+                text_style: rule.bytes(3).and_then(reference),
+            });
+        }
+        ConditionalStyles {
+            identifier,
+            key,
+            rules,
+        }
+    }
+}
+
+/// A named cell format the user defined — `TSK.CustomFormatArchive`.
+///
+/// Custom formats are **document-scoped**, not table-scoped: they live in one
+/// `TSK.CustomFormatListArchive` (222) that every table's cells reach into by
+/// `custom_uid`.
+#[derive(Debug, Clone, Default)]
+pub struct CustomFormat {
+    pub uid: Uuid,
+    pub name: String,
+    /// `format_type`, the same code space as a cell's data format.
+    pub format_type: u32,
+    /// The format string the user typed, where the format has one.
+    pub format_string: String,
+    /// How many conditional sub-rules the format carries — a custom format may
+    /// switch representation on the value's sign or size.
+    pub conditions: usize,
+}
+
+/// A table's row or column hidden-state record —
+/// `TST.HiddenStateExtentArchive`, reached through `TableModelArchive` field 70.
+#[derive(Debug, Clone, Default)]
+pub struct HiddenStates {
+    /// UUIDs of the groups that are collapsed. This is the *only* place a
+    /// collapsed category group is recorded.
+    pub collapsed_groups: Vec<Uuid>,
+    /// Rows or columns the user hid, by index where the UUID resolves.
+    pub user_hidden: Vec<usize>,
+    /// Rows or columns a filter excluded, as the extent records them. **Not
+    /// the same set as the rows whose `hidingState` is 2** — see `FORMAT.md`.
+    pub filtered: Vec<usize>,
+    /// The filter set this extent is driven by.
+    pub filter_set: Option<u64>,
+}
+
+impl HiddenStates {
+    fn decode(extent: &Message, uids: &UidMap, rows: bool) -> HiddenStates {
+        let mut state = HiddenStates {
+            collapsed_groups: extent
+                .all(7)
+                .filter_map(|value| match value {
+                    Value::Bytes(raw) => Uuid::read(raw),
+                    _ => None,
+                })
+                .collect(),
+            filter_set: extent.bytes(8).and_then(reference),
+            ..HiddenStates::default()
+        };
+        for value in extent.all(2) {
+            let Value::Bytes(raw) = value else { continue };
+            let Some(entry) = decode_nested(raw) else {
+                continue;
+            };
+            let Some(uid) = entry.bytes(1).and_then(Uuid::read) else {
+                continue;
+            };
+            let Some(index) = (if rows {
+                uids.row(uid)
+            } else {
+                uids.column(uid)
+            }) else {
+                continue;
+            };
+            if entry.varint(2).unwrap_or(0) != 0 {
+                state.user_hidden.push(index);
+            }
+            if entry.varint(3).unwrap_or(0) != 0 {
+                state.filtered.push(index);
+            }
+        }
+        state.user_hidden.sort_unstable();
+        state.filtered.sort_unstable();
+        state
+    }
 }
 
 /// A table, read.
@@ -833,6 +1668,28 @@ pub struct Table {
     pub row_extents: Vec<Extent>,
     pub column_extents: Vec<Extent>,
     pub merges: Vec<Merge>,
+    /// UUID ↔ index for this table's rows and columns; everything below is
+    /// addressed through it.
+    pub uids: UidMap,
+    /// `TSCE.HauntedOwnerArchive.owner_uid` — the table's identity for
+    /// everything that refers to it from outside, a pivot's source reference
+    /// included.
+    pub haunted_uid: Uuid,
+    /// Sort rules, in the order they are applied.
+    pub sort_rules: Vec<SortRule>,
+    /// The table's filter, when it has one with rules.
+    pub filter: Option<FilterSet>,
+    /// Categories. A table has at most one active `GroupByArchive`, but the
+    /// field is repeated and a pivot's source carries several.
+    pub categories: Vec<Category>,
+    /// Set when this table *is* a pivot table, with the rules that build it.
+    pub pivot: Option<Pivot>,
+    /// Conditional-highlighting rule sets used by this table's cells.
+    pub conditional_styles: Vec<ConditionalStyles>,
+    /// Row hidden state, including which category groups are collapsed.
+    pub row_states: HiddenStates,
+    /// Column hidden state.
+    pub column_states: HiddenStates,
     cells: Vec<Cell>,
     /// Rows whose storage could not be read, with the reason — so that a
     /// partially decoded table says so instead of reporting empty cells.
@@ -966,6 +1823,7 @@ pub fn tables(document: &crate::Document) -> Vec<Table> {
             object.identifier,
             model_id,
             stream,
+            &info,
             &model,
             sheets.get(&object.identifier).cloned(),
             parent,
@@ -974,7 +1832,49 @@ pub fn tables(document: &crate::Document) -> Vec<Table> {
         }
     }
     out.sort_by_key(|t| t.identifier);
+    resolve_pivot_sources(&mut out);
     out
+}
+
+/// Point a pivot's fields at columns of the table it summarises.
+///
+/// A pivot's `GroupColumnArchive`s name columns of the **source** table, so
+/// resolving them against the pivot's own UUID map answers nothing. The join is
+/// `PivotOwnerArchive.source_table_uid` against the source's
+/// `HauntedOwnerArchive.owner_uid` — and the two are *not equal*: the lower
+/// halves differ by a small constant (35 in the fixture), because every owner a
+/// table has is a numbered offset from one base UUID. The **upper half is the
+/// table's identity** and is what matches; `source_table_name` breaks the tie
+/// if two tables ever share one, and is all there is when nothing matches.
+///
+/// This has to happen after every table is read, which is why it is a second
+/// pass rather than part of reading one.
+fn resolve_pivot_sources(tables: &mut [Table]) {
+    let sources: Vec<(Uuid, String, UidMap)> = tables
+        .iter()
+        .map(|t| (t.haunted_uid, t.name.clone(), t.uids.clone()))
+        .collect();
+    for table in tables.iter_mut() {
+        let Some(pivot) = &mut table.pivot else {
+            continue;
+        };
+        let mut matches = sources
+            .iter()
+            .filter(|(uid, _, _)| uid.upper == pivot.source_uid.upper && uid.upper != 0);
+        let source = match (matches.next(), matches.next()) {
+            (Some(only), None) => Some(only),
+            _ => sources
+                .iter()
+                .find(|(_, name, _)| *name == pivot.source_name),
+        };
+        let Some((_, _, uids)) = source else { continue };
+        for field in pivot.rows.iter_mut().chain(pivot.columns.iter_mut()) {
+            field.column = uids.column(field.column_uid);
+        }
+        for value in &mut pivot.values {
+            value.column = uids.column(value.column_uid);
+        }
+    }
 }
 
 /// Sheet name per table, from `TN.SheetArchive` — Numbers only.
@@ -1025,11 +1925,13 @@ fn data_list(document: &crate::Document, store: &Message, field: u32) -> DataLis
         .unwrap_or_default()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn read_table(
     document: &crate::Document,
     identifier: u64,
     model_id: u64,
     stream: &str,
+    info: &Message,
     model: &Message,
     sheet: Option<String>,
     parent: Option<u64>,
@@ -1044,6 +1946,18 @@ fn read_table(
         controls: data_list(document, &store, 21),
         formulas: data_list(document, &store, 6),
     };
+
+    // The UUID index first: nothing below can name a row or a column without
+    // it. `base_column_row_uids` is the unsorted map; the *view* map hanging
+    // off the table info follows the category label rows and is a different
+    // length, so it is not a substitute.
+    let uids = model
+        .bytes(46)
+        .and_then(reference)
+        .and_then(|id| archive(document, id))
+        .map(|map| UidMap::decode(&map))
+        .unwrap_or_default();
+    let (column_states, row_states) = hidden_states(model, &uids);
 
     let mut table = Table {
         identifier,
@@ -1070,12 +1984,177 @@ fn read_table(
         row_extents: row_extents(document, &store, rows),
         column_extents: column_extents(document, &store, columns),
         merges: merges(document, model, &store),
+        sort_rules: sort_rules(model),
+        filter: filter_set(document, model, &row_states),
+        categories: categories(document, model, &uids, &row_states.collapsed_groups),
+        pivot: pivot(document, info, model, &uids),
+        conditional_styles: conditional_styles(document, &store),
+        haunted_uid: model
+            .bytes(84)
+            .and_then(decode_nested)
+            .and_then(|owner| owner.bytes(1).and_then(Uuid::read))
+            .unwrap_or_default(),
+        uids,
+        row_states,
+        column_states,
         cells: Vec::new(),
         problems: Vec::new(),
     };
 
     read_cells(document, &store, &side, &mut table);
     Some(table)
+}
+
+/// `TableModelArchive` field 70 — the inline `HiddenStatesOwnerArchive`.
+///
+/// It holds a list of `HiddenStatesArchive`, each with a column extent (2) and
+/// a row extent (3). Every document read here has exactly one.
+fn hidden_states(model: &Message, uids: &UidMap) -> (HiddenStates, HiddenStates) {
+    let Some(states) = model
+        .bytes(70)
+        .and_then(decode_nested)
+        .and_then(|owner| owner.bytes(2).and_then(decode_nested))
+    else {
+        return (HiddenStates::default(), HiddenStates::default());
+    };
+    let extent = |number: u32, rows: bool| {
+        states
+            .bytes(number)
+            .and_then(decode_nested)
+            .map(|e| HiddenStates::decode(&e, uids, rows))
+            .unwrap_or_default()
+    };
+    (extent(2, false), extent(3, true))
+}
+
+/// `TableModelArchive` field 44 — `TST.TableSortOrderArchive`.
+fn sort_rules(model: &Message) -> Vec<SortRule> {
+    let Some(order) = model.bytes(44).and_then(decode_nested) else {
+        return Vec::new();
+    };
+    order
+        .all(2)
+        .filter_map(|value| match value {
+            Value::Bytes(raw) => decode_nested(raw),
+            _ => None,
+        })
+        .map(|rule| SortRule {
+            column: rule.varint(1).unwrap_or(0) as usize,
+            descending: rule.varint(2).unwrap_or(0) != 0,
+        })
+        .collect()
+}
+
+/// The table's filter set.
+///
+/// Two references reach one: `TableModelArchive` field 38, and the row hidden
+/// state extent's own field 8. They point at *different* archives in the same
+/// document — the extent's is the one carrying the rules — so both are read and
+/// the one that filters anything wins.
+fn filter_set(
+    document: &crate::Document,
+    model: &Message,
+    row_states: &HiddenStates,
+) -> Option<FilterSet> {
+    let mut best: Option<FilterSet> = None;
+    let candidates = [model.bytes(38).and_then(reference), row_states.filter_set];
+    for identifier in candidates.into_iter().flatten() {
+        let Some(set) = archive(document, identifier).map(|a| FilterSet::decode(identifier, &a))
+        else {
+            continue;
+        };
+        let better = match &best {
+            Some(current) => set.rules.len() > current.rules.len(),
+            None => true,
+        };
+        if better {
+            best = Some(set);
+        }
+    }
+    best.filter(|set| !set.rules.is_empty())
+}
+
+/// The table's categories.
+///
+/// 15.3.1 writes them **twice**: inline at `TableModelArchive` field 81, the
+/// field the schema marks `category_owner_deprecated`, and again by reference
+/// at field 86 through a `CategoryOwnerRefArchive` (6372). The referenced form
+/// is preferred; the inline one is the fallback for a document that has only
+/// it.
+fn categories(
+    document: &crate::Document,
+    model: &Message,
+    uids: &UidMap,
+    collapsed: &[Uuid],
+) -> Vec<Category> {
+    let mut out = Vec::new();
+    if let Some(owner) = model
+        .bytes(86)
+        .and_then(reference)
+        .and_then(|id| archive(document, id))
+    {
+        for value in owner.all(1) {
+            let Value::Bytes(raw) = value else { continue };
+            let Some(identifier) = reference(raw) else {
+                continue;
+            };
+            let Some(group_by) = archive(document, identifier) else {
+                continue;
+            };
+            out.push(Category::decode(
+                document, identifier, &group_by, uids, collapsed,
+            ));
+        }
+    }
+    if out.is_empty() {
+        if let Some(owner) = model.bytes(81).and_then(decode_nested) {
+            for value in owner.all(2) {
+                let Value::Bytes(raw) = value else { continue };
+                let Some(group_by) = decode_nested(raw) else {
+                    continue;
+                };
+                out.push(Category::decode(document, 0, &group_by, uids, collapsed));
+            }
+        }
+    }
+    out.retain(|category| !category.columns.is_empty());
+    out
+}
+
+/// The pivot rules, when this table is a pivot table.
+///
+/// `TableInfoArchive.is_a_pivot_table` (16) is the flag; the rules hang off the
+/// *model* at field 85. A pivot's source table carries a `PivotOwnerArchive`
+/// too — the same object, reached from the other end — so the flag is what
+/// decides which of the two tables reports it.
+fn pivot(
+    document: &crate::Document,
+    info: &Message,
+    model: &Message,
+    uids: &UidMap,
+) -> Option<Pivot> {
+    if info.varint(16).unwrap_or(0) == 0 {
+        return None;
+    }
+    let identifier = model.bytes(85).and_then(reference)?;
+    let owner = archive(document, identifier)?;
+    Some(Pivot::decode(identifier, &owner, uids))
+}
+
+/// Conditional-highlighting rule sets, from `DataStore.conditionalstyletable`.
+fn conditional_styles(document: &crate::Document, store: &Message) -> Vec<ConditionalStyles> {
+    let list = data_list(document, store, 18);
+    let mut out = Vec::new();
+    for (key, entry) in &list.entries {
+        let Some(identifier) = entry.reference else {
+            continue;
+        };
+        let Some(set) = archive(document, identifier) else {
+            continue;
+        };
+        out.push(ConditionalStyles::decode(identifier, Some(*key), &set));
+    }
+    out
 }
 
 fn string_field(message: &Message, number: u32) -> String {
@@ -1415,6 +2494,52 @@ fn resolve(row: usize, column: usize, record: CellRecord, side: &SideTables) -> 
         has_formula,
         record,
     }
+}
+
+/// `TSK.CustomFormatListArchive` — every named cell format in the document.
+pub const TYPE_CUSTOM_FORMAT_LIST: u32 = 222;
+
+/// Every custom cell format the document defines.
+///
+/// The list is document-scoped and there is exactly one archive per document,
+/// empty in most of them. Its two repeated fields are parallel: `uuids` (1) and
+/// `custom_formats` (2), and a cell reaches a format by the UUID rather than by
+/// position.
+pub fn custom_formats(document: &crate::Document) -> Vec<CustomFormat> {
+    let mut out = Vec::new();
+    for (_, object) in document.objects() {
+        if object.message_type() != TYPE_CUSTOM_FORMAT_LIST {
+            continue;
+        }
+        let Ok(list) = Message::decode(object.payload()) else {
+            continue;
+        };
+        let uids: Vec<Uuid> = list
+            .all(1)
+            .filter_map(|value| match value {
+                Value::Bytes(raw) => Uuid::read(raw),
+                _ => None,
+            })
+            .collect();
+        for (at, value) in list.all(2).enumerate() {
+            let Value::Bytes(raw) = value else { continue };
+            let Some(format) = decode_nested(raw) else {
+                continue;
+            };
+            let default = format.bytes(3).and_then(decode_nested);
+            out.push(CustomFormat {
+                uid: uids.get(at).copied().unwrap_or_default(),
+                name: string_field(&format, 1),
+                format_type: format.varint(5).or_else(|| format.varint(2)).unwrap_or(0) as u32,
+                format_string: default
+                    .as_ref()
+                    .map(|f| string_field(f, 18))
+                    .unwrap_or_default(),
+                conditions: format.all(4).count(),
+            });
+        }
+    }
+    out
 }
 
 /// Fill in the text of the rich-text cells of a table, which lives in
