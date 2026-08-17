@@ -254,13 +254,24 @@ repeated-field ordering, and objects straddling a Snappy block boundary.
 - **Deleting a style is refused rather than forced.** If a reference this crate
   cannot account for would be left dangling, the delete fails and says which
   objects still hold one.
+- **A reference that leaves its component has to be declared.** The document
+  body and the stylesheet are separate components, so pointing text at a style
+  is two edits: the run, and a `ComponentInfo.external_references` entry saying
+  where the style lives. Without the second, iWork never loads the style — and
+  the failure is *quiet*: one such document opened in Pages with the paragraph
+  simply unstyled, as though nothing had been done, and another crashed on open.
+  `apply_text_style` and `create_text_style` maintain the declarations;
+  `iwork check` reports any that are missing.
 - **No layout, no rendering, no formula evaluation.** This reads and rewrites
   the document; it does not understand it.
 - **"iWork opens it" is not tested here, and it is not a formality.** The tests
   prove the bytes are structurally correct and survive an independent decode.
   They cannot prove an app will accept the result, and the difference is real:
   documents that pass every check in this repository — including `iwork check`,
-  which finds nothing wrong with them — have crashed Pages on opening. Anything
+  which finds nothing wrong with them — have crashed Pages on opening. Each time,
+  the fix has been to find an invariant the real documents hold to exactly, teach
+  `iwork check` to assert it, and maintain it on write; the checker is that much
+  sharper each round, and still not a substitute for opening the file. Anything
   written by this crate needs trying in the app before it is trusted.
 - **Applying a character style may not change how text looks.** Pointing a run
   at a different character style is accepted and survives a reopen, but has not

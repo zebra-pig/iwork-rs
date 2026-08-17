@@ -545,6 +545,40 @@ fn count_references_to(message: &Message, identifier: u64, depth: usize) -> usiz
     found
 }
 
+/// Every object this message refers to, at any depth, without duplicates.
+///
+/// Used to reconcile a component's declared `external_references`
+/// ([`crate::Document::declare_external_references`]). The detector is
+/// [`reference_target`]'s — a bare `{1: n}` and nothing else — which is strict
+/// enough to be safe in practice: run over five Pages documents and one Keynote
+/// document, every reference it found that crossed a component boundary was
+/// already declared by iWork itself, and it found no others.
+pub fn references(message: &Message) -> Vec<u64> {
+    let mut out = Vec::new();
+    collect_references(message, &mut out, MAX_DEPTH);
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+fn collect_references(message: &Message, out: &mut Vec<u64>, depth: usize) {
+    if depth == 0 {
+        return;
+    }
+    for field in &message.fields {
+        let Value::Bytes(raw) = &field.value else {
+            continue;
+        };
+        let Some(nested) = pb::decode_nested(raw) else {
+            continue;
+        };
+        match reference_target(&nested) {
+            Some(target) => out.push(target),
+            None => collect_references(&nested, out, depth - 1),
+        }
+    }
+}
+
 // -- labels ------------------------------------------------------------------
 
 /// Every readable string in an archive, with the path it sits at.
@@ -872,13 +906,13 @@ pub fn repoint(table: &mut Message, from: u64, to: Option<u64>) -> usize {
 /// level to style. Repeatedness cannot separate the two cases, because both are
 /// repeated fields. Provenance can.
 ///
-/// References that are not bare are left alone even in the stylesheet. Beside
-/// the plain list it carries keyed entries
-/// `{1: "text-1-paragraphstyle-Title", 2: reference}` mapping a well-known
-/// identifier to a style, and grouping entries `{1: reference, 2: reference…}`
-/// tying a style to its variations. Duplicating a keyed entry would either
-/// collide on the key or invent one, and a second style claiming to be the
-/// document's title style is worse than a style that is merely listed.
+/// Keyed entries `{1: "text-1-paragraphstyle-Title", 2: reference}`, mapping a
+/// well-known identifier to a style, are left alone: duplicating one would
+/// either collide on the key or invent one, and a second style claiming to be
+/// the document's title style is worse than a style that is merely listed.
+///
+/// The grouping entries `{1: parent reference, 2: child reference…}` are not
+/// left alone — see [`clone_sibling`], which the caller must also run.
 pub fn clone_registrations(stylesheet: &mut Message, old: u64, new: u64) -> usize {
     let mut additions = Vec::new();
     for field in &stylesheet.fields {
@@ -896,8 +930,109 @@ pub fn clone_registrations(stylesheet: &mut Message, old: u64, new: u64) -> usiz
         }
     }
     let cloned = additions.len();
-    stylesheet.fields.extend(additions);
+    for field in additions {
+        stylesheet.append_in_order(field.number, field.value);
+    }
     cloned
+}
+
+/// List `new` beside `old` in the entry that groups `old` under `parent`.
+///
+/// A stylesheet does not only list its styles; it also records, for each style
+/// that has children, an entry shaped `{1: parent, 2: child, 2: child, …}`.
+/// Every style in the five Pages documents and the Keynote document this crate
+/// was checked against that names a parent *and* is listed in a stylesheet
+/// appears in its parent's entry — 109 styles, no exceptions. A copy that is
+/// listed but not grouped is a shape those documents never take.
+///
+/// The entry is found by its contents rather than its field number: the one
+/// whose first field is a reference to `parent` and which already lists `old`.
+/// Nothing else in a stylesheet has that shape, and being wrong about it would
+/// mean adding a style to the wrong family.
+///
+/// Returns whether an entry was found and extended.
+pub fn clone_sibling(stylesheet: &mut Message, parent: u64, old: u64, new: u64) -> bool {
+    for field in &mut stylesheet.fields {
+        let Value::Bytes(raw) = &field.value else {
+            continue;
+        };
+        let Some(mut entry) = pb::decode_nested(raw) else {
+            continue;
+        };
+        let heads_the_family = entry
+            .fields
+            .first()
+            .and_then(|f| match &f.value {
+                Value::Bytes(raw) => pb::decode_nested(raw),
+                _ => None,
+            })
+            .is_some_and(|head| is_reference_to(&head, parent));
+        if !heads_the_family {
+            continue;
+        }
+        let Some(position) = entry.fields.iter().position(|f| match &f.value {
+            Value::Bytes(raw) => pb::decode_nested(raw).is_some_and(|r| is_reference_to(&r, old)),
+            _ => false,
+        }) else {
+            continue;
+        };
+        let number = entry.fields[position].number;
+        entry.fields.insert(
+            position + 1,
+            Field {
+                number,
+                value: Value::Bytes(reference(new).encode()),
+            },
+        );
+        field.value = Value::Bytes(entry.encode());
+        return true;
+    }
+    false
+}
+
+/// Undo [`clone_sibling`]: drop `identifier` from the family entries.
+///
+/// An entry whose *head* is `identifier` describes that style's own children
+/// and goes with it; an entry that merely lists it loses one child. Returns the
+/// number of references dropped.
+pub fn remove_sibling(stylesheet: &mut Message, identifier: u64) -> usize {
+    let mut dropped = 0;
+    stylesheet.fields.retain_mut(|field| {
+        let Value::Bytes(raw) = &field.value else {
+            return true;
+        };
+        let Some(mut entry) = pb::decode_nested(raw) else {
+            return true;
+        };
+        let refers = |f: &Field| match &f.value {
+            Value::Bytes(raw) => {
+                pb::decode_nested(raw).is_some_and(|r| is_reference_to(&r, identifier))
+            }
+            _ => false,
+        };
+        // A family entry is headed by the parent's reference. A keyed entry is
+        // headed by a string, and is not ours to edit — see
+        // [`clone_registrations`].
+        let heads_a_family = entry.fields.first().is_some_and(|f| match &f.value {
+            Value::Bytes(raw) => {
+                pb::decode_nested(raw).is_some_and(|head| reference_target(&head).is_some())
+            }
+            _ => false,
+        });
+        if !heads_a_family || entry.fields.len() < 2 || !entry.fields.iter().any(refers) {
+            return true;
+        }
+        if entry.fields.first().is_some_and(refers) {
+            dropped += entry.fields.iter().filter(|f| refers(f)).count();
+            return false;
+        }
+        let before = entry.fields.len();
+        entry.fields.retain(|f| !refers(f));
+        dropped += before - entry.fields.len();
+        field.value = Value::Bytes(entry.encode());
+        true
+    });
+    dropped
 }
 
 /// Drop every top-level bare reference to `identifier`.

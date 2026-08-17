@@ -177,6 +177,22 @@ impl Message {
         }
     }
 
+    /// Add another occurrence of `number`, after the last one already there, or
+    /// in ascending field order if there is none.
+    ///
+    /// This is [`Message::set_in_order`] for a *repeated* field, where replacing
+    /// the first occurrence would silently drop an entry rather than add one.
+    pub fn append_in_order(&mut self, number: u32, value: Value) {
+        let at = self
+            .fields
+            .iter()
+            .rposition(|f| f.number == number)
+            .map(|last| last + 1)
+            .or_else(|| self.fields.iter().position(|f| f.number > number))
+            .unwrap_or(self.fields.len());
+        self.fields.insert(at, Field { number, value });
+    }
+
     /// Remove every occurrence of `number`. Returns how many were removed.
     pub fn clear(&mut self, number: u32) -> usize {
         let before = self.fields.len();

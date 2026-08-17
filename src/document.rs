@@ -1,6 +1,6 @@
 //! Document-level view over a package: components, media, text and styles.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 
 use crate::iwa::{self, ArchiveObject};
@@ -98,6 +98,20 @@ impl DataFile {
     pub fn entry_name(&self) -> Option<String> {
         (!self.stored_name.is_empty()).then(|| format!("Data/{}", self.stored_name))
     }
+}
+
+/// Which component owns what, and what each component already declares —
+/// everything [`Document::undeclared_references`] needs, gathered in one pass.
+#[derive(Default)]
+struct ComponentIndex {
+    /// Package entry name to the component stored there.
+    by_stream: BTreeMap<String, u64>,
+    /// Object identifier to the component it lives in.
+    by_object: BTreeMap<u64, u64>,
+    /// Component identifiers, which are also their root objects' identifiers.
+    roots: BTreeSet<u64>,
+    /// Objects each component declares in its `external_references`.
+    declared: BTreeMap<u64, BTreeSet<u64>>,
 }
 
 /// A run of styled text, held by `TSWP.StorageArchive`.
@@ -418,11 +432,19 @@ impl Document {
         if let Some(stylesheet) = source.stylesheet {
             if let Ok(mut sheet) = self.archive_of(stylesheet) {
                 registrations_cloned = style::clone_registrations(&mut sheet, template, identifier);
+                // A style is listed twice: once among the stylesheet's styles,
+                // once under its parent. Both, or the copy is an orphan.
+                if let Some(parent) = source.parent {
+                    if style::clone_sibling(&mut sheet, parent, template, identifier) {
+                        registrations_cloned += 1;
+                    }
+                }
                 if registrations_cloned > 0 {
                     self.set_archive(stylesheet, &sheet)?;
                 }
             }
         }
+        self.declare_external_references();
 
         Ok(CreatedStyle {
             identifier,
@@ -668,7 +690,8 @@ impl Document {
             // reference after this is reported below and the delete is refused,
             // which is the right outcome for a style that is genuinely in use.
             if Some(object.identifier) == style.stylesheet {
-                let removed = style::remove_registrations(&mut edited, identifier);
+                let removed = style::remove_registrations(&mut edited, identifier)
+                    + style::remove_sibling(&mut edited, identifier);
                 deletion.registrations_removed += removed;
                 touched += removed;
             }
@@ -730,7 +753,12 @@ impl Document {
         };
         style::apply(&mut table, range, style_identifier, length);
         archive.set(table_field, Value::Bytes(table.encode()));
-        self.set_archive(storage, &archive)
+        self.set_archive(storage, &archive)?;
+        // The style usually lives in the document stylesheet and the storage in
+        // the document body — different components, so the reference has to be
+        // declared before iWork will resolve it.
+        self.declare_external_references();
+        Ok(())
     }
 
     /// Character ranges of the paragraphs in one storage, in UTF-16 code units.
@@ -841,7 +869,8 @@ impl Document {
             }
         }
 
-        // Style archives must resolve their parent and stylesheet.
+        // Style archives must resolve their parent and stylesheet, and a style
+        // listed in a stylesheet must also be grouped under its parent.
         for style in self.text_styles() {
             for (what, target) in [("parent", style.parent), ("stylesheet", style.stylesheet)] {
                 let Some(target) = target else { continue };
@@ -852,8 +881,197 @@ impl Document {
                     ));
                 }
             }
+            let (Some(parent), Some(sheet)) = (style.parent, style.stylesheet) else {
+                continue;
+            };
+            let Ok(archive) = self.archive_of(sheet) else {
+                continue;
+            };
+            if style::count_references(&archive, style.identifier) == 1 {
+                problems.push(format!(
+                    "style {}: listed in stylesheet {sheet} but not grouped under \
+                     its parent {parent}",
+                    style.identifier
+                ));
+            }
+        }
+
+        for (component, object, target) in self.undeclared_references() {
+            problems.push(format!(
+                "object {object} refers to {target} in another component, which \
+                 component {component} does not declare"
+            ));
         }
         problems
+    }
+
+    // -- components ----------------------------------------------------------
+
+    /// References that leave the component they are written in without being
+    /// declared in it, as `(component, referring object, target)`.
+    ///
+    /// A package is loaded component by component. Within a component an
+    /// identifier resolves against the objects in the same stream; to reach an
+    /// object in another component, the referring component must list it in its
+    /// `TSP.ComponentInfo.external_references` as
+    /// `{1: target's component, 2: target}`. iWork keeps that list exact: across
+    /// five Pages documents and one Keynote document — some five thousand
+    /// objects — every cross-component reference is declared and this returns
+    /// nothing.
+    ///
+    /// An undeclared reference does not always crash. A Pages document that
+    /// pointed a paragraph at an undeclared style opened with the paragraph
+    /// simply unstyled, as though the edit had never been made. That silence is
+    /// the reason to check rather than to trust the file opening.
+    ///
+    /// A reference to a component's *root* object is not a cross-component
+    /// reference — the component identifier is the root object's identifier, and
+    /// naming a component is how a component is reached.
+    pub fn undeclared_references(&self) -> Vec<(u64, u64, u64)> {
+        let Some(index) = self.component_index() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for (stream, object) in self.objects() {
+            let Some(&from) = index.by_stream.get(stream) else {
+                continue;
+            };
+            let mut targets = Vec::new();
+            for message in &object.messages {
+                if let Ok(archive) = Message::decode(&message.payload) {
+                    targets.extend(style::references(&archive));
+                }
+            }
+            targets.sort_unstable();
+            targets.dedup();
+            for target in targets {
+                let Some(&to) = index.by_object.get(&target) else {
+                    continue;
+                };
+                if to == from || index.roots.contains(&target) {
+                    continue;
+                }
+                if !index
+                    .declared
+                    .get(&from)
+                    .is_some_and(|d| d.contains(&target))
+                {
+                    out.push((from, object.identifier, target));
+                }
+            }
+        }
+        out
+    }
+
+    /// Declare every reference [`Document::undeclared_references`] reports, so
+    /// that the objects an edit points at can actually be loaded.
+    ///
+    /// Nothing is remembered between calls: the declarations are derived from
+    /// the objects as they now stand, so this cannot drift out of step with the
+    /// edits, and running it twice adds nothing the second time. Existing
+    /// declarations are never removed — iWork's own are kept as written, and a
+    /// declaration for an object that is no longer referenced is inert.
+    ///
+    /// Returns the number of declarations added.
+    pub fn declare_external_references(&mut self) -> usize {
+        let missing = self.undeclared_references();
+        if missing.is_empty() {
+            return 0;
+        }
+        let Some(index) = self.component_index() else {
+            return 0;
+        };
+        let Some((stream, position)) = self
+            .objects()
+            .find(|(_, o)| o.message_type() == crate::TYPE_PACKAGE_METADATA)
+            .map(|(s, o)| (s.to_string(), o.identifier))
+            .and_then(|(s, id)| self.locate(id).map(|(_, i)| (s, i)))
+        else {
+            return 0;
+        };
+
+        let object = &mut self
+            .streams
+            .get_mut(&stream)
+            .expect("stream came from the document")[position];
+        let message = object.messages.first_mut().expect("metadata has a payload");
+        let Ok(mut metadata) = Message::decode(&message.payload) else {
+            return 0;
+        };
+
+        let mut added = 0;
+        for field in &mut metadata.fields {
+            if field.number != 3 {
+                continue;
+            }
+            let Value::Bytes(raw) = &field.value else {
+                continue;
+            };
+            let Ok(mut info) = Message::decode(raw) else {
+                continue;
+            };
+            let Some(component) = info.varint(1) else {
+                continue;
+            };
+            let mut wanted: Vec<u64> = missing
+                .iter()
+                .filter(|(from, _, _)| *from == component)
+                .map(|(_, _, target)| *target)
+                .collect();
+            wanted.sort_unstable();
+            wanted.dedup();
+            for target in wanted {
+                let mut entry = Message::default();
+                entry.set(1, Value::Varint(index.by_object[&target]));
+                entry.set(2, Value::Varint(target));
+                info.append_in_order(6, Value::Bytes(entry.encode()));
+                added += 1;
+            }
+            if added > 0 {
+                field.value = Value::Bytes(info.encode());
+            }
+        }
+        if added > 0 {
+            message.payload = metadata.encode();
+        }
+        added
+    }
+
+    /// Which component each stream and each object belongs to, and what each
+    /// component already declares.
+    fn component_index(&self) -> Option<ComponentIndex> {
+        let metadata = self.package_metadata()?;
+        let mut index = ComponentIndex::default();
+        for component in self.components() {
+            index.roots.insert(component.identifier);
+            index
+                .by_stream
+                .insert(component.stream_name(), component.identifier);
+        }
+        for (stream, object) in self.objects() {
+            if let Some(&component) = index.by_stream.get(stream) {
+                index.by_object.insert(object.identifier, component);
+            }
+        }
+        for value in metadata.all(3) {
+            let Value::Bytes(raw) = value else { continue };
+            let Ok(info) = Message::decode(raw) else {
+                continue;
+            };
+            let Some(component) = info.varint(1) else {
+                continue;
+            };
+            let declared = index.declared.entry(component).or_default();
+            for value in info.all(6) {
+                let Value::Bytes(raw) = value else { continue };
+                if let Ok(entry) = Message::decode(raw) {
+                    if let Some(target) = entry.varint(2) {
+                        declared.insert(target);
+                    }
+                }
+            }
+        }
+        Some(index)
     }
 
     /// Identifier a new object may take: above every identifier in use and above

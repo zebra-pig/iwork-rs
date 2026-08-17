@@ -485,8 +485,11 @@ fn applying_a_style_touches_only_its_own_stream() {
 
         let before = Package::read(&path).unwrap();
         let after = Package::read(&out).unwrap();
+        // The metadata stream is allowed to move: pointing text at a style in
+        // another component adds a declaration there.
+        let metadata = metadata_stream(&doc);
         for name in before.names().filter(|n| n.ends_with(".iwa")) {
-            if name == target.stream {
+            if name == target.stream || Some(name) == metadata.as_deref() {
                 continue;
             }
             assert_eq!(
@@ -498,6 +501,113 @@ fn applying_a_style_touches_only_its_own_stream() {
             );
         }
         let _ = std::fs::remove_file(&out);
+    }
+}
+
+/// Package entry holding `TSP.PackageMetadata`.
+fn metadata_stream(doc: &Document) -> Option<String> {
+    doc.objects()
+        .find(|(_, o)| o.message_type() == iwork::TYPE_PACKAGE_METADATA)
+        .map(|(stream, _)| stream.to_string())
+}
+
+/// A reference that leaves its component must be declared there, or iWork never
+/// loads what it points at.
+///
+/// The documents Apple wrote satisfy this exactly — which is what makes it worth
+/// asserting. A file this crate produced that violates it opened in Pages with
+/// the edit silently missing, and another crashed on open.
+#[test]
+fn every_cross_component_reference_is_declared() {
+    for path in require_fixtures() {
+        let doc = Document::open(&path).unwrap();
+        assert_eq!(
+            doc.undeclared_references(),
+            Vec::new(),
+            "{}: undeclared cross-component reference(s)",
+            path.display()
+        );
+    }
+}
+
+/// Applying a style from another component declares it, and declaring is
+/// idempotent — running it again adds nothing.
+#[test]
+fn applying_a_style_declares_it_where_it_is_needed() {
+    for path in require_fixtures() {
+        let doc = Document::open(&path).unwrap();
+        let Some(target) = doc.text_storages().into_iter().find(|s| !s.text.is_empty()) else {
+            continue;
+        };
+        let Some(style) = doc
+            .text_styles()
+            .into_iter()
+            .find(|s| s.kind == StyleKind::Paragraph && s.stream != target.stream)
+        else {
+            continue;
+        };
+
+        let mut edited = Document::open(&path).unwrap();
+        let range = 0..1;
+        edited
+            .apply_text_style(target.identifier, range, style.identifier)
+            .unwrap();
+        assert_eq!(
+            edited.undeclared_references(),
+            Vec::new(),
+            "{}: applying {} left it undeclared",
+            path.display(),
+            style.identifier
+        );
+        assert_eq!(
+            edited.declare_external_references(),
+            0,
+            "{}: declaring is not idempotent",
+            path.display()
+        );
+    }
+}
+
+/// A style that is listed in a stylesheet and names a parent is also grouped
+/// under that parent. A copy that is listed but not grouped is a shape no real
+/// document takes, and `Document::create_text_style` must not produce one.
+#[test]
+fn a_copied_style_is_grouped_under_its_parent() {
+    for path in require_fixtures() {
+        let doc = Document::open(&path).unwrap();
+        let Some(template) = doc
+            .text_styles()
+            .into_iter()
+            .find(|s| s.parent.is_some() && s.stylesheet.is_some())
+        else {
+            continue;
+        };
+
+        let mut edited = Document::open(&path).unwrap();
+        let created = edited
+            .create_text_style(template.identifier, "Copy")
+            .unwrap();
+        let sheet = Message::decode(
+            edited
+                .object(template.stylesheet.unwrap())
+                .unwrap()
+                .1
+                .payload(),
+        )
+        .unwrap();
+        assert_eq!(
+            style::count_references(&sheet, created.identifier),
+            style::count_references(&sheet, template.identifier),
+            "{}: the copy of {} is listed in fewer places than its template",
+            path.display(),
+            template.identifier
+        );
+        assert!(
+            edited.problems().is_empty(),
+            "{}: {:?}",
+            path.display(),
+            edited.problems()
+        );
     }
 }
 

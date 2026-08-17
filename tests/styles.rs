@@ -878,3 +878,181 @@ fn ranges_are_counted_in_utf16_code_units() {
         vec![4..6]
     );
 }
+
+// -- components --------------------------------------------------------------
+
+const BODY_COMPONENT: u64 = 1;
+const SHEET_COMPONENT: u64 = 40;
+const VARIATION: u64 = 25;
+
+/// A document split the way real ones are: the text in one component, the
+/// stylesheet in another, and a `TSP.PackageMetadata` that says so.
+///
+/// The stylesheet lists its styles by plain reference *and* groups each style
+/// under its parent — `{1: parent, 2: child…}` — which is the second place a
+/// real stylesheet records a style and the one a copy is easiest to leave out
+/// of.
+fn split_document() -> Document {
+    let mut stylesheet = Message::default();
+    stylesheet
+        .fields
+        .push(nested(1, &style::reference(HEADING)));
+    stylesheet
+        .fields
+        .push(nested(1, &style::reference(VARIATION)));
+    let mut family = Message::default();
+    family.fields.push(nested(1, &style::reference(HEADING)));
+    family.fields.push(nested(2, &style::reference(VARIATION)));
+    stylesheet.fields.push(nested(5, &family));
+
+    let mut heading = style_archive("Heading", "heading-1");
+    let mut variation = Message::default();
+    {
+        let mut base = Message::default();
+        base.fields.push(nested(3, &style::reference(HEADING)));
+        base.set(4, Value::Varint(1));
+        base.fields
+            .push(nested(5, &style::reference(SHEET_COMPONENT)));
+        variation.fields.push(nested(1, &base));
+        let mut properties = Message::default();
+        properties.set(3, Value::Fixed32(18.0f32.to_le_bytes()));
+        variation.fields.push(nested(11, &properties));
+    }
+    // Point the named style at the stylesheet's new identifier too.
+    style::set_path(
+        &mut heading,
+        style::STYLESHEET,
+        Some(Value::Varint(SHEET_COMPONENT)),
+    )
+    .unwrap();
+
+    let mut storage = Message::default();
+    storage.set(3, Value::Bytes(TEXT.as_bytes().to_vec()));
+    storage
+        .fields
+        .push(nested(5, &attribute_table(&[(0, HEADING)])));
+
+    let mut metadata = Message::default();
+    metadata.set(1, Value::Varint(SHEET_COMPONENT));
+    for (identifier, name) in [
+        (BODY_COMPONENT, "Document"),
+        (SHEET_COMPONENT, "DocumentStylesheet"),
+    ] {
+        let mut info = Message::default();
+        info.set(1, Value::Varint(identifier));
+        info.set(2, Value::Bytes(name.as_bytes().to_vec()));
+        if identifier == BODY_COMPONENT {
+            // The reference the document already has across the boundary.
+            let mut declared = Message::default();
+            declared.set(1, Value::Varint(SHEET_COMPONENT));
+            declared.set(2, Value::Varint(HEADING));
+            info.fields.push(nested(6, &declared));
+        }
+        metadata.fields.push(nested(3, &info));
+    }
+
+    let body = vec![
+        object(BODY_COMPONENT, 10000, &Message::default()),
+        object(STORAGE, iwork::TYPE_STORAGE, &storage),
+        object(METADATA, iwork::TYPE_PACKAGE_METADATA, &metadata),
+    ];
+    let sheet = vec![
+        object(SHEET_COMPONENT, 401, &stylesheet),
+        object(HEADING, style::TYPE_PARAGRAPH_STYLE, &heading),
+        object(VARIATION, style::TYPE_PARAGRAPH_STYLE, &variation),
+    ];
+    let package = Package {
+        entries: vec![
+            (
+                "Metadata/DocumentIdentifier".to_string(),
+                b"6E1E5A2C-0000-0000-0000-000000000000".to_vec(),
+            ),
+            (
+                "Index/Document.iwa".to_string(),
+                iwork::iwa::serialize(&body),
+            ),
+            (
+                "Index/DocumentStylesheet.iwa".to_string(),
+                iwork::iwa::serialize(&sheet),
+            ),
+        ],
+    };
+    Document::from_package(package).expect("synthetic package parses")
+}
+
+#[test]
+fn a_document_that_declares_its_cross_component_references_has_no_problems() {
+    let doc = split_document();
+    assert_eq!(doc.undeclared_references(), Vec::new());
+    assert_eq!(doc.problems(), Vec::<String>::new());
+}
+
+/// Pointing text at a style in another component is only half the edit: without
+/// a declaration iWork never loads the style, and the run resolves to nothing.
+#[test]
+fn applying_a_style_from_another_component_declares_it() {
+    let mut doc = split_document();
+    let created = doc.create_text_style(VARIATION, "").unwrap();
+    doc.apply_text_style(STORAGE, 11..25, created.identifier)
+        .unwrap();
+
+    let doc = reopen(&doc, "declare");
+    assert_eq!(
+        doc.undeclared_references(),
+        Vec::new(),
+        "the new run's target must be declared in the body component"
+    );
+    assert_eq!(doc.problems(), Vec::<String>::new());
+    assert_eq!(
+        doc.text_style_usage(created.identifier)
+            .into_iter()
+            .map(|u| u.range)
+            .collect::<Vec<Range<u64>>>(),
+        vec![11..25]
+    );
+}
+
+/// Declaring is derived from the objects as they stand, so it never
+/// double-declares and never needs to remember what it did.
+#[test]
+fn declaring_the_same_references_twice_adds_nothing() {
+    let mut doc = split_document();
+    let created = doc.create_text_style(VARIATION, "").unwrap();
+    doc.apply_text_style(STORAGE, 11..25, created.identifier)
+        .unwrap();
+    assert_eq!(doc.declare_external_references(), 0);
+    assert_eq!(doc.declare_external_references(), 0);
+}
+
+/// A copy joins its template's family as well as the plain list. A style that
+/// is listed but not grouped under its parent is a shape no real document takes.
+#[test]
+fn a_copy_joins_the_family_its_template_belongs_to() {
+    let mut doc = split_document();
+    let created = doc.create_text_style(VARIATION, "").unwrap();
+    assert_eq!(
+        created.registrations_cloned, 2,
+        "once in the list of styles, once under the parent"
+    );
+
+    let doc = reopen(&doc, "family");
+    let (_, sheet) = doc.object(SHEET_COMPONENT).unwrap();
+    let sheet = Message::decode(sheet.payload()).unwrap();
+    assert_eq!(style::count_references(&sheet, created.identifier), 2);
+    assert_eq!(doc.problems(), Vec::<String>::new());
+}
+
+/// And deleting takes it back out of both, leaving nothing dangling.
+#[test]
+fn deleting_a_copy_takes_it_out_of_the_family_too() {
+    let mut doc = split_document();
+    let created = doc.create_text_style(VARIATION, "").unwrap();
+    let deletion = doc.delete_text_style(created.identifier, None).unwrap();
+    assert_eq!(deletion.registrations_removed, 2);
+
+    let doc = reopen(&doc, "family-delete");
+    let (_, sheet) = doc.object(SHEET_COMPONENT).unwrap();
+    let sheet = Message::decode(sheet.payload()).unwrap();
+    assert_eq!(style::count_references(&sheet, created.identifier), 0);
+    assert_eq!(doc.problems(), Vec::<String>::new());
+}
