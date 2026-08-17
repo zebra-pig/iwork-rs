@@ -61,6 +61,8 @@ iwork tables    Budget.numbers            # every table: size, headers, merges, 
 iwork cells     Budget.numbers Zellarten  # every cell, with its type and data format
 iwork cells     Budget.numbers 904769 --raw   # …and the cell record behind each one
 iwork csv       Budget.numbers Zellarten  # one table as CSV
+iwork organise  Budget.numbers            # sort rules, filters, categories,
+                                          # pivots, highlighting, custom formats
 
 iwork styles       Report.pages           # every text style, with its object id
 iwork style        Report.pages 3712      # one style, field by field, and what uses it
@@ -212,6 +214,14 @@ three spreadsheets and compares them with what this crate decoded: 2943 cells,
 all agreeing. Run it with `IWORK_APP_CHECK=1 cargo test`. It found real bugs —
 the format model above is what survived it.
 
+**Cells are addressed by index; everything layered on them is not.** Sort
+rules, filters, categories, conditional highlighting and pivot tables name
+rows and columns by UUID, because a sort or a filter moves an index and a UUID
+survives it. `iwork organise` reads all of it — and the fixtures that exercise
+it are documents made from Apple's own templates, because Numbers' scripting
+interface has no command that sorts, filters, categorises, highlights or pivots
+anything.
+
 ## What is verified
 
 Everything below is asserted by `cargo test` when you supply fixtures.
@@ -234,6 +244,12 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | Merged ranges | — (none) | ✅ | — |
 | Every cell record consumed to the byte (2515 of them) | ✅ | ✅ | — |
 | **Every cell agrees with the app** (2943 compared) | — | ✅ | — |
+| Sort rules; filter sets with their rules and on/off switch | — | ✅ | — |
+| Hidden rows and columns, with *why* (user vs filter) | — | ✅ | — |
+| Categories: source column, groups, rows per group, SUM summaries | — | ✅ | — |
+| Pivot tables: source, row/column/value fields, summary functions | — | ✅ | — |
+| Conditional highlighting rules; custom cell formats | — | ✅ | — |
+| A save leaves an organised document byte-identical | — | ✅ | — |
 
 Tables are read, not written: nothing in this crate changes a cell. Keynote is
 the gap in that block for one reason only — neither AppleScript nor any bundled
@@ -293,10 +309,19 @@ instead:
 scripts/make-fixtures.sh          # into tests/fixtures/generated/, gitignored
 ```
 
-Seven documents that between them cover plain and styled text, non-Latin text
+Twelve documents that between them cover plain and styled text, non-Latin text
 including emoji, a table and an image, two sheets of typed cells and formulas, a
-300-row imported table, and a deck of slides with presenter notes and a skipped
-slide. Existing files are left alone unless `--force` is given.
+300-row imported table, a deck of slides with presenter notes and a skipped
+slide — and four spreadsheets built from templates Apple ships, carrying a
+category with a summary row, two pivot tables, a filter that hides rows,
+columns hidden by hand, conditional highlighting, a custom cell format and a
+sort rule. Existing files are left alone unless `--force` is given.
+
+The last four come from templates for a reason: Numbers' scripting dictionary
+has no sort, filter, category, highlight or pivot command, and the menu items
+that do need a document window and therefore an unlocked screen. The generator
+names them by template `id`, which is the path inside the app bundle and the
+same on every Mac; the localised template *name* is never used.
 
 And the check the rest of the suite cannot make — does the app open it?
 
