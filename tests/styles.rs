@@ -195,6 +195,49 @@ fn names(doc: &Document) -> Vec<(u64, String)> {
         .collect()
 }
 
+// -- saving ------------------------------------------------------------------
+
+#[test]
+fn an_unedited_document_rewrites_nothing() {
+    let doc = document();
+    assert!(doc.changed_streams().is_empty());
+    let doc = reopen(&doc, "no-op-save");
+    assert!(
+        doc.changed_streams().is_empty(),
+        "and still nothing after a save and reopen"
+    );
+}
+
+/// An edit must rewrite the streams it touched and no others. In this document
+/// everything shares one stream; the point is that it goes from none to one.
+#[test]
+fn an_edit_marks_its_stream_changed() {
+    let mut doc = document();
+    assert!(doc.changed_streams().is_empty());
+    doc.set_text_style_property(BODY, style::property::BOLD, Some(Value::Varint(1)))
+        .unwrap();
+    assert_eq!(doc.changed_streams(), vec!["Index/Document.iwa"]);
+}
+
+/// Re-framing must reproduce the original bytes exactly, or every save would
+/// rewrite every stream and the check above would be worthless.
+#[test]
+fn framing_is_stable_byte_for_byte() {
+    let doc = document();
+    for name in doc.stream_names() {
+        let objects: Vec<_> = doc
+            .objects()
+            .filter(|(s, _)| *s == name)
+            .map(|(_, o)| o.clone())
+            .collect();
+        assert_eq!(
+            iwork::iwa::serialize_stream(&objects),
+            iwork::iwa::decompress(doc.package().get(name).unwrap()).unwrap(),
+            "{name} does not re-frame to the bytes it was read from"
+        );
+    }
+}
+
 // -- read --------------------------------------------------------------------
 
 #[test]

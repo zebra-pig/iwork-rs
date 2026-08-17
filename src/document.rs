@@ -849,13 +849,47 @@ impl Document {
         Ok(())
     }
 
-    /// Re-encode every modified stream and write the package out.
+    /// Write the package out, re-encoding only the streams that changed.
+    ///
+    /// A stream whose objects still frame to the bytes they were read from
+    /// keeps its **original entry, byte for byte** — not merely an equivalent
+    /// one. That matters beyond saving work: re-compressing an untouched stream
+    /// moves every Snappy block boundary in it, so a document edited in one
+    /// place would otherwise differ from the original everywhere, and there
+    /// would be no way to tell an intended change from an incidental one by
+    /// looking at the file. Editing one style in a 97-stream Numbers document
+    /// now rewrites one stream.
+    ///
+    /// Nothing is remembered to make this work: the comparison is against the
+    /// bytes actually in the package, so it cannot drift out of step with the
+    /// edits the way a dirty flag can.
     pub fn save(&self, path: impl AsRef<std::path::Path>) -> Result<(), Error> {
         let mut package = self.package.clone();
         for (name, objects) in &self.streams {
-            package.set(name, iwa::serialize(objects));
+            let framed = iwa::serialize_stream(objects);
+            if !self.stream_matches(name, &framed) {
+                package.set(name, iwa::compress(&framed));
+            }
         }
         package.write(path)
+    }
+
+    /// Streams whose objects no longer match the bytes they were read from —
+    /// exactly the entries [`Document::save`] would rewrite.
+    pub fn changed_streams(&self) -> Vec<&str> {
+        self.streams
+            .iter()
+            .filter(|(name, objects)| !self.stream_matches(name, &iwa::serialize_stream(objects)))
+            .map(|(name, _)| name.as_str())
+            .collect()
+    }
+
+    /// Does the package still hold exactly these framed bytes for `name`?
+    fn stream_matches(&self, name: &str, framed: &[u8]) -> bool {
+        self.package
+            .get(name)
+            .and_then(|raw| iwa::decompress(raw).ok())
+            .is_some_and(|original| original == framed)
     }
 }
 

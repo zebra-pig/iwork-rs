@@ -446,7 +446,10 @@ Rules a writer must respect:
 
 1. **Stored ZIP entries only** — never deflate.
 2. **Concatenate Snappy blocks before parsing**, and split at 64 KiB when
-   writing.
+   writing. Re-compressing a stream you did not change is not free of
+   consequence: the block boundaries move, so the entry differs from the
+   original even though the objects do not. Leave untouched streams alone and an
+   edited document differs from its original only where it was edited.
 3. **Allocate new object identifiers above `PackageMetadata` field 1**, and bump
    that field.
 4. **Register every new `Data/` file** in the `DataInfo` table; drawables refer

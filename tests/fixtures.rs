@@ -93,8 +93,9 @@ fn writes_only_stored_entries() {
     }
 }
 
-/// Decoding and re-encoding must reproduce each object stream byte for byte.
-/// Only the Snappy block boundaries may move, which no reader can observe.
+/// Saving an unedited document must reproduce every entry **byte for byte** —
+/// not merely an equivalent stream. A save that rewrites what it did not change
+/// makes an intended edit indistinguishable from an incidental re-compression.
 #[test]
 fn object_streams_survive_a_roundtrip() {
     for path in require_fixtures() {
@@ -104,6 +105,12 @@ fn object_streams_survive_a_roundtrip() {
             "iwork-roundtrip-{}",
             path.file_name().unwrap().to_string_lossy()
         ));
+        assert!(
+            doc.changed_streams().is_empty(),
+            "{}: an unedited document reports changed streams: {:?}",
+            path.display(),
+            doc.changed_streams()
+        );
         doc.save(&out).unwrap();
         let rewritten = Package::read(&out).unwrap();
 
@@ -117,16 +124,12 @@ fn object_streams_survive_a_roundtrip() {
         for name in original.names() {
             let before = original.get(name).unwrap();
             let after = rewritten.get(name).unwrap();
-            if name.ends_with(".iwa") {
-                assert_eq!(
-                    iwa::decompress(before).unwrap(),
-                    iwa::decompress(after).unwrap(),
-                    "{}: {name} changed on re-encode",
-                    path.display()
-                );
-            } else {
-                assert_eq!(before, after, "{}: {name} changed", path.display());
-            }
+            assert_eq!(
+                before,
+                after,
+                "{}: {name} was rewritten by a save that changed nothing",
+                path.display()
+            );
         }
         let _ = std::fs::remove_file(&out);
     }
@@ -144,6 +147,12 @@ fn editing_text_touches_only_its_own_stream() {
         let mut edited = Document::open(&path).unwrap();
         let replacement = "Ersetzt durch iwork-rs — 🎬";
         edited.set_text(target.identifier, replacement).unwrap();
+        assert_eq!(
+            edited.changed_streams(),
+            vec![target.stream.as_str()],
+            "{}: editing one storage should change one stream",
+            path.display()
+        );
         let out = std::env::temp_dir().join(format!(
             "iwork-edit-{}",
             path.file_name().unwrap().to_string_lossy()

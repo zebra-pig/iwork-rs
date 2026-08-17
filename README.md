@@ -71,6 +71,13 @@ consequences worth knowing:
 
 - **Nothing is lost.** An object this crate has no idea about is carried through
   untouched, so editing a headline cannot corrupt a chart.
+- **Nothing is touched either.** `save` re-encodes only the streams whose
+  objects actually changed; the rest keep their original bytes exactly. Editing
+  one style in a 97-stream Numbers document rewrites one stream, and a save with
+  no edits reproduces every entry byte for byte. That is not just cheaper — a
+  save that re-compresses everything moves every Snappy block boundary, and then
+  nothing in the file distinguishes the edit you meant from the noise you did
+  not. `iwork` prints which streams it rewrote.
 - **Names are advisory.** [`registry`](src/registry.rs) maps type numbers to
   names like `TSWP.StorageArchive`, tagged `Confirmed`, `Inferred` or
   `Unverified`. It feeds human-readable output only; a wrong name cannot

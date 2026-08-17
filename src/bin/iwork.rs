@@ -170,8 +170,24 @@ fn text(path: &str) -> Result<(), Error> {
 fn set_text(path: &str, identifier: u64, new_text: &str, out: &str) -> Result<(), Error> {
     let mut doc = Document::open(path)?;
     doc.set_text(identifier, new_text)?;
+    save(&doc, out)
+}
+
+/// Write the document and say which streams that actually rewrote.
+///
+/// Worth printing: it is the difference between "I edited a style" and "I
+/// rewrote the whole document", and only one of those is easy to review.
+fn save(doc: &Document, out: &str) -> Result<(), Error> {
+    let changed = doc.changed_streams();
     doc.save(out)?;
-    println!("wrote {out}");
+    match changed.len() {
+        0 => println!("wrote {out} (no stream changed)"),
+        n => println!(
+            "wrote {out} ({n} of {} streams rewritten: {})",
+            doc.stream_names().count(),
+            changed.join(", ")
+        ),
+    }
     Ok(())
 }
 
@@ -362,11 +378,11 @@ fn dump(message: &Message, prefix: &str) {
 fn new_style(path: &str, template: u64, name: &str, out: &str) -> Result<(), Error> {
     let mut doc = Document::open(path)?;
     let created = doc.create_text_style(template, name)?;
-    doc.save(out)?;
     println!(
         "created style {} from {} in {} ({} stylesheet entries cloned)",
         created.identifier, created.template, created.stream, created.registrations_cloned
     );
+    let result = save(&doc, out);
     if created.name.is_none() {
         println!(
             "note: style {} is a variation, so the copy is anonymous and keeps no name.\n      \
@@ -374,8 +390,7 @@ fn new_style(path: &str, template: u64, name: &str, out: &str) -> Result<(), Err
             created.template
         );
     }
-    println!("wrote {out}");
-    Ok(())
+    result
 }
 
 fn set_style(path: &str, id: u64, assignment: &str, out: &str) -> Result<(), Error> {
@@ -397,21 +412,17 @@ fn set_style(path: &str, id: u64, assignment: &str, out: &str) -> Result<(), Err
             false => println!("set field {field} of style {id}"),
         }
     }
-    doc.save(out)?;
-    println!("wrote {out}");
-    Ok(())
+    save(&doc, out)
 }
 
 fn delete_style(path: &str, id: u64, replacement: Option<u64>, out: &str) -> Result<(), Error> {
     let mut doc = Document::open(path)?;
     let deleted = doc.delete_text_style(id, replacement)?;
-    doc.save(out)?;
     println!(
         "deleted style {id}: {} run(s) repointed, {} dropped, {} stylesheet entries removed",
         deleted.runs_repointed, deleted.runs_dropped, deleted.registrations_removed
     );
-    println!("wrote {out}");
-    Ok(())
+    save(&doc, out)
 }
 
 fn apply_style(
@@ -429,10 +440,8 @@ fn apply_style(
 
     let mut doc = Document::open(path)?;
     doc.apply_text_style(storage, start..end, style)?;
-    doc.save(out)?;
     println!("storage {storage} chars {start}..{end} now use style {style}");
-    println!("wrote {out}");
-    Ok(())
+    save(&doc, out)
 }
 
 fn paragraphs(path: &str, storage: u64) -> Result<(), Error> {
@@ -546,7 +555,7 @@ fn parse_hex(text: &str) -> Result<Vec<u8>, Error> {
 fn roundtrip(path: &str, out: &str) -> Result<(), Error> {
     let doc = Document::open(path)?;
     let count = doc.objects().count();
-    doc.save(out)?;
+    save(&doc, out)?;
 
     // Re-open and compare object streams, so the check covers the file that was
     // actually written rather than the in-memory graph.
@@ -558,6 +567,6 @@ fn roundtrip(path: &str, out: &str) -> Result<(), Error> {
             "object identifiers changed on re-encode".into(),
         ));
     }
-    println!("re-encoded {count} objects into {out}");
+    println!("decoded and checked {count} objects");
     Ok(())
 }

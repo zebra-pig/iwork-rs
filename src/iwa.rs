@@ -154,7 +154,13 @@ pub fn parse(data: &[u8]) -> Result<Vec<ArchiveObject>, String> {
     Ok(objects)
 }
 
-pub fn serialize(objects: &[ArchiveObject]) -> Vec<u8> {
+/// Frame objects into an object stream, without compressing it.
+///
+/// Kept separate from [`serialize`] so a caller can ask whether re-encoding
+/// would actually change anything before paying for Snappy — and, more to the
+/// point, before replacing bytes that did not need replacing. See
+/// [`crate::Document::save`].
+pub fn serialize_stream(objects: &[ArchiveObject]) -> Vec<u8> {
     let mut stream = Vec::new();
     for object in objects {
         let mut info = Message::default();
@@ -197,7 +203,13 @@ pub fn serialize(objects: &[ArchiveObject]) -> Vec<u8> {
             stream.extend_from_slice(&message.payload);
         }
     }
-    compress(&stream)
+    stream
+}
+
+/// Frame objects into an object stream and compress it, ready to be a package
+/// entry.
+pub fn serialize(objects: &[ArchiveObject]) -> Vec<u8> {
+    compress(&serialize_stream(objects))
 }
 
 #[cfg(test)]
