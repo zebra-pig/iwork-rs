@@ -13,6 +13,7 @@ iwork — inspect and edit Apple iWork documents (.pages, .numbers, .key)
   iwork text      <file>                   every text storage, with its object id
   iwork set-text  <file> <id> <text> <out> replace one text storage
   iwork objects   <file> [type]            list objects, optionally of one message type
+  iwork dump      <file> <id>              one object, field by field
   iwork extract   <file> <dir>             write embedded media to a directory
   iwork roundtrip <file> <out>             decode and re-encode every object
 
@@ -55,6 +56,7 @@ fn main() -> ExitCode {
                 "'{message_type}' is not a message type"
             ))),
         },
+        ["dump", file, id] => identifier(id).and_then(|id| dump_object(file, id)),
         ["extract", file, dir] => extract(file, dir),
         ["roundtrip", file, out] => roundtrip(file, out),
         ["styles", file] => styles(file),
@@ -143,7 +145,7 @@ fn inspect(path: &str) -> Result<(), Error> {
     for (message_type, count) in &census {
         println!(
             "  {message_type:>6} x{count:<5} {}",
-            registry::describe(*message_type)
+            registry::describe_in(doc.kind(), *message_type)
         );
     }
     println!(
@@ -182,7 +184,7 @@ fn objects(path: &str, filter: Option<u32>) -> Result<(), Error> {
             "  id={:<8} type={:<6} {:<34} {:>7} bytes  {stream}",
             object.identifier,
             message_type,
-            registry::describe(message_type),
+            registry::describe_in(doc.kind(), message_type),
             object.payload().len()
         );
     }
@@ -243,7 +245,7 @@ fn show_style(path: &str, id: u64) -> Result<(), Error> {
     println!(
         "{} style {id} — type {message_type} {}, in {}",
         style.kind.as_str(),
-        registry::describe(message_type),
+        registry::describe_in(doc.kind(), message_type),
         style.stream
     );
     match &style.name {
@@ -277,6 +279,37 @@ fn show_style(path: &str, id: u64) -> Result<(), Error> {
     Ok(())
 }
 
+/// Print any object's fields, whatever it is.
+///
+/// The registry names a fraction of the message types and this crate models
+/// fewer still, so the way to find out what an unknown archive holds is to look
+/// at it. Reference-shaped fields are marked, which is usually enough to walk
+/// the graph by hand.
+fn dump_object(path: &str, id: u64) -> Result<(), Error> {
+    let doc = Document::open(path)?;
+    let (stream, object) = doc.object(id).ok_or(Error::NoSuchObject(id))?;
+    println!(
+        "object {id} — type {} {}, in {stream}",
+        object.message_type(),
+        registry::describe_in(doc.kind(), object.message_type())
+    );
+    for (index, message) in object.messages.iter().enumerate() {
+        if object.messages.len() > 1 {
+            println!("\n-- message {index}, type {} --", message.message_type);
+        }
+        println!(
+            "version {:?}, {} bytes\n",
+            message.version,
+            message.payload.len()
+        );
+        match Message::decode(&message.payload) {
+            Ok(archive) => dump(&archive, ""),
+            Err(e) => println!("  could not decode: {e}"),
+        }
+    }
+    Ok(())
+}
+
 /// Print an archive as addressable field paths, so `set-style` has something to
 /// aim at. Nothing here claims to know what a field means.
 fn dump(message: &Message, prefix: &str) {
@@ -291,7 +324,10 @@ fn dump(message: &Message, prefix: &str) {
             Value::Fixed64(b) => println!("  {path:<14} f64     {}", f64::from_le_bytes(*b)),
             Value::Bytes(raw) => match pb::decode_nested(raw) {
                 Some(nested) => {
-                    println!("  {path:<14} message {} bytes", raw.len());
+                    match iwork::style::reference_target(&nested) {
+                        Some(target) => println!("  {path:<14} ref     -> object {target}"),
+                        None => println!("  {path:<14} message {} bytes", raw.len()),
+                    }
                     dump(&nested, &path);
                 }
                 None => match std::str::from_utf8(raw) {

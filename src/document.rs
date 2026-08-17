@@ -299,6 +299,7 @@ impl Document {
                 name: style::string_at(&archive, style::NAME),
                 style_identifier: style::string_at(&archive, style::STYLE_IDENTIFIER),
                 parent: style::reference_at(&archive, style::PARENT),
+                stylesheet: style::reference_at(&archive, style::STYLESHEET),
                 labels: style::labels(&archive),
                 archive,
             });
@@ -391,25 +392,15 @@ impl Document {
             .expect("stream came from the document")
             .insert(index + 1, object);
 
-        // Any object listing the template by plain reference gets the copy
-        // listed beside it. Which object that is follows from the shape, not
-        // from a message type — see `style::clone_registrations`.
+        // List the copy wherever the template is listed — in the template's own
+        // stylesheet, which the template names. See `style::clone_registrations`
+        // for why anywhere-a-reference-looks-right is not good enough.
         let mut registrations_cloned = 0;
-        for objects in self.streams.values_mut() {
-            for object in objects.iter_mut() {
-                if object.identifier == identifier {
-                    continue;
-                }
-                let Some(message) = object.messages.first_mut() else {
-                    continue;
-                };
-                let Ok(mut sheet) = Message::decode(&message.payload) else {
-                    continue;
-                };
-                let cloned = style::clone_registrations(&mut sheet, template, identifier);
-                if cloned > 0 {
-                    message.payload = sheet.encode();
-                    registrations_cloned += cloned;
+        if let Some(stylesheet) = source.stylesheet {
+            if let Ok(mut sheet) = self.archive_of(stylesheet) {
+                registrations_cloned = style::clone_registrations(&mut sheet, template, identifier);
+                if registrations_cloned > 0 {
+                    self.set_archive(stylesheet, &sheet)?;
                 }
             }
         }
@@ -548,11 +539,17 @@ impl Document {
                     None => deletion.runs_dropped += touched,
                 }
             }
-            // Unlisting is by shape rather than by message type, for the same
-            // reason listing is — see `style::clone_registrations`.
-            let removed = style::remove_registrations(&mut edited, identifier);
-            deletion.registrations_removed += removed;
-            touched += removed;
+            // Unlist it, but only from the stylesheet it says it belongs to.
+            // Other objects hold bare references that are positions rather than
+            // memberships — a Keynote slide's outline levels, say — and pulling
+            // one out of those would shift the rest. Anything still holding a
+            // reference after this is reported below and the delete is refused,
+            // which is the right outcome for a style that is genuinely in use.
+            if Some(object.identifier) == style.stylesheet {
+                let removed = style::remove_registrations(&mut edited, identifier);
+                deletion.registrations_removed += removed;
+                touched += removed;
+            }
 
             if style::count_references(&edited, identifier) > 0 {
                 still_referenced.push(object.identifier);
@@ -651,6 +648,19 @@ impl Document {
         })
     }
 
+    /// Decode any object's first message.
+    fn archive_of(&self, identifier: u64) -> Result<Message, Error> {
+        let (name, object) = self
+            .object(identifier)
+            .ok_or(Error::NoSuchObject(identifier))?;
+        let message = object
+            .messages
+            .first()
+            .ok_or_else(|| Error::Format(format!("object {identifier} carries no message")))?;
+        Message::decode(&message.payload)
+            .map_err(|e| Error::Format(format!("{name}: object {identifier}: {e}")))
+    }
+
     fn storage_archive(&self, identifier: u64) -> Result<Message, Error> {
         let (name, object) = self
             .object(identifier)
@@ -728,13 +738,25 @@ fn utf8(bytes: Option<&[u8]>) -> String {
 
 /// Identify the app from the object graph alone.
 ///
-/// Used when there is no filename to go by. The root archive is the strongest
-/// signal: Pages writes `TP.DocumentArchive` (10000) as object 1, Numbers
-/// writes `TN.DocumentArchive` (1). Numbers is confirmed further by its
-/// `Index/Tables/` components, which the other two apps do not produce.
+/// Used when there is no filename to go by, and it cannot lean on the root
+/// archive's type alone: **Numbers and Keynote both put message type 1 at
+/// object 1.** The app-level archives are numbered per app, so a `1` means
+/// `TN.DocumentArchive` in one and `KN.DocumentArchive` in the other, and a
+/// Keynote deck read by root type alone comes back as a spreadsheet.
+///
+/// The components are what separate them, and they are unambiguous: Numbers
+/// spreads tables over `Index/Tables/`, Keynote writes a stream per slide and
+/// per master. Pages is the one app whose root type is its own — 10000
+/// `TP.DocumentArchive`.
 fn detect_kind(package: &Package, streams: &BTreeMap<String, Vec<ArchiveObject>>) -> Kind {
     if package.names().any(|n| n.starts_with("Index/Tables/")) {
         return Kind::Numbers;
+    }
+    if package
+        .names()
+        .any(|n| n.starts_with("Index/Slide") || n.starts_with("Index/TemplateSlide"))
+    {
+        return Kind::Keynote;
     }
     let root_type = streams
         .get("Index/Document.iwa")
@@ -742,6 +764,8 @@ fn detect_kind(package: &Package, streams: &BTreeMap<String, Vec<ArchiveObject>>
         .map(ArchiveObject::message_type);
     match root_type {
         Some(10000) => Kind::Pages,
+        // Ambiguous on its own, but a Keynote package has slide streams and has
+        // already been caught above.
         Some(1) => Kind::Numbers,
         _ => Kind::Unknown,
     }

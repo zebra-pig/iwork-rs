@@ -19,10 +19,12 @@ doc.set_text(6083, "A new headline")?;
 
 // Text styles, by copy-and-adjust
 for style in doc.text_styles() {
-    println!("{} {} {:?}", style.identifier, style.kind.as_str(), style.name());
+    println!("{} {} {:?}", style.identifier, style.kind.as_str(), style.name);
 }
-let kicker = doc.create_text_style(3712, "Kicker")?;
-doc.apply_text_style(6083, 0..8, kicker.identifier)?;  // UTF-16 code units
+let kicker = doc.create_text_style(3712, "Kicker")?;                    // copy one that works
+doc.set_text_style_property(kicker.identifier, style::property::FONT_SIZE,
+                            Some(Value::Fixed32(18f32.to_le_bytes())))?;
+doc.apply_text_style(6083, 0..8, kicker.identifier)?;                   // UTF-16 code units
 
 doc.save("Report-edited.pages")?;
 ```
@@ -36,13 +38,15 @@ iwork inspect   Report.pages              # package, components, media, object c
 iwork text      Report.pages              # every text storage, with its object id
 iwork set-text  Report.pages 6083 "…" out.pages
 iwork objects   Budget.numbers 2001       # every object of one message type
+iwork dump      Talk.key 1                # one object, field by field
 iwork extract   Report.pages ./media      # embedded media, byte-identical
 iwork roundtrip Report.pages out.pages    # decode and re-encode every object
 
 iwork styles       Report.pages           # every text style, with its object id
 iwork style        Report.pages 3712      # one style, field by field, and what uses it
 iwork new-style    Report.pages 3712 Kicker out.pages
-iwork set-style    Report.pages 3801 11.12=f32:18 out.pages
+iwork set-style    Report.pages 3801 font-size=f32:18 out.pages
+iwork set-style    Report.pages 3801 11.3=f32:18       out.pages   # the same field
 iwork apply-style  Report.pages 6083 0 8 3801 out.pages
 iwork delete-style Report.pages 3801 3712 out.pages    # 3712 replaces it
 iwork paragraphs   Report.pages 6083      # paragraph ranges, for apply-style
@@ -85,22 +89,39 @@ that line:
 |---|---|
 | **Read** | enumerate styles, their names, their fields, and every run that uses them |
 | **Create** | **copy** an existing style, allocate an identifier above `PackageMetadata` field 1, list the copy wherever the template was listed |
-| **Update** | rewrite a field by path (`11.12`), or hand the decoded archive to a closure |
+| **Update** | rewrite a field by path (`11.3`) or by name (`font-size`), or hand the decoded archive to a closure |
 | **Delete** | re-point or drop the runs, unlist it, refuse if a reference would be left dangling |
 | **Apply** | point a character range at a style, splitting the run table and restoring what followed |
 
 Everything that decides *which text gets which style* works on the attribute
-tables, whose shape is asserted by the test suite. Nothing decides what is
-*inside* a style: this crate does not claim to know that bold is field 1 or the
-font size field 12, because unlike a wrong name in the registry, a wrong field
-number there would write wrong bytes into your document. So `iwork style` prints
-the field tree with a path for every field, and `iwork set-style` takes those
-paths — the numbers come from the document in front of you, not from a guess.
+tables, whose shape is asserted by the test suite.
+
+What is *inside* a style is a weaker kind of knowledge, and the split matters:
+a wrong name in the registry only prints wrong, while a wrong field number
+writes wrong bytes into your document. So the fields are addressed by path, and
+`iwork style` prints the tree with a path for every one — the numbers come from
+the document in front of you. A handful have been pinned down by comparing 654
+styles against names the app itself assigned, and those have names:
+
+```
+iwork style     Report.pages 2857                        # what is in there
+iwork set-style Report.pages 2857 font-size=f32:18 out.pages
+```
+
+`bold`, `italic`, `font-size`, `font-name`, `red`, `green`, `blue`, `alpha`,
+`name`, `style-identifier` — each recorded in
+[`style::property`](src/style.rs) with the evidence behind it, and with what the
+evidence does not reach. `bold` and `italic` are *toggles*, independent of the
+font's own weight; the colour's shape is certain but that it is the font's
+colour is inference.
 
 Creating by copying is the same rule [`FORMAT.md`](FORMAT.md) gives for whole
 documents, for the same reason: the Pages sample spends 313 objects on its
 stylesheet, and a style that already works is a better starting point than a
-synthesised one.
+synthesised one. A copy is listed in the stylesheet the template names — and
+only there. Bare style references elsewhere can be positions rather than
+memberships (a Keynote slide's five outline levels are exactly that), and adding
+an entry to one of those corrupts it.
 
 ## What is verified
 
@@ -108,45 +129,42 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 
 | | Pages | Numbers | Keynote |
 |---|---|---|---|
-| Open, identify, decode every object | ✅ | ✅ | ❔ |
-| Object streams survive re-encode byte for byte | ✅ | ✅ | ❔ |
-| Components resolve to real streams | ✅ | ✅ (96 of them) | ❔ |
-| Media registry resolves | ✅ | — (no media in samples) | ❔ |
-| Text extraction | ✅ | ✅ | ❔ |
-| Edit text, leave every other object alone | ✅ | ✅ | ❔ |
-| Attribute tables point at styles of the matching kind | ❔ | ❔ | ❔ |
-| Copy a style: one new object, text untouched | ❔ | ❔ | ❔ |
-| Apply a style, leave every other stream alone | ❔ | ❔ | ❔ |
-
-The three style rows are asserted by `cargo test` like everything else above
-them, but no fixture was available when they were written, so none has yet been
-run against a real document — hence ❔ rather than ✅ even for Pages. The style
-*logic* is covered without fixtures by `tests/styles.rs`, which builds a
-document in memory and runs the whole cycle through the real ZIP and IWA
-writers; what the fixture rows would add is the confirmation that real documents
-are shaped the way that synthetic one assumes.
+| Open, identify, decode every object | ✅ | ✅ | ✅ |
+| Object streams survive re-encode byte for byte | ✅ | ✅ | ✅ |
+| Components resolve to real streams | ✅ | ✅ (96 of them) | ✅ (29) |
+| Media registry resolves | ✅ | — (no media in samples) | ✅ (33) |
+| Text extraction | ✅ | ✅ | ✅ |
+| Edit text, leave every other object alone | ✅ | ✅ | ✅ |
+| Attribute tables point at styles of the matching kind | ✅ | ✅ | ✅ |
+| Copy a style: one new object, text untouched | ✅ | ✅ | ✅ |
+| Apply a style, leave every other stream alone | ✅ | ✅ | ✅ |
 
 Developed against one real Pages document (a 15 MB German magazine article,
 485 objects, two TIFFs and two charts) and two Numbers spreadsheets from
 [numbers-parser](https://github.com/masaccio/numbers-parser)'s test suite
-(738 and 647 objects, 97 and 37 streams).
+(738 and 647 objects, 97 and 37 streams). The style work was checked against
+four further Pages documents and one Keynote deck — 654 styles in all.
 
 ### Keynote status
 
-Keynote is **implemented but unverified** — no `.key` file was available when
-this was written.
+Keynote **is** verified now, against one deck: 1204 objects, 30 streams, 19
+masters, 5 slides. Layers 1–3 turned out to be exactly as predicted — same
+stored ZIP, same Snappy framing, same object stream, text in the same
+`TSWP.StorageArchive`, styles in the same attribute tables. Layer 4 held one
+surprise worth knowing about:
 
-That is a narrower gap than it sounds. Layers 1–3 are not app-specific: Keynote
-packages are the same stored ZIP, the same Snappy framing and the same
-`TSP.ArchiveInfo` stream, and `keynote-parser` and friends have been treating
-them that way for years. Text lives in the same `TSWP.StorageArchive`. What is
-missing is layer 4: the `KN.*` document-level types are absent from the registry
-rather than guessed at, and `Kind` detection falls back to the `.key` extension
-because there is no sample to derive a structural signature from.
+**Numbers and Keynote both number their document archive `1`.** The app-level
+archives are numbered per app, so the root object's type cannot tell those two
+apart, and a `.key` read by type alone came back as a spreadsheet. `Kind`
+detection now goes by components — `Index/Tables/` for Numbers, `Index/Slide*`
+for Keynote — and [`registry`](src/registry.rs) entries carry the app they
+belong to, so type 1 resolves to `TN.DocumentArchive` or `KN.DocumentArchive`
+depending on the document, and to neither when the kind is unknown.
 
-To close it, drop a `.key` into `tests/fixtures/` and run `cargo test`. If the
-suite is green, Keynote is verified to the same standard as the other two, and
-the registry can be filled in from `iwork inspect`.
+The `KN.*` types derived from that deck are in the registry with their evidence:
+the show and its slide list, slide nodes, slides (which carry their transition),
+masters, the theme (which carries its name), and drop-cap styles. See
+[`FORMAT.md`](FORMAT.md#keynote).
 
 ## Testing
 
@@ -175,12 +193,16 @@ repeated-field ordering, and objects straddling a Snappy block boundary.
 - **Editing text truncates styling past the edit.** Attribute runs are clamped
   into the new length, not remapped onto the new wording. See
   [`text::write`](src/text.rs).
-- **Styles are edited by field number, not by name.** There is no
-  `set_bold(true)`: the meaning of a style archive's fields is not published, so
-  [`style`](src/style.rs) will not guess at it. Read the field tree with `iwork
-  style`, compare two styles that differ in the way you want, and set the field
-  that moved. New styles come from copying, so the fields you never touch stay
-  whatever the template had.
+- **Most style fields have no name.** Ten are named; the rest of the property
+  bag is addressed by number, because the meaning is not published and
+  [`style`](src/style.rs) will not guess. Read the tree with `iwork style`,
+  compare two styles that differ in the way you want, and set the field that
+  moved. New styles come from copying, so fields you never touch keep whatever
+  the template had.
+- **Editing a named style may change nothing.** Text usually points at an
+  anonymous *variation* style that inherits from the named one and overrides
+  some fields. `iwork style` prints what a style inherits from; edit the style
+  the runs actually point at.
 - **Deleting a style is refused rather than forced.** If a reference this crate
   cannot account for would be left dangling, the delete fails and says which
   objects still hold one.

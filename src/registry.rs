@@ -23,12 +23,46 @@ pub enum Confidence {
     Unverified,
 }
 
+/// Which app an entry applies to.
+///
+/// Most message types mean the same thing everywhere — the frameworks are
+/// shared, and `TSWP.StorageArchive` is 2001 in all three apps. The app-level
+/// archives are not: **Numbers and Keynote both number their document archive
+/// 1**, so a table keyed on the number alone has to be wrong for one of them.
+/// A Keynote deck was reported as holding a `TN.DocumentArchive` until this
+/// existed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum App {
+    /// The message type means the same thing in all three apps.
+    Any,
+    Pages,
+    Numbers,
+    Keynote,
+}
+
+impl App {
+    /// The app-specific entry a document of this kind should prefer.
+    fn of(kind: Kind) -> Option<App> {
+        match kind {
+            Kind::Pages => Some(App::Pages),
+            Kind::Numbers => Some(App::Numbers),
+            Kind::Keynote => Some(App::Keynote),
+            Kind::Unknown => None,
+        }
+    }
+}
+
 pub struct Entry {
     pub message_type: u32,
     pub name: &'static str,
     pub confidence: Confidence,
+    /// App this entry is for. Entries with a specific app are only chosen for
+    /// documents of that kind.
+    pub app: App,
 }
 
+use crate::document::Kind;
+use App::{Keynote as InKeynote, Numbers as InNumbers, Pages as InPages};
 use Confidence::*;
 
 /// Framework prefixes, by number range. These ranges are stable across the
@@ -55,191 +89,358 @@ const ENTRIES: &[Entry] = &[
         message_type: 11006,
         name: "TSP.PackageMetadata",
         confidence: Confirmed,
+        app: App::Any,
     },
     Entry {
         message_type: 11014,
         name: "TSP.AnnotationAuthorArchive",
         confidence: Inferred,
+        app: App::Any,
     },
     Entry {
         message_type: 11015,
         name: "TSP.AnnotationAuthorStorageArchive",
         confidence: Inferred,
+        app: App::Any,
     },
     // -- word processing -----------------------------------------------------
     Entry {
         message_type: 2001,
         name: "TSWP.StorageArchive",
         confidence: Confirmed,
+        app: App::Any,
     },
     Entry {
         message_type: 2011,
         name: "TSWP.SelectionArchive",
         confidence: Inferred,
+        app: App::Any,
     },
     Entry {
         message_type: 2021,
         name: "TSWP.ParagraphStyleArchive",
         confidence: Inferred,
+        app: App::Any,
     },
     Entry {
         message_type: 2022,
         name: "TSWP.CharacterStyleArchive",
         confidence: Inferred,
+        app: App::Any,
     },
     Entry {
         message_type: 2023,
         name: "TSWP.ListStyleArchive",
         confidence: Inferred,
+        app: App::Any,
     },
     Entry {
         message_type: 2025,
         name: "TSWP.ShapeStyleArchive",
         confidence: Inferred,
+        app: App::Any,
     },
     Entry {
         message_type: 2026,
         name: "TSWP.TextStyleArchive",
         confidence: Inferred,
+        app: App::Any,
     },
     // -- drawables -----------------------------------------------------------
     Entry {
         message_type: 3005,
         name: "TSD.ImageArchive",
         confidence: Confirmed,
+        app: App::Any,
     },
     Entry {
         message_type: 3006,
         name: "TSD.MaskArchive",
         confidence: Inferred,
+        app: App::Any,
     },
     Entry {
         message_type: 3008,
         name: "TSD.GroupArchive",
         confidence: Inferred,
+        app: App::Any,
     },
     Entry {
         message_type: 3016,
         name: "TSD.ThemeArchive",
         confidence: Inferred,
+        app: App::Any,
     },
     Entry {
         message_type: 3047,
         name: "TSD.DrawableContentArchive",
         confidence: Inferred,
+        app: App::Any,
     },
     // -- stylesheets ---------------------------------------------------------
     Entry {
         message_type: 5020,
         name: "TSS.StylesheetArchive",
         confidence: Inferred,
+        app: App::Any,
     },
     Entry {
         message_type: 5026,
         name: "TSS.ThemeArchive",
         confidence: Inferred,
+        app: App::Any,
     },
     Entry {
         message_type: 5028,
         name: "TSS.StyleArchive",
         confidence: Inferred,
+        app: App::Any,
     },
     // -- tables (Numbers, and tables embedded in Pages/Keynote) --------------
     Entry {
         message_type: 6001,
         name: "TST.TableModelArchive",
         confidence: Unverified,
+        app: App::Any,
     },
     Entry {
         message_type: 6002,
         name: "TST.TileArchive",
         confidence: Unverified,
+        app: App::Any,
     },
     Entry {
         message_type: 6004,
         name: "TST.TableDataList",
         confidence: Inferred,
+        app: App::Any,
     },
     Entry {
         message_type: 6005,
         name: "TST.HeaderStorageBucket",
         confidence: Inferred,
+        app: App::Any,
     },
     // -- calculation engine (Numbers) ---------------------------------------
     Entry {
         message_type: 4008,
         name: "TSCE.CalculationEngineArchive",
         confidence: Inferred,
+        app: App::Any,
     },
     Entry {
         message_type: 4009,
         name: "TSCE.FormulaArchive",
         confidence: Unverified,
+        app: App::Any,
+    },
+    // The stylesheet a document's styles are actually listed in. Not in the TSS
+    // range, despite the name — verified in the Pages and Keynote samples, where
+    // it holds hundreds of style references (see `style::clone_registrations`).
+    Entry {
+        message_type: 401,
+        name: "TSS.StylesheetArchive",
+        confidence: Confirmed,
+        app: App::Any,
     },
     // -- Pages ---------------------------------------------------------------
     Entry {
         message_type: 10000,
         name: "TP.DocumentArchive",
         confidence: Confirmed,
+        app: InPages,
     },
     Entry {
         message_type: 10011,
         name: "TP.SectionArchive",
         confidence: Inferred,
+        app: InPages,
     },
     Entry {
         message_type: 10012,
         name: "TP.ThemeArchive",
         confidence: Inferred,
+        app: InPages,
     },
     Entry {
         message_type: 10015,
         name: "TP.SettingsArchive",
         confidence: Inferred,
+        app: InPages,
     },
     Entry {
         message_type: 10016,
         name: "TP.BodyStorageArchive",
         confidence: Inferred,
+        app: InPages,
     },
     Entry {
         message_type: 10143,
         name: "TP.PageLayoutArchive",
         confidence: Inferred,
+        app: InPages,
     },
     // -- Numbers -------------------------------------------------------------
-    // In Numbers the root object (identifier 1) is type 1, not 10000; this is
-    // what distinguishes a Numbers object graph from a Pages one.
+    // The root object (identifier 1) is type 1, not 10000. That distinguishes a
+    // Numbers object graph from a Pages one — but *not* from a Keynote one,
+    // which numbers its own document archive 1 as well. See `App`.
     Entry {
         message_type: 1,
         name: "TN.DocumentArchive",
         confidence: Confirmed,
+        app: InNumbers,
     },
     Entry {
         message_type: 2,
         name: "TN.SheetArchive",
         confidence: Unverified,
+        app: InNumbers,
     },
     // -- Keynote -------------------------------------------------------------
-    // No Keynote sample was available when this table was written. Keynote uses
-    // the same container, the same IWA framing and the same TSWP/TSD/TSS
-    // objects, so everything above applies; the KN.* document-level types are
-    // deliberately absent rather than guessed. See README, "Keynote status".
+    // Derived from one deck: 1204 objects, 19 masters, 5 slides, 30 streams.
+    // The app-level numbering starts at 1 and collides with Numbers throughout,
+    // which is what `App` exists to keep straight.
+    Entry {
+        message_type: 1,
+        name: "KN.DocumentArchive",
+        confidence: Confirmed,
+        app: InKeynote,
+    },
+    // Object 1 field 2 points at it, and it is the presentation: a list of slide
+    // references, the slide size (1920 × 1080 in the sample), and references to
+    // the theme and the document stylesheet.
+    Entry {
+        message_type: 2,
+        name: "KN.ShowArchive",
+        confidence: Inferred,
+        app: InKeynote,
+    },
+    // One per slide, in the show's list; field 2 points at the slide itself.
+    Entry {
+        message_type: 4,
+        name: "KN.SlideNodeArchive",
+        confidence: Inferred,
+        app: InKeynote,
+    },
+    // The slide. Carries its transition — `{"Transition", "none", 1.0, 0.5}` —
+    // and a reference to the master it is built on, which is what makes this a
+    // presentation object rather than anything shared with the other two apps.
+    Entry {
+        message_type: 5,
+        name: "KN.SlideArchive",
+        confidence: Confirmed,
+        app: InKeynote,
+    },
+    // What a slide's field 1 points at, one per `Index/TemplateSlide-*.iwa`.
+    Entry {
+        message_type: 9,
+        name: "KN.MasterSlideArchive",
+        confidence: Inferred,
+        app: InKeynote,
+    },
+    // Names itself: field 1.3 is the theme name, `"58_Startup_Simple_PM"`.
+    Entry {
+        message_type: 10,
+        name: "KN.ThemeArchive",
+        confidence: Confirmed,
+        app: InKeynote,
+    },
+    // Seven of them, and every one identifies itself as `dropcap-style-N` or
+    // `drop-cap-style-default` in the TSS base at field 1.2.
+    Entry {
+        message_type: 10024,
+        name: "KN.DropCapStyleArchive",
+        confidence: Confirmed,
+        app: InKeynote,
+    },
 ];
 
+/// The entry for a message type in a document of `kind`.
+///
+/// An app-specific entry wins over a shared one, so Keynote's type 1 resolves
+/// to `KN.DocumentArchive` and Numbers' to `TN.DocumentArchive`.
+pub fn lookup_in(kind: Kind, message_type: u32) -> Option<&'static Entry> {
+    let matching = |app: App| {
+        ENTRIES
+            .iter()
+            .find(|e| e.message_type == message_type && e.app == app)
+    };
+    App::of(kind)
+        .and_then(matching)
+        .or_else(|| matching(App::Any))
+}
+
+/// The entry for a message type when the document's kind is not known.
+///
+/// Only entries that mean the same thing in all three apps can be resolved this
+/// way; an app-specific number resolves to nothing rather than to whichever app
+/// happens to be listed first.
 pub fn lookup(message_type: u32) -> Option<&'static Entry> {
-    ENTRIES.iter().find(|e| e.message_type == message_type)
+    ENTRIES
+        .iter()
+        .find(|e| e.message_type == message_type && e.app == App::Any)
 }
 
 /// Human-readable label for a message type, e.g.
 /// `"TSWP.StorageArchive"` or `"TSWP #2042"` when the type is unknown.
 pub fn describe(message_type: u32) -> String {
-    match lookup(message_type) {
+    label(lookup(message_type), message_type)
+}
+
+/// Human-readable label for a message type in a document of a known kind.
+///
+/// Prefer this: without a kind, every app-level archive is unnameable.
+pub fn describe_in(kind: Kind, message_type: u32) -> String {
+    label(lookup_in(kind, message_type), message_type)
+}
+
+fn label(entry: Option<&'static Entry>, message_type: u32) -> String {
+    match entry {
         Some(entry) => match entry.confidence {
             Confirmed => entry.name.to_string(),
             Inferred => format!("{}?", entry.name),
             Unverified => format!("{}??", entry.name),
         },
         None => format!("{} #{message_type}", framework(message_type)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The reason `App` exists: one number, two apps, two meanings.
+    #[test]
+    fn type_one_depends_on_the_app() {
+        assert_eq!(describe_in(Kind::Numbers, 1), "TN.DocumentArchive");
+        assert_eq!(describe_in(Kind::Keynote, 1), "KN.DocumentArchive");
+        // With no kind to go on, saying nothing beats saying the wrong one.
+        assert_eq!(describe(1), "TSP/TSK #1");
+        assert_eq!(describe_in(Kind::Unknown, 1), "TSP/TSK #1");
+    }
+
+    #[test]
+    fn shared_types_resolve_for_every_app() {
+        for kind in [Kind::Pages, Kind::Numbers, Kind::Keynote, Kind::Unknown] {
+            assert_eq!(describe_in(kind, 2001), "TSWP.StorageArchive");
+        }
+        assert_eq!(describe(2001), "TSWP.StorageArchive");
+    }
+
+    #[test]
+    fn confidence_shows_in_the_label() {
+        assert_eq!(describe_in(Kind::Keynote, 5), "KN.SlideArchive");
+        assert_eq!(describe_in(Kind::Keynote, 2), "KN.ShowArchive?");
+        assert_eq!(describe_in(Kind::Numbers, 2), "TN.SheetArchive??");
+        assert_eq!(describe(999999), "? #999999");
+    }
+
+    /// A Pages type must not be offered for a Keynote document, and vice versa.
+    #[test]
+    fn app_specific_entries_do_not_leak_across_apps() {
+        assert_eq!(describe_in(Kind::Keynote, 10000), "app #10000");
+        assert_eq!(describe_in(Kind::Pages, 10000), "TP.DocumentArchive");
+        assert_eq!(describe_in(Kind::Pages, 10024), "app #10024");
+        assert_eq!(describe_in(Kind::Keynote, 10024), "KN.DropCapStyleArchive");
     }
 }

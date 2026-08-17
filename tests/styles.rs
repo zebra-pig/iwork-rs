@@ -49,6 +49,9 @@ fn style_archive(name: &str, identifier: &str) -> Message {
     let mut base = Message::default();
     base.set(1, Value::Bytes(name.as_bytes().to_vec()));
     base.set(2, Value::Bytes(identifier.as_bytes().to_vec()));
+    // Field 1.5 — every real style names the stylesheet it belongs to, and that
+    // is how a copy knows which list to join.
+    base.fields.push(nested(5, &style::reference(STYLESHEET)));
 
     let mut properties = Message::default();
     properties.set(12, Value::Fixed32(12.0f32.to_le_bytes()));
@@ -72,8 +75,23 @@ fn attribute_table(runs: &[(u64, u64)]) -> Message {
 
 /// A Pages-shaped document: root type 10000 in `Index/Document.iwa`.
 fn document() -> Document {
+    build(false)
+}
+
+/// The same, plus a five-slot positional array of bare style references on the
+/// root — the shape a Keynote slide uses for its outline levels.
+fn document_with_outline_array() -> Document {
+    build(true)
+}
+
+fn build(outline_array: bool) -> Document {
     let mut root = Message::default();
     root.fields.push(nested(2, &style::reference(STYLESHEET)));
+    if outline_array {
+        for _ in 0..5 {
+            root.fields.push(nested(31, &style::reference(BODY)));
+        }
+    }
 
     // Three styles listed by plain reference, plus one keyed entry mapping the
     // well-known identifier "body" to a style.
@@ -276,6 +294,47 @@ fn creating_copies_a_style_and_allocates_an_identifier_above_the_high_water_mark
 
     // A new style is listed, not yet applied to anything.
     assert!(doc.text_style_usage(created.identifier).is_empty());
+}
+
+/// Bare references outside the stylesheet must be left alone.
+///
+/// A Keynote `KN.SlideArchive` holds five bare style references in field 31,
+/// one per outline level. They look exactly like a stylesheet's style list and
+/// are nothing of the kind: adding a sixth does not list a style, it corrupts
+/// the mapping from level to style. A real deck grew 20 spurious entries this
+/// way before `create_text_style` was made to use the stylesheet the style
+/// itself names.
+#[test]
+fn creating_leaves_positional_reference_arrays_alone() {
+    let mut doc = document_with_outline_array();
+    let created = doc.create_text_style(BODY, "Kicker").unwrap();
+    assert_eq!(
+        created.registrations_cloned, 1,
+        "only the stylesheet's own list may gain an entry"
+    );
+
+    let doc = reopen(&doc, "outline-array");
+    let root = Message::decode(doc.object(ROOT).unwrap().1.payload()).unwrap();
+    assert_eq!(
+        root.fields.iter().filter(|f| f.number == 31).count(),
+        5,
+        "the positional array must keep its length"
+    );
+    assert_eq!(style::count_references(&root, created.identifier), 0);
+    assert_eq!(style::count_references(&root, BODY), 5);
+}
+
+/// The same array must not be picked apart by a delete either: the style is
+/// genuinely in use there, so the delete is refused rather than shifting it.
+#[test]
+fn deleting_refuses_while_a_positional_array_still_points_at_the_style() {
+    let mut doc = document_with_outline_array();
+    match doc.delete_text_style(BODY, Some(EMPHASIS)) {
+        Err(Error::StyleInUse { references, .. }) => assert!(references.contains(&ROOT)),
+        other => panic!("expected StyleInUse, got {other:?}"),
+    }
+    let root = Message::decode(doc.object(ROOT).unwrap().1.payload()).unwrap();
+    assert_eq!(root.fields.iter().filter(|f| f.number == 31).count(), 5);
 }
 
 #[test]

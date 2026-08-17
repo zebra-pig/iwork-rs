@@ -138,6 +138,9 @@ pub struct TextStyle {
     /// Worth knowing before editing: changing a named style does nothing to
     /// text whose runs point at a variation that overrides the same field.
     pub parent: Option<u64>,
+    /// Stylesheet the style belongs to, from [`STYLESHEET`]. This is the object
+    /// a copy gets listed in.
+    pub stylesheet: Option<u64>,
     /// Every readable string the archive carries, with its path.
     pub labels: Vec<Label>,
     /// The style archive exactly as it sits in the document.
@@ -632,16 +635,24 @@ pub fn repoint(table: &mut Message, from: u64, to: Option<u64>) -> usize {
 /// — no knowledge of the stylesheet's schema required, and nothing to get
 /// wrong.
 ///
-/// **A top-level bare reference is the signature to match on, not a message
-/// type.** The document stylesheet in the samples is type `401`, in the TSP/TSK
-/// range rather than the TSS range its name would suggest, and there is no way
-/// to know that without a document to look at. There is no need to: an
-/// attribute-table entry is `{1: index, 2: reference}` and a style's parent
-/// link is nested, so neither is ever a bare reference at the top level of an
-/// object. Matching the shape finds the list wherever it lives.
+/// **Call this on the style's own stylesheet and nowhere else.** A bare
+/// reference is a good signature for "listed here", but on its own it is not a
+/// good enough one, and the caller cannot tell by message type either — the
+/// document stylesheet is type `401`, in the TSP/TSK range rather than the TSS
+/// range its name suggests. What identifies it is that the style points at it:
+/// every style archive carries [`STYLESHEET`], so the list to add to is named
+/// by the style being copied. [`crate::Document::create_text_style`] resolves
+/// it that way.
 ///
-/// References that are *not* bare are deliberately left alone. The samples
-/// carry two other kinds beside the plain list: keyed entries
+/// The alternative — cloning every top-level bare reference anywhere — looked
+/// equivalent and is not. A Keynote `KN.SlideArchive` holds five bare style
+/// references in field 31, one per outline level, and they are a *positional
+/// array*: adding a sixth does not list a style, it corrupts the mapping from
+/// level to style. Repeatedness cannot separate the two cases, because both are
+/// repeated fields. Provenance can.
+///
+/// References that are not bare are left alone even in the stylesheet. Beside
+/// the plain list it carries keyed entries
 /// `{1: "text-1-paragraphstyle-Title", 2: reference}` mapping a well-known
 /// identifier to a style, and grouping entries `{1: reference, 2: reference…}`
 /// tying a style to its variations. Duplicating a keyed entry would either

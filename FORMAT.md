@@ -11,7 +11,8 @@ Documents used:
 
 - a 15 MB Pages article — 485 objects, 8 streams, 2 TIFFs, 2 charts, German text
 - two Numbers spreadsheets — 738 and 647 objects, 97 and 37 streams
-- no Keynote document was available; see "Keynote" below
+- four further Pages documents, used for the style graph — 654 styles between them
+- a Keynote deck — 1204 objects, 30 streams, 19 masters, 5 slides, 33 media files
 
 An older, pre-2013 `.pages` is an entirely different format — a bundle around an
 XML `index.xml.gz`. None of this applies to those.
@@ -159,7 +160,16 @@ distinguishes the three apps** in the object graph:
 |---|---|---|
 | Pages | `10000` `TP.DocumentArchive` | `DocumentStylesheet` component |
 | Numbers | `1` `TN.DocumentArchive` | ~100 components under `Index/Tables/` |
-| Keynote | not observed | — |
+| Keynote | `1` `KN.DocumentArchive` | `Index/Slide*`, `Index/TemplateSlide-*` |
+
+> **The root type does not identify the app.** Numbers and Keynote both use
+> message type `1`: the app-level archives are numbered *per app*, starting from
+> 1, so the same number means `TN.DocumentArchive` in one and
+> `KN.DocumentArchive` in the other. Only Pages, at 10000, is unambiguous. The
+> components are what separate the other two, and they do it cleanly.
+>
+> The framework ranges in §3 are not affected — `TSWP.StorageArchive` really is
+> 2001 everywhere. It is the low numbers that collide.
 
 The Pages root, decoded:
 
@@ -241,13 +251,58 @@ reference: `TSP.Reference` is `{1: id}` and nothing else, everywhere in the
 format, which is enough to add a style to the list a template was in without
 knowing the stylesheet's schema.
 
-**What a style archive contains is not documented here**, and `src/style.rs`
-does not assume it. The samples show a nested base message carrying the style's
-name and an internal identifier as plain strings, and a property bag beside it,
-but which numbered field is the font size or the weight was not derived from the
-samples and is deliberately not guessed at — a wrong field number would write
-wrong bytes rather than merely print a wrong label. `iwork style <file> <id>`
-prints the field tree so the numbers can be read off the document at hand.
+The base message, field 1, is the same in all three kinds:
+
+| Field | Contents |
+|---|---|
+| 1.1 | name as the app shows it — `"Titel"`. Absent on variation styles |
+| 1.2 | internal identifier — `"text-1-paragraphstyle-Title"` |
+| 1.3.1 | reference to the style this one inherits from |
+| 1.5.1 | reference to the stylesheet it belongs to |
+
+Most styles in a real document are **variations**: anonymous, no 1.1, a parent
+at 1.3.1, and a property bag overriding a field or two. That is what iWork
+writes when text is formatted directly rather than by picking a named style,
+and it is why editing "Titel" can leave the title looking exactly as it did —
+the run points at a variation that overrides the same field.
+
+The property bag is field 11. These were derived by comparing 654 styles
+against names the app assigned them, and are the only fields whose *meaning* is
+claimed here:
+
+| Field | Meaning | How well established |
+|---|---|---|
+| 11.1 | bold toggle, 0/1 | good — set on every `Titel`; independent of the font's own weight, so a style on `HelveticaNeue-Bold` may leave it 0 |
+| 11.2 | italic toggle, 0/1 | good — the only styles setting it are the `Zitat` ones, whose font is an upright cut |
+| 11.3 | font size, points, f32 | strong — `Titel` 24/24/30/30, `Zwischenüberschrift 1` 16, `Text` 11/11/11/12 |
+| 11.5 | PostScript font name | certain — the values are font names |
+| 11.7 | colour: `{3: r, 4: g, 5: b, 6: a}`, floats 0–1 | shape certain, meaning inferred. Every one of 530 samples is opaque black, so they cannot show whether it is the *font's* colour |
+
+Everything else in the bag is left unnamed rather than guessed at — a wrong
+field number writes wrong bytes, where a wrong name in the registry only prints
+wrong. `iwork style <file> <id>` prints the whole tree with a path per field,
+which is how the table above was built and how the rest can be.
+
+### Stylesheets
+
+The document stylesheet is **type 401** — in the TSP/TSK range, not the TSS
+range the name suggests. Every style names it at 1.5.1, which is the reliable
+way to find it. It holds, at the top level:
+
+```
+repeated 1  {1: style id}                     the styles it contains
+repeated 2  {1: identifier, 2: {1: style id}} keyed by internal identifier
+repeated 5  {1: ref, 2: ref, …}               a style with its variations
+```
+
+The Pages sample's stylesheet carries 327 plain references and 267 keyed
+entries. Types in the 5000s (TSS) also appear and are stylesheets of narrower
+scope — six per document in the samples, attached to charts.
+
+> A bare `{1: id}` reference is not by itself proof of membership in a list.
+> `KN.SlideArchive` field 31 holds five of them, one per outline level, and it
+> is a positional array: adding an entry shifts the mapping rather than listing
+> a style. Add to the stylesheet the style itself names, and nowhere else.
 
 ### Images — `TSD.ImageArchive` (type 3005)
 
@@ -279,11 +334,37 @@ Numbers is the same format with a different graph shape:
 
 ### Keynote
 
-No `.key` sample was available. Layers 1–3 are not app-specific and prior art
-treats Keynote identically, so the container, framing, object stream and
-`TSWP`/`TSD`/`TSS` objects should all apply unchanged. What is unknown is the
-`KN.*` document-level types and the root archive's type number. Those are
-deliberately absent from `src/registry.rs` rather than guessed at.
+Layers 1–3 are identical, as expected: the same stored ZIP, the same Snappy
+framing, the same object stream. Text is in `TSWP.StorageArchive` and styles in
+the same attribute tables, so §"Text" and §"Text styles" apply unchanged.
+
+Layer 4, from one deck:
+
+```
+1      KN.DocumentArchive      object 1; field 2 -> the show
+2      KN.ShowArchive          3: repeated slide refs   4: {1: 1920.0, 2: 1080.0}
+                               5: -> document stylesheet   2: -> theme
+4      KN.SlideNodeArchive     one per slide, in the show's list; 2 -> the slide
+5      KN.SlideArchive         1 -> its master
+                               4.2.8: {"Transition", "none", 1.0, 0.5}
+9      KN.MasterSlideArchive   one per Index/TemplateSlide-*.iwa
+10     KN.ThemeArchive         1.3: theme name, e.g. "58_Startup_Simple_PM"
+10024  KN.DropCapStyleArchive  identified "dropcap-style-N" in the TSS base
+```
+
+The slide size is a plain pair of floats in points — 1920 × 1080 in the sample,
+so Keynote stores 16:9 at pixel dimensions rather than the 1024 × 768 of older
+decks.
+
+A deck's slides may hold no text at all: in the sample every one of the slides'
+`TSWP.StorageArchive` objects is empty except one holding `U+FFFC`, and all the
+readable text belongs to the masters' placeholders. Text extraction that finds
+nothing on a slide is not necessarily a bug.
+
+Beware the outline levels: `KN.SlideArchive` field 31 is five bare style
+references, one per outline level. It looks exactly like a stylesheet's style
+list and is a *positional array* — an entry added to it does not list a style,
+it shifts the mapping from level to style.
 
 ---
 
