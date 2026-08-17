@@ -45,11 +45,13 @@ pub mod package;
 pub mod pb;
 pub mod registry;
 pub mod style;
+pub mod table;
 pub mod text;
 
 pub use document::{Component, DataFile, Document, Kind, TextStorage};
 pub use package::Package;
 pub use style::{CreatedStyle, Label, StyleDeletion, StyleKind, StyleUse, TextStyle};
+pub use table::{Cell, CellControl, CellFormat, CellValue, Merge, Table};
 
 /// `TSWP.StorageArchive` — a run of styled text. Same in all three apps.
 pub const TYPE_STORAGE: u32 = 2001;

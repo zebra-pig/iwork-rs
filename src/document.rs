@@ -287,6 +287,39 @@ impl Document {
         Err(Error::NoSuchObject(identifier))
     }
 
+    // -- tables --------------------------------------------------------------
+
+    /// Every table in the document, in object order.
+    ///
+    /// Tables are a cross-app archive: Numbers puts them on sheets, Pages on
+    /// pages and Keynote on slides, and all three write the same `TST` object
+    /// graph. See [`crate::table`] for what a table is made of.
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), iwork::Error> {
+    /// # let doc = iwork::Document::open("Budget.numbers")?;
+    /// for table in doc.tables() {
+    ///     println!("{} — {}×{}", table.name, table.rows, table.columns);
+    ///     println!("{}", table.value(1, 0).to_text());
+    /// }
+    /// # Ok(()) }
+    /// ```
+    pub fn tables(&self) -> Vec<crate::table::Table> {
+        let mut tables = crate::table::tables(self);
+        for table in &mut tables {
+            crate::table::resolve_rich_text(self, table);
+        }
+        tables
+    }
+
+    /// One table by its `TST.TableInfoArchive` identifier, or by name.
+    pub fn table(&self, wanted: &str) -> Option<crate::table::Table> {
+        let by_id: Option<u64> = wanted.parse().ok();
+        self.tables()
+            .into_iter()
+            .find(|t| Some(t.identifier) == by_id || t.name == wanted)
+    }
+
     // -- text styles ---------------------------------------------------------
 
     /// Every character, paragraph and list style in the document.
