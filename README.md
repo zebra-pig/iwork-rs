@@ -39,6 +39,7 @@ iwork text      Report.pages              # every text storage, with its object 
 iwork set-text  Report.pages 6083 "…" out.pages
 iwork objects   Budget.numbers 2001       # every object of one message type
 iwork dump      Talk.key 1                # one object, field by field
+iwork check     Report.pages              # look for a broken object graph
 iwork extract   Report.pages ./media      # embedded media, byte-identical
 iwork roundtrip Report.pages out.pages    # decode and re-encode every object
 
@@ -214,9 +215,16 @@ repeated-field ordering, and objects straddling a Snappy block boundary.
   objects still hold one.
 - **No layout, no rendering, no formula evaluation.** This reads and rewrites
   the document; it does not understand it.
-- **"iWork opens it" is not tested here.** The tests prove the bytes are
-  structurally correct and survive an independent decode. Verifying that Pages,
-  Numbers and Keynote accept the output needs a Mac in the loop.
+- **"iWork opens it" is not tested here, and it is not a formality.** The tests
+  prove the bytes are structurally correct and survive an independent decode.
+  They cannot prove an app will accept the result, and the difference is real:
+  documents that pass every check in this repository — including `iwork check`,
+  which finds nothing wrong with them — have crashed Pages on opening. Anything
+  written by this crate needs trying in the app before it is trusted.
+- **Applying a character style may not change how text looks.** Pointing a run
+  at a different character style is accepted and survives a reopen, but has not
+  been observed to change the rendering, so something else evidently wins.
+  Unresolved.
 - **Encrypted documents are not supported.**
 
 ## Prior art

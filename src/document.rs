@@ -645,6 +645,115 @@ impl Document {
         Ok(text::read(&self.storage_archive(storage)?))
     }
 
+    /// Everything about the object graph that looks wrong.
+    ///
+    /// Written to be run against an *unedited* document first: whatever it says
+    /// about a file iWork itself produced is a bug in this function, not in the
+    /// file. Its value is the difference — a check that passes on the original
+    /// and fails after an edit has found something the edit broke.
+    ///
+    /// It cannot say a document will open. It can say a document is missing an
+    /// object something points at, which is the failure `FORMAT.md` warns about
+    /// and the one this crate is most likely to cause.
+    pub fn problems(&self) -> Vec<String> {
+        let mut problems = Vec::new();
+        let mut seen: BTreeMap<u64, usize> = BTreeMap::new();
+        for (_, object) in self.objects() {
+            *seen.entry(object.identifier).or_default() += 1;
+        }
+        for (identifier, count) in seen.iter().filter(|(_, n)| **n > 1) {
+            problems.push(format!("object {identifier} is defined {count} times"));
+        }
+
+        let highest = seen.keys().copied().max().unwrap_or(0);
+        match self.last_object_identifier() {
+            Some(mark) if mark < highest => problems.push(format!(
+                "package metadata says the highest identifier is {mark}, but {highest} exists"
+            )),
+            None => problems.push("no TSP.PackageMetadata".to_string()),
+            _ => {}
+        }
+
+        for component in self.components() {
+            let name = component.stream_name();
+            if !self.package.contains(&name) {
+                problems.push(format!(
+                    "component {} points at missing {name}",
+                    component.identifier
+                ));
+            }
+        }
+
+        let styles: BTreeMap<u64, StyleKind> = self
+            .text_styles()
+            .into_iter()
+            .map(|s| (s.identifier, s.kind))
+            .collect();
+
+        for (stream, object) in self.objects() {
+            let Some(message) = object.messages.first() else {
+                continue;
+            };
+            if message.message_type != crate::TYPE_STORAGE {
+                continue;
+            }
+            let Ok(storage) = Message::decode(&message.payload) else {
+                problems.push(format!("storage {} does not decode", object.identifier));
+                continue;
+            };
+            let length = text::length(&text::read(&storage));
+            for &field in text::ATTRIBUTE_TABLES {
+                let Some(table) = storage.bytes(field).and_then(crate::pb::decode_nested) else {
+                    continue;
+                };
+                let mut previous: Option<u64> = None;
+                for run in style::runs(&table) {
+                    let where_ = format!("{stream} storage {} table {field}", object.identifier);
+                    if previous.is_some_and(|p| run.start <= p) {
+                        problems.push(format!(
+                            "{where_}: run index {} does not increase (after {})",
+                            run.start,
+                            previous.unwrap()
+                        ));
+                    }
+                    previous = Some(run.start);
+                    if run.start > length {
+                        problems.push(format!(
+                            "{where_}: run starts at {} but the text is {length} long",
+                            run.start
+                        ));
+                    }
+                    let Some(target) = run.style else { continue };
+                    if self.object(target).is_none() {
+                        problems.push(format!("{where_}: run points at missing object {target}"));
+                    } else if let Some(kind) = styles.get(&target) {
+                        if kind.attribute_table() != field {
+                            problems.push(format!(
+                                "{where_}: run points at a {} style, which belongs in table {}",
+                                kind.as_str(),
+                                kind.attribute_table()
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Style archives must resolve their parent and stylesheet.
+        for style in self.text_styles() {
+            for (what, target) in [("parent", style.parent), ("stylesheet", style.stylesheet)] {
+                let Some(target) = target else { continue };
+                if target != 0 && self.object(target).is_none() {
+                    problems.push(format!(
+                        "style {}: {what} {target} does not exist",
+                        style.identifier
+                    ));
+                }
+            }
+        }
+        problems
+    }
+
     /// Identifier a new object may take: above every identifier in use and above
     /// the package's own high-water mark.
     pub fn next_object_identifier(&self) -> u64 {

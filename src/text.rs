@@ -105,7 +105,9 @@ pub fn write(storage: &mut Message, new_text: &str) {
         seen_text_field = true;
         keep
     });
-    storage.set(3, Value::Bytes(new_text.as_bytes().to_vec()));
+    // In field order: a storage that had no text at all would otherwise get its
+    // text appended after every other field, which is not how iWork writes one.
+    storage.set_in_order(3, Value::Bytes(new_text.as_bytes().to_vec()));
 
     // Run indices are character offsets, not byte offsets. Verified against a
     // German Pages document: in a storage reading
@@ -237,6 +239,20 @@ mod tests {
         let mut s = storage("0123", &[0, 3]);
         write(&mut s, "0123456789");
         assert_eq!(run_starts(&s), vec![0, 3]);
+    }
+
+    /// Text goes where iWork puts it even when the storage had none — an empty
+    /// placeholder in a Keynote slide is exactly that case.
+    #[test]
+    fn text_added_to_an_empty_storage_lands_in_field_order() {
+        let mut s = Message::default();
+        s.set(2, Value::Varint(1));
+        s.set(5, Value::Bytes(Vec::new()));
+        s.set(24, Value::Varint(1));
+        write(&mut s, "Neu");
+        let numbers: Vec<u32> = s.fields.iter().map(|f| f.number).collect();
+        assert_eq!(numbers, vec![2, 3, 5, 24]);
+        assert_eq!(read(&s), "Neu");
     }
 
     #[test]

@@ -14,6 +14,7 @@ iwork — inspect and edit Apple iWork documents (.pages, .numbers, .key)
   iwork set-text  <file> <id> <text> <out> replace one text storage
   iwork objects   <file> [type]            list objects, optionally of one message type
   iwork dump      <file> <id>              one object, field by field
+  iwork check     <file>                   look for a broken object graph
   iwork extract   <file> <dir>             write embedded media to a directory
   iwork roundtrip <file> <out>             decode and re-encode every object
 
@@ -57,6 +58,7 @@ fn main() -> ExitCode {
             ))),
         },
         ["dump", file, id] => identifier(id).and_then(|id| dump_object(file, id)),
+        ["check", file] => check(file),
         ["extract", file, dir] => extract(file, dir),
         ["roundtrip", file, out] => roundtrip(file, out),
         ["styles", file] => styles(file),
@@ -189,6 +191,22 @@ fn objects(path: &str, filter: Option<u32>) -> Result<(), Error> {
         );
     }
     Ok(())
+}
+
+fn check(path: &str) -> Result<(), Error> {
+    let doc = Document::open(path)?;
+    let problems = doc.problems();
+    if problems.is_empty() {
+        println!(
+            "{path}: no problems found in {} objects",
+            doc.objects().count()
+        );
+        return Ok(());
+    }
+    for problem in &problems {
+        println!("  {problem}");
+    }
+    Err(Error::Format(format!("{} problem(s)", problems.len())))
 }
 
 fn extract(path: &str, dir: &str) -> Result<(), Error> {
