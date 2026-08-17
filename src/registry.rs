@@ -85,6 +85,15 @@ pub fn framework(message_type: u32) -> &'static str {
 
 const ENTRIES: &[Entry] = &[
     // -- package level -------------------------------------------------------
+    // Every custom cell format in the document, in one archive. Every document
+    // has it and it is empty in most of them; the one in `numbers-rules.numbers`
+    // holds the template's "Millions" format, `#,###.##M`.
+    Entry {
+        message_type: 222,
+        name: "TSK.CustomFormatListArchive",
+        confidence: Confirmed,
+        app: App::Any,
+    },
     Entry {
         message_type: 11006,
         name: "TSP.PackageMetadata",
@@ -292,10 +301,23 @@ const ENTRIES: &[Entry] = &[
         confidence: Confirmed,
         app: App::Any,
     },
+    // The ordered conditional-highlighting rules for a range of cells. Reached
+    // by key from the CONDITIONAL_STYLE data list; `numbers-rules.numbers` has
+    // two, and their four rules are the four the template's inspector shows.
+    Entry {
+        message_type: 6010,
+        name: "TST.ConditionalStyleSetArchive",
+        confidence: Confirmed,
+        app: App::Any,
+    },
+    // Every table carries one whether or not it filters anything — three
+    // tables, seven archives, all eight bytes long. The one in
+    // `numbers-rules.numbers` that has a rule hides nine rows, and they are the
+    // nine whose `hidingState` is 2.
     Entry {
         message_type: 6220,
         name: "TST.FilterSetArchive",
-        confidence: Inferred,
+        confidence: Confirmed,
         app: App::Any,
     },
     Entry {
@@ -304,10 +326,93 @@ const ENTRIES: &[Entry] = &[
         confidence: Inferred,
         app: App::Any,
     },
+    // UUID ↔ index for a table's rows and columns. Confirmed by round-tripping
+    // every column of three documents through it, and by resolving a pivot's
+    // fields to the column headings the app drew for them.
     Entry {
         message_type: 6267,
         name: "TST.ColumnRowUIDMapArchive",
+        confidence: Confirmed,
+        app: App::Any,
+    },
+    // -- categories, summaries and pivots -----------------------------------
+    // Read out of documents made from Apple's `Categories`, `Pivot Table
+    // Basics`, `My Stocks` and `Note Taking Colourful Log` templates: no
+    // AppleScript command creates any of these, so nothing else in this
+    // repository can produce one. Two ObjC-name traps live here — 6372
+    // unarchives as `TSTCategoryOwner` and 6369 as `TSTPivotRowColumnOrder` —
+    // so a table keyed on the class name rather than the message name is wrong
+    // about both.
+    Entry {
+        message_type: 6316,
+        name: "TST.SummaryModelArchive",
         confidence: Inferred,
+        app: App::Any,
+    },
+    Entry {
+        message_type: 6317,
+        name: "TST.SummaryCellVendorArchive",
+        confidence: Inferred,
+        app: App::Any,
+    },
+    Entry {
+        message_type: 6318,
+        name: "TST.CategoryOrderArchive",
+        confidence: Inferred,
+        app: App::Any,
+    },
+    Entry {
+        message_type: 6369,
+        name: "TST.PivotOrderArchive",
+        confidence: Inferred,
+        app: App::Any,
+    },
+    // The pivot rules: source table, row/column/value fields, summary
+    // functions, grand-total switches. Decoded and checked against the pivot
+    // table Numbers drew from them in the same document.
+    Entry {
+        message_type: 6370,
+        name: "TST.PivotOwnerArchive",
+        confidence: Confirmed,
+        app: App::Any,
+    },
+    // The by-reference category owner. Its one repeated field is a list of
+    // references to 6373, and following it reaches the categories the app
+    // shows.
+    Entry {
+        message_type: 6372,
+        name: "TST.CategoryOwnerRefArchive",
+        confidence: Confirmed,
+        app: App::Any,
+    },
+    // One category: grouping columns, summary assignments, the group tree and
+    // the on/off switch. The groups it names hold exactly the rows whose
+    // grouping column carries the group's value.
+    Entry {
+        message_type: 6373,
+        name: "TST.GroupByArchive",
+        confidence: Confirmed,
+        app: App::Any,
+    },
+    Entry {
+        message_type: 6374,
+        name: "TST.PivotGroupingColumnOptionsMapArchive",
+        confidence: Unverified,
+        app: App::Any,
+    },
+    // The out-of-line halves of the group tree. 6383 skips field 2 — the
+    // number does not exist in the schema — and carries its children twice
+    // over, inline at 3 and by reference at 10.
+    Entry {
+        message_type: 6382,
+        name: "TST.GroupByArchive.AggregatorArchive",
+        confidence: Inferred,
+        app: App::Any,
+    },
+    Entry {
+        message_type: 6383,
+        name: "TST.GroupByArchive.GroupNodeArchive",
+        confidence: Confirmed,
         app: App::Any,
     },
     // -- calculation engine (Numbers) ---------------------------------------
