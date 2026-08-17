@@ -245,9 +245,15 @@ for the body, headline, pull quotes, captions, chart labels and credits.
 > is where the style of a paragraph not yet typed comes from.
 
 Paragraphs end at `\n` — and also at **`U+0005`**, which appears where a
-document changes layout mid-storage. The paragraph table puts a run immediately
-after it, so reading it as ordinary text splits the paragraphs one character
-wrong.
+document changes layout mid-storage, and at **`U+0004`**, which marks a section
+boundary. The paragraph table puts a run immediately after either, so reading
+one as ordinary text splits the paragraphs one character wrong.
+
+`U+0004` was found in a document Pages built from its "Project Proposal"
+template, whose body storage reads `…123-4567\n\u{4}Company Name\n` at each of
+its two section breaks, with a paragraph run on the `C`. It is the same
+character that turns up *alone* as the whole of a body storage in a document
+whose text lives in shapes — a section marker with nothing either side of it.
 
 **Run indices are character offsets, not byte offsets.** In a storage reading
 `"Von Benjamin Keller\nVeröffentlicht am 07.09.2017\nim Magazin …"` the
@@ -259,8 +265,9 @@ UTF-16, since the text model is NSString-backed.
 
 Two placeholder characters show up as the entire contents of a storage:
 `U+FFFC OBJECT REPLACEMENT CHARACTER` stands in for an embedded drawable (it is
-what every Numbers table storage contains), and `U+0004` appears alone in the
-Pages body storage of a document whose text all lives in shapes.
+what every Numbers table storage contains), and `U+0004` — the section marker
+above — appears alone in the Pages body storage of a document whose text all
+lives in shapes.
 
 ### Text styles — `TSWP.*StyleArchive` (types 2021–2023)
 

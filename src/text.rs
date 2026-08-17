@@ -41,13 +41,22 @@ pub const ATTRIBUTE_TABLES: &[u32] = &[5, 7, 8, 9, 11, 12, 15, 16, 17];
 
 /// Characters that end a paragraph.
 ///
-/// `\n` is the obvious one. `U+0005` is not obvious and matters: it appears
-/// where a Pages document changes layout mid-storage, and the paragraph-style
-/// table puts a run immediately after it. Reading it as ordinary text splits the
-/// paragraphs one character wrong, which is enough to make a paragraph style
-/// land in the wrong place. Verified in a Pages article at `…\n\n\u{5}Features\n`,
-/// where the run sits on the `F`.
-pub const PARAGRAPH_BREAKS: &[u16] = &[0x000A, 0x0005];
+/// `\n` is the obvious one. The other two are not obvious and matter, because
+/// the paragraph-style table puts a run immediately *after* each of them:
+/// reading one as ordinary text splits the paragraphs one character wrong,
+/// which is enough to make a paragraph style land in the wrong place.
+///
+/// `U+0005` appears where a Pages document changes layout mid-storage.
+/// Verified in a Pages article at `…\n\n\u{5}Features\n`, where the run sits on
+/// the `F`.
+///
+/// `U+0004` marks a section boundary. Verified in a document Pages built from
+/// its "Project Proposal" template, whose body storage reads
+/// `…123-4567\n\u{4}Company Name\n` at both of its section breaks and whose
+/// paragraph table has a run on the `C`. It also turns up alone as the whole of
+/// a body storage in a document whose text lives in shapes, which is the same
+/// character doing the same job with nothing either side of it.
+pub const PARAGRAPH_BREAKS: &[u16] = &[0x000A, 0x0005, 0x0004];
 
 /// Length of a storage's text in UTF-16 code units — the unit run indices are
 /// counted in.
@@ -292,6 +301,12 @@ mod tests {
             paragraph_ranges("ab\n\n\u{5}Fe"),
             vec![0..3, 3..4, 4..5, 5..7]
         );
+    }
+
+    #[test]
+    fn a_section_break_ends_a_paragraph_too() {
+        // "…123-4567\n\u{4}Company Name\n" — the next paragraph starts on the C.
+        assert_eq!(paragraph_ranges("67\n\u{4}Co\n"), vec![0..3, 3..4, 4..7]);
     }
 
     #[test]
