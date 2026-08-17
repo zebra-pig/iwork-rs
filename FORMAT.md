@@ -261,10 +261,21 @@ The base message, field 1, is the same in all three kinds:
 | 1.5.1 | reference to the stylesheet it belongs to |
 
 Most styles in a real document are **variations**: anonymous, no 1.1, a parent
-at 1.3.1, and a property bag overriding a field or two. That is what iWork
-writes when text is formatted directly rather than by picking a named style,
-and it is why editing "Titel" can leave the title looking exactly as it did —
-the run points at a variation that overrides the same field.
+at 1.3.1, a flag at 1.4, and a property bag overriding a field or two. That is
+what iWork writes when text is formatted directly rather than by picking a named
+style, and it is why editing "Titel" can leave the title looking exactly as it
+did — the run points at a variation that overrides the same field.
+
+> **The two are not interchangeable.** An object that carries the variation flag
+> *and* a name *and* no internal identifier, listed among the named styles, is
+> not a thing iWork writes, and Pages crashes on opening a document containing
+> one. Copy a variation and it stays a variation.
+
+Fields within a message are written in **ascending field number**, everywhere
+this has been looked at. Protobuf does not require it and a decoder will not
+care, but a rewritten archive that appends a field at the end no longer looks
+like anything the app would have produced, and "looks like what the app writes"
+is the only correctness standard available without a Mac in the loop.
 
 The property bag is field 11. These were derived by comparing 654 styles
 against names the app assigned them, and are the only fields whose *meaning* is

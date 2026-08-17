@@ -138,6 +138,7 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | Attribute tables point at styles of the matching kind | ✅ | ✅ | ✅ |
 | Copy a style: one new object, text untouched | ✅ | ✅ | ✅ |
 | Apply a style, leave every other stream alone | ✅ | ✅ | ✅ |
+| A copy keeps the template's kind (named vs variation) | ✅ | ✅ | ✅ |
 
 Developed against one real Pages document (a 15 MB German magazine article,
 485 objects, two TIFFs and two charts) and two Numbers spreadsheets from
@@ -203,6 +204,11 @@ repeated-field ordering, and objects straddling a Snappy block boundary.
   anonymous *variation* style that inherits from the named one and overrides
   some fields. `iwork style` prints what a style inherits from; edit the style
   the runs actually point at.
+- **A copy of a variation style stays anonymous.** Named styles and variations
+  are different things, and an object that is flagged a variation, carries a
+  name and has no internal identifier is neither — Pages crashes on opening the
+  document. `create_text_style` therefore applies the requested name only when
+  the template has one, and reports which happened.
 - **Deleting a style is refused rather than forced.** If a reference this crate
   cannot account for would be left dangling, the delete fails and says which
   objects still hold one.

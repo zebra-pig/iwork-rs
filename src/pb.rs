@@ -154,6 +154,29 @@ impl Message {
         }
     }
 
+    /// Replace the first occurrence of `number`, or insert it in ascending
+    /// field order if absent.
+    ///
+    /// iWork writes fields in ascending order everywhere it has been looked at,
+    /// and an archive this crate has edited should look like one the app could
+    /// have written rather than one with a field bolted onto the end. Protobuf
+    /// itself does not care, but "the bytes are legal" is a lower bar than "the
+    /// document is shaped the way the app shapes it", and only one of those is
+    /// testable without a Mac.
+    pub fn set_in_order(&mut self, number: u32, value: Value) {
+        match self.fields.iter_mut().find(|f| f.number == number) {
+            Some(field) => field.value = value,
+            None => {
+                let at = self
+                    .fields
+                    .iter()
+                    .position(|f| f.number > number)
+                    .unwrap_or(self.fields.len());
+                self.fields.insert(at, Field { number, value });
+            }
+        }
+    }
+
     /// Remove every occurrence of `number`. Returns how many were removed.
     pub fn clear(&mut self, number: u32) -> usize {
         let before = self.fields.len();

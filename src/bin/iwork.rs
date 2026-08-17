@@ -349,6 +349,13 @@ fn new_style(path: &str, template: u64, name: &str, out: &str) -> Result<(), Err
         "created style {} from {} in {} ({} stylesheet entries cloned)",
         created.identifier, created.template, created.stream, created.registrations_cloned
     );
+    if created.name.is_none() {
+        println!(
+            "note: style {} is a variation, so the copy is anonymous and keeps no name.\n      \
+             Naming it would make Pages refuse the document — see create_text_style.",
+            created.template
+        );
+    }
     println!("wrote {out}");
     Ok(())
 }

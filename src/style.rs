@@ -267,6 +267,10 @@ pub struct CreatedStyle {
     /// Stylesheet entries that were cloned alongside the object, so the new
     /// style is listed everywhere the template was.
     pub registrations_cloned: usize,
+    /// The name the copy was given, or `None` when the template was a variation
+    /// style and the requested name was therefore not applied. See
+    /// [`crate::Document::create_text_style`].
+    pub name: Option<String>,
 }
 
 /// What [`crate::Document::delete_text_style`] did.
@@ -411,7 +415,7 @@ pub fn set_path(message: &mut Message, path: &[u32], value: Option<Value>) -> Re
     };
     if rest.is_empty() {
         match value {
-            Some(value) => message.set(*head, value),
+            Some(value) => message.set_in_order(*head, value),
             None => {
                 message.clear(*head);
             }
@@ -435,10 +439,7 @@ pub fn set_path(message: &mut Message, path: &[u32], value: Option<Value>) -> Re
     let encoded = Value::Bytes(nested.encode());
     match position {
         Some(i) => message.fields[i].value = encoded,
-        None => message.fields.push(Field {
-            number: *head,
-            value: encoded,
-        }),
+        None => message.set_in_order(*head, encoded),
     }
     Ok(())
 }

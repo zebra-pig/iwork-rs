@@ -365,6 +365,22 @@ impl Document {
     /// The identifier comes from above `TSP.PackageMetadata` field 1, which is
     /// then bumped, so iWork will not later hand the same number to something
     /// else.
+    ///
+    /// **A copy of a variation style does not get the name.** Named styles and
+    /// variations are different things: a named style carries a name at
+    /// [`style::NAME`] and an identifier at [`style::STYLE_IDENTIFIER`], while a
+    /// variation carries neither, a parent, and a flag saying it is one. Naming
+    /// the copy of a variation produces an object that claims to be a variation,
+    /// has a name, has no identifier, and is listed among the named styles —
+    /// and Pages crashes on opening the document. It was doing exactly that
+    /// until a document that crashed showed up.
+    ///
+    /// The copy is still made, still listed, and still usable — it is simply
+    /// anonymous, which is what a variation is. `CreatedStyle::name` reports
+    /// whether the name was applied. Turning a variation into a named style
+    /// properly would mean synthesising a style identifier and clearing the
+    /// variation flag, which is more invention than this crate is willing to do
+    /// without a document to check it against.
     pub fn create_text_style(&mut self, template: u64, name: &str) -> Result<CreatedStyle, Error> {
         let source = self
             .text_style(template)
@@ -373,12 +389,15 @@ impl Document {
         let identifier = self.next_object_identifier();
 
         let mut archive = source.archive.clone();
-        style::set_path(
-            &mut archive,
-            style::NAME,
-            Some(Value::Bytes(name.as_bytes().to_vec())),
-        )
-        .map_err(|e| Error::Format(format!("style {template}: {e}")))?;
+        let applied_name = source.name.is_some().then(|| name.to_string());
+        if applied_name.is_some() {
+            style::set_path(
+                &mut archive,
+                style::NAME,
+                Some(Value::Bytes(name.as_bytes().to_vec())),
+            )
+            .map_err(|e| Error::Format(format!("style {template}: {e}")))?;
+        }
 
         // Bump the high-water mark first: if there is no package metadata to
         // bump, no object is added at all.
@@ -410,6 +429,7 @@ impl Document {
             template,
             stream,
             registrations_cloned,
+            name: applied_name,
         })
     }
 

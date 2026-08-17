@@ -256,8 +256,9 @@ fn attribute_tables_point_at_styles_of_the_matching_kind() {
     }
 }
 
-/// Copying a style must add exactly one object, leave the text alone, and take
-/// an identifier the document has not used.
+/// Copying a style must add exactly one object, leave the text alone, take an
+/// identifier the document has not used, and keep the copy the same *kind* of
+/// style as the template — named or variation, not a mix of the two.
 #[test]
 fn creating_a_style_adds_one_object_and_nothing_else() {
     for path in require_fixtures() {
@@ -293,7 +294,26 @@ fn creating_a_style_adds_one_object_and_nothing_else() {
         );
         let new = reopened.text_style(created.identifier).unwrap();
         assert_eq!(new.kind, template.kind, "{}", path.display());
-        assert_eq!(new.name.as_deref(), Some("iwork-rs"), "{}", path.display());
+        // A named template hands its copy the new name; a variation stays
+        // anonymous, because a named variation is what Pages refuses to open.
+        assert_eq!(
+            new.name.as_deref(),
+            created.name.as_deref(),
+            "{}: the report disagrees with the document",
+            path.display()
+        );
+        assert_eq!(
+            created.name.is_some(),
+            template.name.is_some(),
+            "{}: naming must follow the template",
+            path.display()
+        );
+        assert_eq!(
+            new.parent,
+            template.parent,
+            "{}: the copy inherits what the template did",
+            path.display()
+        );
         assert_eq!(
             reopened.last_object_identifier(),
             Some(created.identifier),

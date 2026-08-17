@@ -350,6 +350,69 @@ fn creating_twice_does_not_reuse_an_identifier() {
     assert_eq!(doc.text_styles().len(), 5);
 }
 
+/// Copying a variation style must not name the copy.
+///
+/// A named style has a name and an internal identifier; a variation has neither,
+/// plus a parent and a flag saying it is one. A copy that is flagged a variation,
+/// carries a name, has no identifier and sits in the stylesheet's named list is
+/// none of those things, and Pages crashes on opening the document. Two of five
+/// real documents did exactly that.
+#[test]
+fn copying_a_variation_style_leaves_the_copy_anonymous() {
+    let mut doc = document();
+    let variation = doc.create_text_style(BODY, "Base").unwrap().identifier;
+    // Make it a variation: drop the name and identifier, add a parent and flag.
+    doc.set_text_style_property(variation, style::NAME, None)
+        .unwrap();
+    doc.set_text_style_property(variation, style::STYLE_IDENTIFIER, None)
+        .unwrap();
+    doc.set_text_style_property(variation, style::PARENT, Some(Value::Varint(BODY)))
+        .unwrap();
+    doc.set_text_style_property(variation, &[1, 4], Some(Value::Varint(1)))
+        .unwrap();
+    assert!(doc.text_style(variation).unwrap().name.is_none());
+
+    let created = doc.create_text_style(variation, "Wunschname").unwrap();
+    assert_eq!(created.name, None, "the name must not be applied");
+
+    let doc = reopen(&doc, "variation-copy");
+    let copy = doc.text_style(created.identifier).unwrap();
+    assert!(copy.name.is_none(), "the copy stays anonymous");
+    assert_eq!(copy.parent, Some(BODY), "and stays a variation");
+    assert_eq!(
+        copy.archive,
+        doc.text_style(variation).unwrap().archive,
+        "a copy of a variation differs from its template in nothing at all"
+    );
+
+    // A named template still gets the name, as before.
+    let mut doc = document();
+    let named = doc.create_text_style(BODY, "Kicker").unwrap();
+    assert_eq!(named.name.as_deref(), Some("Kicker"));
+}
+
+/// New fields go where iWork would have written them, in ascending order.
+#[test]
+fn new_fields_are_inserted_in_field_order() {
+    let mut doc = document();
+    doc.set_text_style_property(BODY, style::property::ITALIC, Some(Value::Varint(1)))
+        .unwrap();
+    doc.set_text_style_property(BODY, style::property::BOLD, Some(Value::Varint(1)))
+        .unwrap();
+
+    let doc = reopen(&doc, "field-order");
+    let bag = pb::decode_nested(doc.text_style(BODY).unwrap().archive.bytes(11).unwrap()).unwrap();
+    let numbers: Vec<u32> = bag.fields.iter().map(|f| f.number).collect();
+    assert_eq!(
+        numbers,
+        vec![1, 2, 12],
+        "1 and 2 inserted before the existing 12"
+    );
+    let mut sorted = numbers.clone();
+    sorted.sort_unstable();
+    assert_eq!(numbers, sorted);
+}
+
 #[test]
 fn creating_from_something_that_is_not_a_style_fails() {
     let mut doc = document();
