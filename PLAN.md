@@ -29,7 +29,27 @@ the crate, and Numbers evaluates formulas we can read back as an oracle.
 5. **No iWork documents are committed.** Generated fixtures live in
    `tests/fixtures/` (gitignored); the *generator* is committed, so anyone
    with the apps can rebuild the corpus.
-6. **Style discipline.** Match the repo's voice (literate commit messages,
+6. **The extracted protos are the map, not the territory.** The `.proto`
+   files carried by numbers-parser, keynote-parser and iWorkFileFormat
+   (cloned into the session scratchpad, never committed here — the Legal
+   section stays true) are the starting point for naming types and fields
+   and for knowing what a message *can* contain. They are evidence for the
+   registry (`Inferred` until this repo's own tests observe the field), and
+   a claim from them never enters FORMAT.md as Confirmed without a local
+   probe backing it.
+7. **The app's UI defines the feature list.** AppleScript covers a fraction
+   of what the apps can put in a document. Features are enumerated from the
+   apps' menus/inspectors and from Apple's published user guides, and probe
+   documents exercising them are produced by driving the UI (System Events
+   UI scripting) when plain AppleScript cannot — then analysed with
+   `iwork dump` to pin down what they write.
+8. **Some features are read-and-pass-through, never authored.** Recorded
+   presentations, smart annotations (iPad Pencil ink), EndNote citations,
+   live-data cells, live video sources: the crate must carry them intact and
+   may learn to read them, but must refuse to synthesise them — they encode
+   state only the app (or another device) can produce. Naming them protects
+   ground rule 3.
+9. **Style discipline.** Match the repo's voice (literate commit messages,
    one idea per commit), rustfmt, no new dependencies without need. Work
    happens on branch `claude/full-spec`; each verified phase is one or more
    local commits (not pushed).
@@ -58,16 +78,26 @@ The foundation every later phase stands on.
 - [ ] Baseline recorded: object census per fixture, so later phases can see
       what they unlocked.
 
-## Phase 1 — Numbers tables: read
+## Phase 1 — Tables: read
 
-The largest missing area of the format.
+The largest missing area of the format. `TST` is cross-app: Pages and
+Keynote tables use the same archives, so every claim gets three oracles,
+not one.
 
 - [ ] Decode the table object graph: `TST.TableInfoArchive`,
       `TST.TableModelArchive`, `TST.TableDataStore`, tiles, row/column
-      headers; map table → sheet → document.
+      headers; map table → sheet → document (and table → page/slide in
+      Pages/Keynote).
 - [ ] Decode cell storage (the current tile cell format): empty, text
       (string-table indirection), number, boolean, date, duration, error,
       rich-text cells, currency; merged-cell ranges.
+- [ ] Structure state: header row *and column* counts (0–5 each), freeze
+      flags, hidden rows/columns (filter-hidden and manually-hidden are
+      different persisted states), explicit row/column sizes, table names.
+- [ ] Cell data formats, read alongside values: number/currency/percentage/
+      fraction/scientific/date-time/duration/text/automatic, stored per cell
+      and per column; cell controls (checkbox, star rating, slider, stepper,
+      pop-up menu with its item list) at least identified.
 - [ ] API: `doc.tables()`, `table.cell(row, col)`, typed `CellValue`.
 - [ ] CLI: `iwork tables <doc>`, `iwork cells <doc> <table-id>`,
       `iwork csv <doc> <table-id>`.
@@ -75,11 +105,27 @@ The largest missing area of the format.
       Numbers and the values must agree — the app is the oracle.
 - [ ] FORMAT.md: new §Tables with the tile/cell layout as observed.
 
-## Phase 2 — Numbers tables: write
+## Phase 1b — Table data organisation: read
+
+Everything layered on top of the cells; depends only on Phase 1.
+
+- [ ] Sort rules and filter rule sets (with the enabled/disabled toggle).
+- [ ] Categories: source column, subcategories, group membership and order,
+      summary-row aggregate assignments, per-group collapsed state.
+- [ ] Conditional highlighting rules; custom cell formats (named,
+      document-scoped, with conditional sub-rules).
+- [ ] Pivot tables: source reference, field assignments, summary functions,
+      display modes, totals toggles — read and inventory.
+- [ ] FORMAT.md §Tables extended; pass-through tests so a save never damages
+      any of it.
+
+## Phase 2 — Tables: write
 
 - [ ] Edit an existing cell in place: text and number values first, then
       boolean/date; string-table maintenance; tile re-encode with the
-      byte-identity rule for untouched tiles/streams.
+      byte-identity rule for untouched tiles/streams. A written cell keeps
+      (or is given) its data format — value and format travel together — and
+      writing into a cell that carries a control definition preserves it.
 - [ ] `iwork set-cell <doc> <table> <row> <col> <value> <out>`.
 - [ ] App round-trip: Numbers opens the result and reports the new value via
       AppleScript. `iwork check` learns any invariant broken along the way.
@@ -92,61 +138,133 @@ The largest missing area of the format.
       drawables, groups, lines — with their geometry
       (`TSD.GeometryArchive`: position, size, rotation, flags) and z-order.
 - [ ] Write geometry: move/resize a drawable; app-verified.
+- [ ] Read object styling: fills (colour/gradient/image + tint), strokes,
+      shadows, reflection, opacity, lock state — the `TSD` style surface.
 - [ ] Media: replace an existing image's bytes (Data entry +
       `TSP.DataReference` + digest/metadata fields as observed); insert an
-      image by copying an existing image drawable. App-verified.
+      image by copying an existing image drawable. App-verified. **Caveat
+      proven by the guides:** a drawable carries non-destructive edit state
+      (crop/mask rect, mask shape, Instant Alpha mask, ten tone/colour
+      adjustments) between the stored pixels and the render — replacement
+      must surface that state, or a swapped image opens fine and renders
+      wrong while the app round-trip passes. Read it before writing bytes.
+- [ ] Inventory (read-level) of the wider media model: video/audio with trim
+      points and poster frames, galleries, drawings (stroke order is
+      load-bearing — "Animate Drawing" replays it), 3D objects; pass-through
+      tests for each.
 - [ ] CLI: `iwork drawables`, `iwork set-geometry`, `iwork replace-media`.
 - [ ] FORMAT.md: §Drawables, §Media.
 
 ## Phase 4 — Text: finish the story
 
-- [ ] Fix the standing limitation: editing text *remaps* attribute runs
-      (paragraph, character, list, and every other attribute table field 5–…)
-      instead of clamping them — styling after the edit survives.
+- [ ] Fix the standing limitation, widened to its true scope: editing text
+      remaps **every range anchored into the storage**, not just style runs —
+      paragraph/character/list attribute tables, and equally tracked-change
+      ranges, comment anchors, smart-annotation anchors, bookmark anchors,
+      footnote anchors and ruby (phonetic guide) runs. The current clamping
+      silently damages all of these today; this is a correctness fix, not a
+      feature.
 - [ ] Range operations: insert/delete text at a range, not just replace-all.
 - [ ] Hyperlinks and smart fields: read them; edit a link target;
       app-verified.
 - [ ] Lists: read list styles/levels per paragraph; change a paragraph's
       list level.
-- [ ] FORMAT.md: §Text updated with the full attribute-table inventory.
+- [ ] The style-override flag (`TSS`): know whether a run is "named style"
+      or "named style plus local overrides" — a prerequisite for preserving
+      styling across edits, which this phase promises.
+- [ ] FORMAT.md: §Text updated with the full attribute-table inventory,
+      including bidi/vertical-text/ruby tables where the corpus can produce
+      them.
+
+## Phase 4b — Pages document structure
+
+The word-processing spine; Pages is the app this repo drives most
+confidently. Read-first, then the safest writes.
+
+- [ ] Document mode: word-processing vs page-layout (`isMultiPage`),
+      reported by `iwork inspect`; sections and section breaks, per-section
+      page-numbering rules, backgrounds.
+- [ ] Headers/footers (three zones, match-previous, hide-on-first-page);
+      paper size/orientation/margins/facing pages.
+- [ ] Footnotes/endnotes: mode, markers, restart rules, note bodies as their
+      own text storages (they must survive Phase 4's remapping).
+- [ ] TOC (style-inclusion mapping), bookmarks (the anchor side of
+      link-to-bookmark), page templates/masters, columns.
+- [ ] Linked text boxes: the named thread joining boxes into one flow — a
+      storage is not 1:1 with a drawable.
+- [ ] Write (app-verified, smallest useful set): edit header/footer text;
+      edit a footnote's text.
+- [ ] FORMAT.md: §Pages structure.
 
 ## Phase 5 — Formulas and the calculation engine (read)
 
 - [ ] Decode `TSCE` formula archives to an AST; pretty-print as the formula
       text the user typed (cross-checked against AppleScript's `formula`
       property, which is the oracle).
+- [ ] The reference model in full: absolute/relative flags per axis, named
+      references, whole-row/column and header-name references, cross-table
+      (`Table 2::B2`) and cross-sheet references — which resolve by table
+      *identity*, not name string; stored error states.
 - [ ] `iwork formulas <doc>`; cells CLI shows formula alongside cached value.
 - [ ] FORMAT.md: §Formulas. Writing formulas is out of scope until reading
       is exhaustive.
 
 ## Phase 6 — Charts (read)
 
-- [ ] Enumerate `TSCH` chart objects, their type, and extract series/category
-      data (charts carry a private copy of their data).
+- [ ] Enumerate `TSCH` chart objects (cross-app: Pages and Keynote carry
+      charts too), their type (~25 named types incl. 3D and interactive),
+      and extract series/category data (charts carry a private copy of
+      their data, *distinct from* their `TSCE` references back into tables —
+      read both and say which is which).
 - [ ] `iwork charts <doc>`. FORMAT.md §Charts.
 
 ## Phase 7 — Comments, metadata, document properties
 
-- [ ] Read annotations/comments and their anchors, authors storage.
+- [ ] Read annotations/comments and their anchors, authors storage —
+      including resolved/unresolved state, reply threads (author + timestamp
+      per reply), reviewer text highlights (annotation-layer, distinct from
+      formatting highlight), and anchors into cells and chart elements, not
+      just text.
 - [ ] Read+write document metadata (Properties.plist fields, custom format
       lists), regenerate `Metadata/DocumentIdentifier`/UUIDs correctly on
       "save as new document" so two edited copies don't collide in iCloud.
 - [ ] Change-tracking: read-level survey only; document in FORMAT.md.
 
-## Phase 8 — Keynote (Keynote 15.3.1 is installed — app-verified)
+## Phase 8a — Keynote: inventory and text (app-verified)
 
 - [ ] Presenter-notes and slide-text extraction; slide/master/build/
-      transition inventory surfaced in API + CLI.
+      transition *inventory* (names and counts — parameters are 8b's job)
+      surfaced in API + CLI.
 - [ ] Write: edit slide text (title/body/notes) app-verified; duplicate a
       slide by copying; skip/unskip a slide; reorder slides.
 - [ ] FORMAT.md §Keynote extended with what the probes prove; registry
       evidence upgraded from Inferred to Confirmed where the app accepts it.
 
+## Phase 8b — Keynote: builds, transitions, playback (read)
+
+- [ ] Build parameters: effect, direction, duration, build order, delivery
+      mode (On Click / After Transition / With/After Build n + delay),
+      action builds with motion paths, by-bullet-group text builds.
+- [ ] Transition parameters incl. Magic Move's match modes; playback
+      settings (presentation type, loop, auto-advance); soundtrack.
+- [ ] Recorded presentations: identify and pass through (never author —
+      ground rule 8).
+- [ ] FORMAT.md §Keynote: builds/transitions as observed.
+
 ## Phase 9 — Document creation and hardening
 
 - [ ] `Document::from_template(path)`: duplicate a document into a fresh
       identity (new UUIDs, cleared view state) — the copy-don't-synthesise
-      answer to "create a document".
+      answer to "create a document". Accept `.template`/`.kth`/`.nmbtemplate`
+      bundles, which is what "create a document" means to a user.
+- [ ] Package-form documents: File > Advanced > Change File Type saves a
+      real *directory* instead of a ZIP (Apple recommends it above ~500 MB).
+      Detect and read both forms; `iwork inspect` says which it has.
+- [ ] Encrypted documents: detect, fail with a named error (not a parse
+      failure), refuse to write. The common hostile-bytes case.
+- [ ] Decide and document the preview-staleness rule (byte-identity says
+      leave `preview*.jpg`; correctness says they now lie — pick one,
+      record it in FORMAT.md, teach `iwork check` to note it).
 - [ ] Fuzz the decoders (cargo-fuzz or dumb byte-mutation harness) so hostile
       files fail cleanly, never panic.
 - [ ] Final pass over README/FORMAT.md; verification table updated to match
@@ -163,6 +281,18 @@ fixture, and what the app accepted.
 
 ## Execution notes
 
+- **Reference material lives in `reference/` (gitignored, like fixtures):**
+  `features.md` — 735 document-affecting features enumerated from Apple's
+  Pages/Numbers/Keynote user guides, with a gaps analysis this plan's
+  1b/4b/8b phases came from; `distilled/` — per-domain field references
+  mined from the extracted protos of numbers-parser, keynote-parser and
+  iWorkFileFormat (clones in the session scratchpad under `reference/`).
+  Every phase agent reads its domain's distilled file and its features
+  section before touching code.
+- Parallelizable work (proto mining, feature enumeration, independent
+  probes) runs as multi-agent workflows — authorized by the user
+  ("ultracode"). Implementation phases that touch the tree stay sequential
+  or use isolated worktrees.
 - One Opus subagent per phase, sequential (they share the tree); the
   orchestrator reviews between phases: `cargo test`, `iwork check` +
   `iwork roundtrip` over the corpus, app round-trip spot checks, then commits.
