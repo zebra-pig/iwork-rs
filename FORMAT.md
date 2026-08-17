@@ -339,6 +339,10 @@ one changed field per probe.
 | 12.32 / 12.15 / 12.45 | paragraph border, its colour and width | |
 | 12.40.1 | reference to the paragraph's list style | |
 
+A colour is complete or it is nothing: all six fields, every time. A style
+given a colour of `{3: r, 4: g, 5: b}` — no model, no alpha — is a document
+Pages crashes on rather than opens, which is worth knowing before writing one.
+
 All four colours came back byte-exact — `#123456` is `18/255, 52/255, 86/255` —
 which is what makes the colour fields certain rather than merely plausible.
 Horizontal character scaling was asked for and did not survive the import, so

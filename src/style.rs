@@ -571,11 +571,24 @@ pub fn get_path(message: &Message, path: &[u32]) -> Option<Value> {
     }
 }
 
-/// Set the field at `path`, creating intermediate messages as needed. Passing
-/// `None` removes it.
+/// Set the field at `path`, or remove it when `value` is `None`.
 ///
-/// Fails rather than guessing when something on the way is not a message, so a
-/// path typed at the command line cannot overwrite a string with a submessage.
+/// **Every message on the way must already exist.** Setting `11.7.3` in a style
+/// that has no `11.7` fails rather than inventing one, because a message this
+/// crate invents is a message with only the fields it happened to set — and
+/// that is not a valid archive. Asking Pages to render a colour built as
+/// `{3: r, 4: g, 5: b}`, with no model and no alpha, crashes it on opening; a
+/// real colour carries `{1: model, 3: r, 4: g, 5: b, 6: a, 12: space}` and
+/// there is no way to know that from the path alone.
+///
+/// A leaf may be created freely — adding a field to a bag that is already there
+/// is safe, and is how a style gains a property it did not have. It is the
+/// *containers* that must be inherited rather than fabricated.
+///
+/// To set a property whose container is missing, get the container from a style
+/// that has one: copy that style
+/// ([`crate::Document::create_text_style`]) and edit the copy, or lift the
+/// subtree across with [`crate::Document::copy_text_style_property`].
 pub fn set_path(message: &mut Message, path: &[u32], value: Option<Value>) -> Result<(), String> {
     let Some((head, rest)) = path.split_first() else {
         return Err("empty field path".into());
@@ -591,23 +604,27 @@ pub fn set_path(message: &mut Message, path: &[u32], value: Option<Value>) -> Re
     }
 
     let position = message.fields.iter().position(|f| f.number == *head);
-    let mut nested = match position.map(|i| &message.fields[i].value) {
-        Some(Value::Bytes(raw)) if raw.is_empty() => Message::default(),
-        Some(Value::Bytes(raw)) => {
-            pb::decode_nested(raw).ok_or_else(|| format!("field {head} is not a nested message"))?
+    let Some(position) = position else {
+        if value.is_none() {
+            return Ok(()); // nothing to clear
         }
-        Some(_) => return Err(format!("field {head} is not a nested message")),
-        None if value.is_none() => return Ok(()), // nothing to clear
-        None => Message::default(),
+        return Err(format!(
+            "field {head} does not exist, and a message this crate invents \
+             would carry only the fields it was asked for — copy a style that \
+             has one instead"
+        ));
+    };
+    let Value::Bytes(raw) = &message.fields[position].value else {
+        return Err(format!("field {head} is not a nested message"));
+    };
+    let mut nested = if raw.is_empty() {
+        Message::default()
+    } else {
+        pb::decode_nested(raw).ok_or_else(|| format!("field {head} is not a nested message"))?
     };
 
     set_path(&mut nested, rest, value)?;
-
-    let encoded = Value::Bytes(nested.encode());
-    match position {
-        Some(i) => message.fields[i].value = encoded,
-        None => message.set_in_order(*head, encoded),
-    }
+    message.fields[position].value = Value::Bytes(nested.encode());
     Ok(())
 }
 
@@ -932,8 +949,10 @@ mod tests {
     }
 
     #[test]
-    fn set_path_creates_and_clears_nested_fields() {
+    fn set_path_sets_and_clears_leaves_in_a_bag_that_exists() {
         let mut archive = Message::default();
+        archive.set(11, Value::Bytes(Message::default().encode()));
+
         set_path(
             &mut archive,
             &[11, 12],
@@ -951,6 +970,19 @@ mod tests {
         set_path(&mut archive, &[11, 12], None).unwrap();
         assert_eq!(get_path(&archive, &[11, 12]), None);
         assert_eq!(get_path(&archive, &[11, 1]), Some(Value::Varint(1)));
+    }
+
+    /// A container this crate invents holds only what it was asked for, and a
+    /// colour of `{3: r, 4: g, 5: b}` — no model, no alpha — crashes Pages.
+    #[test]
+    fn set_path_will_not_invent_a_container() {
+        let mut archive = Message::default();
+        assert!(set_path(&mut archive, &[11, 7, 3], Some(Value::Varint(1))).is_err());
+        assert!(archive.fields.is_empty(), "and nothing was written");
+
+        // Clearing something that is not there is a no-op, not an error.
+        set_path(&mut archive, &[11, 7, 3], None).unwrap();
+        assert!(archive.fields.is_empty());
     }
 
     /// A path that would have to tunnel through a string is an error, not a

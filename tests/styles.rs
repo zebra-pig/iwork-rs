@@ -411,15 +411,19 @@ fn creating_twice_does_not_reuse_an_identifier() {
 fn copying_a_variation_style_leaves_the_copy_anonymous() {
     let mut doc = document();
     let variation = doc.create_text_style(BODY, "Base").unwrap().identifier;
-    // Make it a variation: drop the name and identifier, add a parent and flag.
-    doc.set_text_style_property(variation, style::NAME, None)
-        .unwrap();
-    doc.set_text_style_property(variation, style::STYLE_IDENTIFIER, None)
-        .unwrap();
-    doc.set_text_style_property(variation, style::PARENT, Some(Value::Varint(BODY)))
-        .unwrap();
-    doc.set_text_style_property(variation, &[1, 4], Some(Value::Varint(1)))
-        .unwrap();
+    // Make it a variation: drop the name and identifier, add a parent and the
+    // flag. Built by rewriting the base message rather than by path, because
+    // `set_text_style_property` deliberately will not create the parent
+    // reference's container — see `setting_a_property_will_not_invent_its_container`.
+    doc.update_text_style(variation, |archive| {
+        let mut base = pb::decode_nested(archive.bytes(1).unwrap()).unwrap();
+        base.clear(1);
+        base.clear(2);
+        base.set_in_order(3, Value::Bytes(style::reference(BODY).encode()));
+        base.set_in_order(4, Value::Varint(1));
+        archive.set(1, Value::Bytes(base.encode()));
+    })
+    .unwrap();
     assert!(doc.text_style(variation).unwrap().name.is_none());
 
     let created = doc.create_text_style(variation, "Wunschname").unwrap();
@@ -461,6 +465,83 @@ fn new_fields_are_inserted_in_field_order() {
     let mut sorted = numbers.clone();
     sorted.sort_unstable();
     assert_eq!(numbers, sorted);
+}
+
+/// Setting a property whose container is missing must fail, not fabricate one.
+///
+/// A colour built as `{3: r, 4: g, 5: b}` — no model, no alpha — is what this
+/// crate used to write when asked for a colour on a style that had none, and
+/// Pages crashes on opening such a document. There is no way to know from the
+/// path that a colour needs six fields, so the container has to come from a
+/// style that has one.
+#[test]
+fn setting_a_property_will_not_invent_its_container() {
+    let mut doc = document();
+    // EMPHASIS has a property bag but no colour in it.
+    assert!(style::get_path(&doc.text_style(EMPHASIS).unwrap().archive, &[11, 7]).is_none());
+    let refused = doc.set_text_style_property(
+        EMPHASIS,
+        style::property::RED,
+        Some(Value::Fixed32(0.85f32.to_le_bytes())),
+    );
+    assert!(matches!(refused, Err(Error::Format(_))), "{refused:?}");
+
+    // A leaf in a bag that already exists is fine — that is how a style gains
+    // a property it did not have.
+    doc.set_text_style_property(EMPHASIS, style::property::BOLD, Some(Value::Varint(1)))
+        .unwrap();
+    assert_eq!(
+        style::get_path(
+            &doc.text_style(EMPHASIS).unwrap().archive,
+            style::property::BOLD
+        ),
+        Some(Value::Varint(1))
+    );
+}
+
+/// The supported way to get a container you do not have: take a working one.
+#[test]
+fn a_property_subtree_can_be_copied_from_a_style_that_has_one() {
+    let mut doc = document();
+    // Give BODY a complete colour, the way a real document carries one.
+    let mut colour = Message::default();
+    colour.set(1, Value::Varint(1));
+    colour.set(3, Value::Fixed32(0f32.to_le_bytes()));
+    colour.set(4, Value::Fixed32(0f32.to_le_bytes()));
+    colour.set(5, Value::Fixed32(0f32.to_le_bytes()));
+    colour.set(6, Value::Fixed32(1f32.to_le_bytes()));
+    doc.update_text_style(BODY, |archive| {
+        let mut bag = pb::decode_nested(archive.bytes(11).unwrap()).unwrap();
+        bag.set_in_order(7, Value::Bytes(colour.encode()));
+        archive.set(11, Value::Bytes(bag.encode()));
+    })
+    .unwrap();
+
+    doc.copy_text_style_property(BODY, EMPHASIS, style::property::FONT_COLOR)
+        .unwrap();
+    doc.set_text_style_property(
+        EMPHASIS,
+        style::property::RED,
+        Some(Value::Fixed32(0.85f32.to_le_bytes())),
+    )
+    .unwrap();
+
+    let doc = reopen(&doc, "copy-property");
+    let archive = doc.text_style(EMPHASIS).unwrap().archive;
+    // Every channel of a real colour survived, not just the one that was set.
+    assert_eq!(
+        style::get_path(&archive, &[11, 7, 1]),
+        Some(Value::Varint(1))
+    );
+    assert_eq!(
+        style::get_path(&archive, style::property::RED),
+        Some(Value::Fixed32(0.85f32.to_le_bytes()))
+    );
+    assert_eq!(
+        style::get_path(&archive, style::property::ALPHA),
+        Some(Value::Fixed32(1f32.to_le_bytes())),
+        "alpha must survive — a colour without it is what crashed Pages"
+    );
 }
 
 #[test]

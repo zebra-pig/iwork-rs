@@ -139,6 +139,13 @@ Some properties come in pairs — the value, and a boolean saying it is
 deliberately *none*. Removing a field means "inherit from the parent style";
 setting the companion means "explicitly nothing". Those are different documents.
 
+**Setting a property whose container is missing fails, deliberately.** A style
+with no colour cannot simply be given one: a colour is `{model, r, g, b, a,
+space}`, and a container this crate invents would hold only the channels it was
+asked for. Pages crashes on opening such a document — confirmed, not theorised.
+Get the container from a style that has one, with `create_text_style` or
+`copy_text_style_property`, then change the channels on the copy.
+
 Creating by copying is the same rule [`FORMAT.md`](FORMAT.md) gives for whole
 documents, for the same reason: the Pages sample spends 313 objects on its
 stylesheet, and a style that already works is a better starting point than a

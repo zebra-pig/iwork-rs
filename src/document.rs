@@ -482,6 +482,58 @@ impl Document {
         self.set_archive(identifier, &archive)
     }
 
+    /// Copy one property subtree from another style.
+    ///
+    /// The way to give a style a property whose container it does not have.
+    /// [`Document::set_text_style_property`] will not invent a container,
+    /// because a container it invents holds only the fields it was asked for —
+    /// a colour written as `{r, g, b}`, with no model and no alpha, crashes
+    /// Pages on opening. Lifting a whole working subtree across avoids the
+    /// question: the copy is a colour that a real document already contains.
+    ///
+    /// Take the colour from a style that has one, then change the channels:
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), iwork::Error> {
+    /// # let mut doc = iwork::Document::open("Report.pages")?;
+    /// use iwork::style::property;
+    /// doc.copy_text_style_property(3712, 3801, property::FONT_COLOR)?;
+    /// doc.set_text_style_property(3801, property::RED,
+    ///     Some(iwork::pb::Value::Fixed32(0.85f32.to_le_bytes())))?;
+    /// # Ok(()) }
+    /// ```
+    pub fn copy_text_style_property(
+        &mut self,
+        from: u64,
+        to: u64,
+        path: &[u32],
+    ) -> Result<(), Error> {
+        let source = self.text_style(from).ok_or(Error::NoSuchStyle(from))?;
+        let value = style::get_path(&source.archive, path).ok_or_else(|| {
+            Error::Format(format!(
+                "style {from} has no field {} to copy",
+                dotted(path)
+            ))
+        })?;
+        let target = self.text_style(to).ok_or(Error::NoSuchStyle(to))?;
+        let mut archive = target.archive;
+        // The parent of the leaf has to exist in the target; copy it whole if
+        // the target lacks it, which is the case this method is for.
+        if let Some((leaf, parents)) = path.split_last() {
+            if !parents.is_empty() && style::get_path(&archive, parents).is_none() {
+                let container = style::get_path(&source.archive, parents).ok_or_else(|| {
+                    Error::Format(format!("style {from} has no field {}", dotted(parents)))
+                })?;
+                style::set_path(&mut archive, parents, Some(container))
+                    .map_err(|e| Error::Format(format!("style {to}: {e}")))?;
+            }
+            let _ = leaf;
+        }
+        style::set_path(&mut archive, path, Some(value))
+            .map_err(|e| Error::Format(format!("style {to}: {e}")))?;
+        self.set_archive(to, &archive)
+    }
+
     /// Remove a style, and every reference to it this crate can account for.
     ///
     /// Runs that use it are pointed at `replace_with`, or dropped when that is
@@ -891,6 +943,13 @@ impl Document {
             .and_then(|raw| iwa::decompress(raw).ok())
             .is_some_and(|original| original == framed)
     }
+}
+
+fn dotted(path: &[u32]) -> String {
+    path.iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 fn utf8(bytes: Option<&[u8]>) -> String {
