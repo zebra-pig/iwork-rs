@@ -16,21 +16,37 @@ fn fixtures() -> Vec<PathBuf> {
     let dir = std::env::var("IWORK_FIXTURES")
         .map(PathBuf::from)
         .unwrap_or_else(|_| Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures"));
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Vec::new();
-    };
-    let mut found: Vec<PathBuf> = entries
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| {
-            matches!(
-                p.extension().and_then(|e| e.to_str()),
-                Some("pages") | Some("numbers") | Some("key")
-            )
-        })
-        .collect();
+    let mut found = Vec::new();
+    collect(&dir, &mut found);
     found.sort();
     found
+}
+
+/// Fixtures may be nested: `scripts/make-fixtures.sh` writes the documents it
+/// builds with Pages, Numbers and Keynote into `tests/fixtures/generated/`, and
+/// a directory the reader points `IWORK_FIXTURES` at is likely to have folders
+/// in it too. So the search recurses, and a document dropped straight into
+/// `tests/fixtures/` still works exactly as before.
+fn collect(dir: &Path, found: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        let named = matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("pages") | Some("numbers") | Some("key")
+        );
+        // Extension first: a pre-2013 `.pages` is a bundle, and descending into
+        // one would find nothing and take a while about it.
+        if named {
+            if path.is_file() {
+                found.push(path);
+            }
+        } else if path.is_dir() {
+            collect(&path, found);
+        }
+    }
 }
 
 /// Print once per test run rather than failing, so a fresh clone is green.
@@ -607,6 +623,32 @@ fn a_copied_style_is_grouped_under_its_parent() {
             "{}: {:?}",
             path.display(),
             edited.problems()
+        );
+    }
+}
+
+/// The one thing the rest of this file cannot prove: that the app opens it.
+///
+/// Off unless `IWORK_APP_CHECK=1`, because it drives Pages, Numbers or Keynote
+/// through AppleScript and takes the best part of a minute per document. What
+/// it runs is `scripts/app-check.sh`, the same harness every later phase uses to
+/// accept a document it has written.
+#[test]
+fn every_fixture_opens_in_the_app_that_owns_it() {
+    if std::env::var("IWORK_APP_CHECK").as_deref() != Ok("1") {
+        eprintln!("IWORK_APP_CHECK is not 1 — skipping the app round-trip");
+        return;
+    }
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/app-check.sh");
+    for path in require_fixtures() {
+        let status = std::process::Command::new(&script)
+            .arg(&path)
+            .status()
+            .unwrap_or_else(|e| panic!("{}: {e}", script.display()));
+        assert!(
+            status.success(),
+            "{}: the app that owns it would not open it",
+            path.display()
         );
     }
 }

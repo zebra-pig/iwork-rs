@@ -223,9 +223,37 @@ IWORK_FIXTURES=~/Documents cargo test
 ```
 
 With no fixtures the integration tests skip and say so, so a fresh clone is
-green. The unit tests always run: they build synthetic archives in memory and
-cover the parts that are easy to get subtly wrong — varint round-trips,
-repeated-field ordering, and objects straddling a Snappy block boundary.
+green. Fixtures are found recursively, so a whole directory tree of them works.
+The unit tests always run: they build synthetic archives in memory and cover the
+parts that are easy to get subtly wrong — varint round-trips, repeated-field
+ordering, and objects straddling a Snappy block boundary.
+
+If you have Pages, Numbers and Keynote, you can have the apps write you a corpus
+instead:
+
+```
+scripts/make-fixtures.sh          # into tests/fixtures/generated/, gitignored
+```
+
+Seven documents that between them cover plain and styled text, non-Latin text
+including emoji, a table and an image, two sheets of typed cells and formulas, a
+300-row imported table, and a deck of slides with presenter notes and a skipped
+slide. Existing files are left alone unless `--force` is given.
+
+And the check the rest of the suite cannot make — does the app open it?
+
+```
+scripts/app-check.sh out.pages "A new headline"   # exit 0 if Pages agrees
+scripts/app-check.sh --self-test Report.pages     # prove it fails when it should
+
+IWORK_APP_CHECK=1 cargo test                      # every fixture, through the app
+```
+
+`app-check.sh` opens the document in the app that owns its extension, reads back
+body text, cell values, slide text and presenter notes, looks for a string if
+you give it one, and closes without saving. `--self-test` corrupts a copy of a
+document it has just accepted and checks that the app refuses it, because a
+harness that always says yes is worse than none.
 
 ## Limitations
 
@@ -272,7 +300,9 @@ repeated-field ordering, and objects straddling a Snappy block boundary.
   the fix has been to find an invariant the real documents hold to exactly, teach
   `iwork check` to assert it, and maintain it on write; the checker is that much
   sharper each round, and still not a substitute for opening the file. Anything
-  written by this crate needs trying in the app before it is trusted.
+  written by this crate needs trying in the app before it is trusted —
+  `scripts/app-check.sh` is how, and `IWORK_APP_CHECK=1 cargo test` runs it over
+  every fixture, on a machine that has the apps.
 - **Applying a character style may not change how text looks.** Pointing a run
   at a different character style is accepted and survives a reopen, but has not
   been observed to change the rendering, so something else evidently wins.
