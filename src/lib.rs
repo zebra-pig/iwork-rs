@@ -5,7 +5,7 @@
 //! 1. a ZIP package whose entries are all *stored* ([`package`]);
 //! 2. `Index/*.iwa` streams framed as raw Snappy blocks ([`iwa`]);
 //! 3. a flat stream of length-delimited protobuf objects ([`iwa`], [`pb`]);
-//! 4. an object graph whose shape depends on the app ([`document`]).
+//! 4. an object graph whose shape depends on the app ([`document`], [`style`]).
 //!
 //! Apple does not publish the `.proto` definitions and the message type is the
 //! only thing identifying a payload's schema, so this crate works at the
@@ -22,6 +22,19 @@
 //!     println!("{}: {}", storage.identifier, storage.text);
 //! }
 //! doc.set_text(6083, "A new headline")?;
+//!
+//! // Text styles are shared objects a range of text points at ([`style`]).
+//! for style in doc.text_styles() {
+//!     println!("{} {} {:?}", style.identifier, style.kind.as_str(), style.name);
+//! }
+//! let kicker = doc.create_text_style(3712, "Kicker")?;
+//! doc.set_text_style_property(
+//!     kicker.identifier,
+//!     iwork::style::property::FONT_SIZE,
+//!     Some(iwork::pb::Value::Fixed32(18f32.to_le_bytes())),
+//! )?;
+//! doc.apply_text_style(6083, 0..8, kicker.identifier)?;
+//!
 //! doc.save("Report-edited.pages")?;
 //! # Ok(()) }
 //! ```
@@ -31,10 +44,12 @@ pub mod iwa;
 pub mod package;
 pub mod pb;
 pub mod registry;
+pub mod style;
 pub mod text;
 
 pub use document::{Component, DataFile, Document, Kind, TextStorage};
 pub use package::Package;
+pub use style::{CreatedStyle, Label, StyleDeletion, StyleKind, StyleUse, TextStyle};
 
 /// `TSWP.StorageArchive` — a run of styled text. Same in all three apps.
 pub const TYPE_STORAGE: u32 = 2001;
@@ -49,6 +64,13 @@ pub enum Error {
     /// understand. Carries a human-readable reason.
     Format(String),
     NoSuchObject(u64),
+    NoSuchStyle(u64),
+    /// A style could not be deleted because references to it would have been
+    /// left dangling. Carries the objects that still refer to it.
+    StyleInUse {
+        identifier: u64,
+        references: Vec<u64>,
+    },
 }
 
 impl std::fmt::Display for Error {
@@ -57,7 +79,20 @@ impl std::fmt::Display for Error {
             Error::Io(e) => write!(f, "{e}"),
             Error::Zip(e) => write!(f, "{e}"),
             Error::Format(m) => write!(f, "{m}"),
-            Error::NoSuchObject(id) => write!(f, "no text storage with identifier {id}"),
+            Error::NoSuchObject(id) => write!(f, "no object with identifier {id}"),
+            Error::NoSuchStyle(id) => write!(f, "no text style with identifier {id}"),
+            Error::StyleInUse {
+                identifier,
+                references,
+            } => {
+                let list: Vec<String> = references.iter().map(u64::to_string).collect();
+                write!(
+                    f,
+                    "text style {identifier} is still referenced by {} object(s): {}",
+                    references.len(),
+                    list.join(", ")
+                )
+            }
         }
     }
 }

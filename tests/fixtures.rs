@@ -9,7 +9,8 @@
 
 use std::path::{Path, PathBuf};
 
-use iwork::{iwa, Document, Kind, Package};
+use iwork::pb::Message;
+use iwork::{iwa, style, Document, Kind, Package, StyleKind};
 
 fn fixtures() -> Vec<PathBuf> {
     let dir = std::env::var("IWORK_FIXTURES")
@@ -92,8 +93,9 @@ fn writes_only_stored_entries() {
     }
 }
 
-/// Decoding and re-encoding must reproduce each object stream byte for byte.
-/// Only the Snappy block boundaries may move, which no reader can observe.
+/// Saving an unedited document must reproduce every entry **byte for byte** —
+/// not merely an equivalent stream. A save that rewrites what it did not change
+/// makes an intended edit indistinguishable from an incidental re-compression.
 #[test]
 fn object_streams_survive_a_roundtrip() {
     for path in require_fixtures() {
@@ -103,6 +105,12 @@ fn object_streams_survive_a_roundtrip() {
             "iwork-roundtrip-{}",
             path.file_name().unwrap().to_string_lossy()
         ));
+        assert!(
+            doc.changed_streams().is_empty(),
+            "{}: an unedited document reports changed streams: {:?}",
+            path.display(),
+            doc.changed_streams()
+        );
         doc.save(&out).unwrap();
         let rewritten = Package::read(&out).unwrap();
 
@@ -116,16 +124,12 @@ fn object_streams_survive_a_roundtrip() {
         for name in original.names() {
             let before = original.get(name).unwrap();
             let after = rewritten.get(name).unwrap();
-            if name.ends_with(".iwa") {
-                assert_eq!(
-                    iwa::decompress(before).unwrap(),
-                    iwa::decompress(after).unwrap(),
-                    "{}: {name} changed on re-encode",
-                    path.display()
-                );
-            } else {
-                assert_eq!(before, after, "{}: {name} changed", path.display());
-            }
+            assert_eq!(
+                before,
+                after,
+                "{}: {name} was rewritten by a save that changed nothing",
+                path.display()
+            );
         }
         let _ = std::fs::remove_file(&out);
     }
@@ -143,6 +147,12 @@ fn editing_text_touches_only_its_own_stream() {
         let mut edited = Document::open(&path).unwrap();
         let replacement = "Ersetzt durch iwork-rs — 🎬";
         edited.set_text(target.identifier, replacement).unwrap();
+        assert_eq!(
+            edited.changed_streams(),
+            vec![target.stream.as_str()],
+            "{}: editing one storage should change one stream",
+            path.display()
+        );
         let out = std::env::temp_dir().join(format!(
             "iwork-edit-{}",
             path.file_name().unwrap().to_string_lossy()
@@ -199,6 +209,405 @@ fn components_resolve_to_real_streams() {
                 component.preferred_name
             );
         }
+    }
+}
+
+/// Every style a run of text points at must be an object that exists, and the
+/// three tables must point at the kind of style this crate says they do. This
+/// is the claim `style::StyleKind::attribute_table` rests on, so a document
+/// that disagrees should fail loudly rather than be edited on a wrong premise.
+#[test]
+fn attribute_tables_point_at_styles_of_the_matching_kind() {
+    for path in require_fixtures() {
+        let doc = Document::open(&path).unwrap();
+        let styles: Vec<_> = doc
+            .text_styles()
+            .into_iter()
+            .map(|s| (s.identifier, s.kind))
+            .collect();
+
+        for (stream, object) in doc.objects() {
+            if object.message_type() != iwork::TYPE_STORAGE {
+                continue;
+            }
+            let Ok(storage) = Message::decode(object.payload()) else {
+                continue;
+            };
+            for kind in [StyleKind::Character, StyleKind::Paragraph, StyleKind::List] {
+                let Some(table) = storage
+                    .bytes(kind.attribute_table())
+                    .and_then(iwork::pb::decode_nested)
+                else {
+                    continue;
+                };
+                for run in style::runs(&table) {
+                    let Some(target) = run.style else { continue };
+                    assert!(
+                        doc.object(target).is_some(),
+                        "{}: {stream} storage {} points at missing object {target}",
+                        path.display(),
+                        object.identifier
+                    );
+                    if let Some((_, found)) = styles.iter().find(|(id, _)| *id == target) {
+                        assert_eq!(
+                            *found,
+                            kind,
+                            "{}: storage {} field {} points at a {} style",
+                            path.display(),
+                            object.identifier,
+                            kind.attribute_table(),
+                            found.as_str()
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Styles say what kind they are, in their own internal identifier, and the
+/// message types must agree.
+///
+/// This is the check that settles 2021 against 2022. Public prior art has them
+/// the other way round and this crate copied that; across six documents every
+/// type 2021 calls itself `character-style-…` and every type 2022
+/// `…-paragraphstyle-…`, with no exceptions in either direction.
+#[test]
+fn style_types_match_the_identifiers_the_styles_give_themselves() {
+    let mut counted = 0;
+    for path in require_fixtures() {
+        let doc = Document::open(&path).unwrap();
+        for style in doc.text_styles() {
+            let Some(identifier) = &style.style_identifier else {
+                continue;
+            };
+            let lower = identifier.to_ascii_lowercase();
+            let claimed = if lower.contains("characterstyle") || lower.contains("character-style") {
+                StyleKind::Character
+            } else if lower.contains("paragraphstyle") || lower.contains("paragraph-style") {
+                StyleKind::Paragraph
+            } else if lower.contains("liststyle") || lower.contains("list-style") {
+                StyleKind::List
+            } else {
+                continue;
+            };
+            counted += 1;
+            assert_eq!(
+                style.kind,
+                claimed,
+                "{}: style {} calls itself {identifier:?} but is message type {}",
+                path.display(),
+                style.identifier,
+                style.kind.message_type()
+            );
+        }
+    }
+    if counted > 0 {
+        eprintln!("{counted} styles agreed with their own identifiers");
+    }
+}
+
+/// The two tables are the other way round from what the field order suggests:
+/// field 5 is the paragraph table, field 8 the character one.
+///
+/// The check that shows it: every entry in field 5 sits at a paragraph boundary.
+/// A character-attribute table has no reason to, and field 8's does not.
+#[test]
+fn the_paragraph_table_holds_entries_at_paragraph_starts() {
+    for path in require_fixtures() {
+        let doc = Document::open(&path).unwrap();
+        for (_, object) in doc.objects() {
+            if object.message_type() != iwork::TYPE_STORAGE {
+                continue;
+            }
+            let Ok(storage) = Message::decode(object.payload()) else {
+                continue;
+            };
+            let text = doc.storage_text(object.identifier).unwrap();
+            let starts: Vec<u64> = iwork::text::paragraph_ranges(&text)
+                .into_iter()
+                .map(|r| r.start)
+                .collect();
+            if starts.len() < 2 {
+                continue;
+            }
+            let Some(table) = storage
+                .bytes(StyleKind::Paragraph.attribute_table())
+                .and_then(iwork::pb::decode_nested)
+            else {
+                continue;
+            };
+            let length = iwork::text::length(&text);
+            for run in style::runs(&table) {
+                // A trailing entry at the very end of the text is normal — it is
+                // where the style of a paragraph yet to be typed comes from.
+                assert!(
+                    starts.contains(&run.start) || run.start == length,
+                    "{}: storage {} paragraph run at {} is neither a paragraph start \
+                     nor the end of the text ({length}) ({starts:?})",
+                    path.display(),
+                    object.identifier,
+                    run.start
+                );
+            }
+        }
+    }
+}
+
+/// Copying a style must add exactly one object, leave the text alone, take an
+/// identifier the document has not used, and keep the copy the same *kind* of
+/// style as the template — named or variation, not a mix of the two.
+#[test]
+fn creating_a_style_adds_one_object_and_nothing_else() {
+    for path in require_fixtures() {
+        let doc = Document::open(&path).unwrap();
+        let Some(template) = doc.text_styles().into_iter().next() else {
+            continue; // a document with no styles is fine, just not useful here
+        };
+        let used: Vec<u64> = doc.objects().map(|(_, o)| o.identifier).collect();
+
+        let mut edited = Document::open(&path).unwrap();
+        let created = edited
+            .create_text_style(template.identifier, "iwork-rs")
+            .unwrap();
+        assert!(
+            !used.contains(&created.identifier),
+            "{}: identifier {} was already in use",
+            path.display(),
+            created.identifier
+        );
+
+        let out = std::env::temp_dir().join(format!(
+            "iwork-new-style-{}",
+            path.file_name().unwrap().to_string_lossy()
+        ));
+        edited.save(&out).unwrap();
+
+        let reopened = Document::open(&out).unwrap();
+        assert_eq!(
+            reopened.objects().count(),
+            doc.objects().count() + 1,
+            "{}: object count",
+            path.display()
+        );
+        let new = reopened.text_style(created.identifier).unwrap();
+        assert_eq!(new.kind, template.kind, "{}", path.display());
+        // A named template hands its copy the new name; a variation stays
+        // anonymous, because a named variation is what Pages refuses to open.
+        assert_eq!(
+            new.name.as_deref(),
+            created.name.as_deref(),
+            "{}: the report disagrees with the document",
+            path.display()
+        );
+        assert_eq!(
+            created.name.is_some(),
+            template.name.is_some(),
+            "{}: naming must follow the template",
+            path.display()
+        );
+        assert_eq!(
+            new.parent,
+            template.parent,
+            "{}: the copy inherits what the template did",
+            path.display()
+        );
+        assert_eq!(
+            reopened.last_object_identifier(),
+            Some(created.identifier),
+            "{}: high-water mark was not bumped",
+            path.display()
+        );
+
+        let before: Vec<_> = doc.text_storages().into_iter().map(|s| s.text).collect();
+        let after: Vec<_> = reopened
+            .text_storages()
+            .into_iter()
+            .map(|s| s.text)
+            .collect();
+        assert_eq!(before, after, "{}: text changed", path.display());
+        let _ = std::fs::remove_file(&out);
+    }
+}
+
+/// Applying a style must change which style a range uses and nothing else —
+/// not the text, not the object count, not the other streams.
+#[test]
+fn applying_a_style_touches_only_its_own_stream() {
+    for path in require_fixtures() {
+        let doc = Document::open(&path).unwrap();
+        let Some(target) = doc.text_storages().into_iter().next() else {
+            continue;
+        };
+        let Some(style) = doc
+            .text_styles()
+            .into_iter()
+            .find(|s| s.kind == StyleKind::Character)
+        else {
+            continue;
+        };
+
+        let mut edited = Document::open(&path).unwrap();
+        let range = 0..1.min(target.text.encode_utf16().count() as u64);
+        if range.is_empty() {
+            continue;
+        }
+        edited
+            .apply_text_style(target.identifier, range.clone(), style.identifier)
+            .unwrap();
+        let out = std::env::temp_dir().join(format!(
+            "iwork-apply-style-{}",
+            path.file_name().unwrap().to_string_lossy()
+        ));
+        edited.save(&out).unwrap();
+
+        let reopened = Document::open(&out).unwrap();
+        assert_eq!(
+            reopened.storage_text(target.identifier).unwrap(),
+            doc.storage_text(target.identifier).unwrap(),
+            "{}: text changed",
+            path.display()
+        );
+        assert_eq!(
+            reopened.objects().count(),
+            doc.objects().count(),
+            "{}: object count changed",
+            path.display()
+        );
+        assert!(
+            reopened
+                .text_style_usage(style.identifier)
+                .iter()
+                .any(|u| u.storage == target.identifier && u.range.start == range.start),
+            "{}: the run was not applied",
+            path.display()
+        );
+
+        let before = Package::read(&path).unwrap();
+        let after = Package::read(&out).unwrap();
+        // The metadata stream is allowed to move: pointing text at a style in
+        // another component adds a declaration there.
+        let metadata = metadata_stream(&doc);
+        for name in before.names().filter(|n| n.ends_with(".iwa")) {
+            if name == target.stream || Some(name) == metadata.as_deref() {
+                continue;
+            }
+            assert_eq!(
+                iwa::decompress(before.get(name).unwrap()).unwrap(),
+                iwa::decompress(after.get(name).unwrap()).unwrap(),
+                "{}: {name} changed while styling {}",
+                path.display(),
+                target.stream
+            );
+        }
+        let _ = std::fs::remove_file(&out);
+    }
+}
+
+/// Package entry holding `TSP.PackageMetadata`.
+fn metadata_stream(doc: &Document) -> Option<String> {
+    doc.objects()
+        .find(|(_, o)| o.message_type() == iwork::TYPE_PACKAGE_METADATA)
+        .map(|(stream, _)| stream.to_string())
+}
+
+/// A reference that leaves its component must be declared there, or iWork never
+/// loads what it points at.
+///
+/// The documents Apple wrote satisfy this exactly — which is what makes it worth
+/// asserting. A file this crate produced that violates it opened in Pages with
+/// the edit silently missing, and another crashed on open.
+#[test]
+fn every_cross_component_reference_is_declared() {
+    for path in require_fixtures() {
+        let doc = Document::open(&path).unwrap();
+        assert_eq!(
+            doc.undeclared_references(),
+            Vec::new(),
+            "{}: undeclared cross-component reference(s)",
+            path.display()
+        );
+    }
+}
+
+/// Applying a style from another component declares it, and declaring is
+/// idempotent — running it again adds nothing.
+#[test]
+fn applying_a_style_declares_it_where_it_is_needed() {
+    for path in require_fixtures() {
+        let doc = Document::open(&path).unwrap();
+        let Some(target) = doc.text_storages().into_iter().find(|s| !s.text.is_empty()) else {
+            continue;
+        };
+        let Some(style) = doc
+            .text_styles()
+            .into_iter()
+            .find(|s| s.kind == StyleKind::Paragraph && s.stream != target.stream)
+        else {
+            continue;
+        };
+
+        let mut edited = Document::open(&path).unwrap();
+        let range = 0..1;
+        edited
+            .apply_text_style(target.identifier, range, style.identifier)
+            .unwrap();
+        assert_eq!(
+            edited.undeclared_references(),
+            Vec::new(),
+            "{}: applying {} left it undeclared",
+            path.display(),
+            style.identifier
+        );
+        assert_eq!(
+            edited.declare_external_references(),
+            0,
+            "{}: declaring is not idempotent",
+            path.display()
+        );
+    }
+}
+
+/// A style that is listed in a stylesheet and names a parent is also grouped
+/// under that parent. A copy that is listed but not grouped is a shape no real
+/// document takes, and `Document::create_text_style` must not produce one.
+#[test]
+fn a_copied_style_is_grouped_under_its_parent() {
+    for path in require_fixtures() {
+        let doc = Document::open(&path).unwrap();
+        let Some(template) = doc
+            .text_styles()
+            .into_iter()
+            .find(|s| s.parent.is_some() && s.stylesheet.is_some())
+        else {
+            continue;
+        };
+
+        let mut edited = Document::open(&path).unwrap();
+        let created = edited
+            .create_text_style(template.identifier, "Copy")
+            .unwrap();
+        let sheet = Message::decode(
+            edited
+                .object(template.stylesheet.unwrap())
+                .unwrap()
+                .1
+                .payload(),
+        )
+        .unwrap();
+        assert_eq!(
+            style::count_references(&sheet, created.identifier),
+            style::count_references(&sheet, template.identifier),
+            "{}: the copy of {} is listed in fewer places than its template",
+            path.display(),
+            template.identifier
+        );
+        assert!(
+            edited.problems().is_empty(),
+            "{}: {:?}",
+            path.display(),
+            edited.problems()
+        );
     }
 }
 

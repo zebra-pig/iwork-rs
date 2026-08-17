@@ -4,12 +4,14 @@
 //!
 //! | Field | Contents |
 //! |-------|----------|
+//! | 1     | what the storage is for — body, header, footnote, text box, cell … |
 //! | 2     | reference to the owning stylesheet |
 //! | 3     | the text, UTF-8, repeated — long text is split across several runs |
-//! | 5     | character-attribute table |
-//! | 6     | packed paragraph/bidi flags |
+//! | 5     | **paragraph**-style table |
+//! | 6     | packed per-paragraph data, a different shape |
 //! | 7     | list-style table |
-//! | 8     | paragraph-style table |
+//! | 8     | **character**-style table |
+//! | 9, 11, 12, 15, 16, 17 | further tables: attachments, smart fields, layout, bookmarks, footnotes, sections |
 //!
 //! Every attribute table has the same shape: repeated entries of
 //! `{1: character_index, 2: reference to a style object}`, strictly increasing
@@ -22,9 +24,59 @@
 
 use crate::pb::{Field, Message, Value};
 
-/// Field numbers holding attribute tables. Field 6 is packed flags rather than
-/// a table and is deliberately excluded.
-const ATTRIBUTE_TABLES: &[u32] = &[5, 7, 8, 9, 10, 11];
+/// Field numbers holding attribute tables — lists of
+/// `{character_index, reference}` runs.
+///
+/// 5, 7 and 8 are the paragraph, list and character style tables (see
+/// [`crate::style`]); the rest are the same shape pointing at things this crate
+/// does not model, and are listed so that deleting a style cannot leave a
+/// dangling reference behind in one of them.
+///
+/// Field 6 is a differently-shaped table of packed paragraph data, and field 10
+/// is not a table at all — it is a lone boolean, and was in this list until the
+/// storage archive's own field numbering was checked. Nothing broke, because
+/// every operation here skips a field that is not length-delimited, but a run
+/// table that was never there is not something to go looking for.
+pub const ATTRIBUTE_TABLES: &[u32] = &[5, 7, 8, 9, 11, 12, 15, 16, 17];
+
+/// Characters that end a paragraph.
+///
+/// `\n` is the obvious one. `U+0005` is not obvious and matters: it appears
+/// where a Pages document changes layout mid-storage, and the paragraph-style
+/// table puts a run immediately after it. Reading it as ordinary text splits the
+/// paragraphs one character wrong, which is enough to make a paragraph style
+/// land in the wrong place. Verified in a Pages article at `…\n\n\u{5}Features\n`,
+/// where the run sits on the `F`.
+pub const PARAGRAPH_BREAKS: &[u16] = &[0x000A, 0x0005];
+
+/// Length of a storage's text in UTF-16 code units — the unit run indices are
+/// counted in.
+pub fn length(text: &str) -> u64 {
+    text.encode_utf16().count() as u64
+}
+
+/// Character ranges of the paragraphs in `text`, in UTF-16 code units.
+///
+/// A paragraph ends at `\n`, or at one of the break characters in
+/// [`PARAGRAPH_BREAKS`]. The terminator belongs to the paragraph it ends, so the
+/// ranges tile the text with no gaps. A paragraph style applies to whole
+/// paragraphs, and this is how to name them. Empty text has no paragraphs.
+pub fn paragraph_ranges(text: &str) -> Vec<std::ops::Range<u64>> {
+    let mut out = Vec::new();
+    let mut start = 0u64;
+    let mut index = 0u64;
+    for unit in text.encode_utf16() {
+        index += 1;
+        if PARAGRAPH_BREAKS.contains(&unit) {
+            out.push(start..index);
+            start = index;
+        }
+    }
+    if start < index {
+        out.push(start..index);
+    }
+    out
+}
 
 /// Concatenate the text runs of a storage archive.
 pub fn read(storage: &Message) -> String {
@@ -71,7 +123,9 @@ pub fn write(storage: &mut Message, new_text: &str) {
         seen_text_field = true;
         keep
     });
-    storage.set(3, Value::Bytes(new_text.as_bytes().to_vec()));
+    // In field order: a storage that had no text at all would otherwise get its
+    // text appended after every other field, which is not how iWork writes one.
+    storage.set_in_order(3, Value::Bytes(new_text.as_bytes().to_vec()));
 
     // Run indices are character offsets, not byte offsets. Verified against a
     // German Pages document: in a storage reading
@@ -85,7 +139,7 @@ pub fn write(storage: &mut Message, new_text: &str) {
     // NSString-backed, which makes astral characters count as two — if that
     // turns out to be wrong it only matters for text containing emoji or
     // similar, and only past the first such character.
-    let limit = new_text.encode_utf16().count() as u64;
+    let limit = length(new_text);
     for field in &mut storage.fields {
         if !ATTRIBUTE_TABLES.contains(&field.number) {
             continue;
@@ -205,6 +259,20 @@ mod tests {
         assert_eq!(run_starts(&s), vec![0, 3]);
     }
 
+    /// Text goes where iWork puts it even when the storage had none — an empty
+    /// placeholder in a Keynote slide is exactly that case.
+    #[test]
+    fn text_added_to_an_empty_storage_lands_in_field_order() {
+        let mut s = Message::default();
+        s.set(2, Value::Varint(1));
+        s.set(5, Value::Bytes(Vec::new()));
+        s.set(24, Value::Varint(1));
+        write(&mut s, "Neu");
+        let numbers: Vec<u32> = s.fields.iter().map(|f| f.number).collect();
+        assert_eq!(numbers, vec![2, 3, 5, 24]);
+        assert_eq!(read(&s), "Neu");
+    }
+
     #[test]
     fn multiple_text_runs_collapse_to_one() {
         let mut s = storage("abc", &[0]);
@@ -215,6 +283,31 @@ mod tests {
         write(&mut s, "xyz");
         assert_eq!(s.all(3).count(), 1);
         assert_eq!(read(&s), "xyz");
+    }
+
+    #[test]
+    fn a_layout_break_ends_a_paragraph_too() {
+        // "…ende\n\n\u{5}Features" — the next paragraph starts on the F.
+        assert_eq!(
+            paragraph_ranges("ab\n\n\u{5}Fe"),
+            vec![0..3, 3..4, 4..5, 5..7]
+        );
+    }
+
+    #[test]
+    fn paragraphs_tile_the_text_and_keep_their_newline() {
+        assert_eq!(paragraph_ranges("one\ntwo\nthree"), vec![0..4, 4..8, 8..13]);
+        assert_eq!(paragraph_ranges("one\ntwo\n"), vec![0..4, 4..8]);
+        assert_eq!(paragraph_ranges("no newline"), vec![0..10]);
+        assert_eq!(paragraph_ranges("\n"), vec![0..1]);
+        assert!(paragraph_ranges("").is_empty());
+    }
+
+    /// Paragraph ranges are counted the same way run indices are.
+    #[test]
+    fn paragraphs_count_utf16_code_units() {
+        assert_eq!(paragraph_ranges("\u{1F600}\nx"), vec![0..3, 3..4]);
+        assert_eq!(length("\u{1F600}\nx"), 4);
     }
 
     /// Indices are UTF-16 code units, so astral characters count as two.
