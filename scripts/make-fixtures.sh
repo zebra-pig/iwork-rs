@@ -101,7 +101,7 @@ build() {
 	local name=$1 extension=$2 limit=$3
 	shift 3
 	local target=$dir/$name.$extension
-	local script=$here/applescript/$name.applescript
+	local script=${script_override:-$here/applescript/$name.applescript}
 
 	if [ ${#wanted[@]} -gt 0 ]; then
 		local match=0 candidate
@@ -145,7 +145,35 @@ build() {
 	return 1
 }
 
+# build_template NAME TIMEOUT TEMPLATE-ID [sheet to delete]
+#
+# The organised-table fixtures come from templates Apple ships, because
+# **nothing else can make them.** Numbers' scripting dictionary has no sort, no
+# filter, no category, no pivot and no conditional-highlighting command, and the
+# menu items that do have them need a document *window* — which needs an
+# unlocked screen, which an unattended Mac does not have. Apple's own templates
+# demonstrate exactly these features; creating a document from one makes Numbers
+# 15.3.1 write the whole structure out again, which is what a fixture is for.
+#
+# The template is named by `id` — the path inside the bundle, the same on every
+# Mac — and never by `name`, which is localised.
+#
+# A template-derived document is left open by its script (see the note there),
+# so each of these closes the app's documents afterwards rather than before.
+build_template() {
+	local name=$1 limit=$2
+	shift 2
+	script_override=$here/applescript/from-template.applescript
+	build "$name" numbers "$limit" "$@"
+	local status=$?
+	script_override=
+	osa_close numbers 60 || osa_reset numbers
+	return $status
+}
+
 printf 'building fixtures in %s\n' "$dir"
+
+script_override=
 
 osa_warm pages
 build pages-plain pages 120
@@ -157,6 +185,24 @@ osa_warm numbers
 build numbers-values numbers 180
 build numbers-formats numbers 240
 build numbers-large numbers 300 "$csv" "$(basename "$csv" .csv)"
+
+# Everything a table is *organised* by. One template per feature cluster:
+#
+#   categories  a two-level category on a text column, with a SUM summary row
+#               and the group tree Numbers keeps out of line
+#   pivot       two pivot tables over one source — one with rows, columns and a
+#               summed value, one deliberately left empty
+#   rules       a filter set with a real rule, rows the filter hid, columns the
+#               user hid, conditional-highlighting rules and custom cell formats
+#   sorted      a sort rule on one column
+#
+# `Stocks` also carries live stock-quote cells, which ground rule 8 says this
+# crate may carry and read but must never author — a fixture that proves the
+# carrying is worth having.
+build_template numbers-categories 240 "Application/21_BasicCategories/Traditional"
+build_template numbers-pivot 300 "Application/21_Pivot_Table_Basics/Traditional"
+build_template numbers-rules 300 "Application/26_Stocks/Traditional"
+build_template numbers-sorted 240 "Application/44_Notetaking_Colorful_Log_PM/Traditional"
 
 osa_warm key
 build keynote-deck key 240 "$png"
