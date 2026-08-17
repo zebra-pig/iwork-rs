@@ -158,8 +158,11 @@ build() {
 # The template is named by `id` — the path inside the bundle, the same on every
 # Mac — and never by `name`, which is localised.
 #
-# A template-derived document is left open by its script (see the note there),
-# so each of these closes the app's documents afterwards rather than before.
+# The existence check afterwards is not paranoia. `close ... saving no` on a
+# document that was just saved to a new location **deletes it**, silently and
+# minutes later, and the builder's own script had to be taught to close with
+# `saving yes` instead. A fixture that is not on disk when its builder said it
+# was is worth failing over rather than discovering three steps downstream.
 build_template() {
 	local name=$1 limit=$2
 	shift 2
@@ -167,7 +170,12 @@ build_template() {
 	build "$name" numbers "$limit" "$@"
 	local status=$?
 	script_override=
-	osa_close numbers 60 || osa_reset numbers
+	if [ "$status" = 0 ] && [ ! -e "$dir/$name.numbers" ]; then
+		printf '  %-24s VANISHED after the app said it saved it\n' "$name.numbers" >&2
+		failed=$((failed + 1))
+		built=$((built - 1))
+		return 1
+	fi
 	return $status
 }
 

@@ -50,11 +50,17 @@ on run argv
 			end try
 			error message number code
 		end try
+		-- **`saving yes`, and it matters.** A document made from a template and
+		-- saved to a new location is still, to the app, an editing session that
+		-- has not been committed: `close doc saving no` on one does not answer
+		-- for minutes and then **deletes the file that was just written**.
+		-- Three fixtures were lost that way, each time to something else
+		-- closing the app's documents later. `saving yes` returns at once and
+		-- leaves the document on disk. The document is already saved, so this
+		-- writes nothing new.
+		with timeout of 120 seconds
+			close doc saving yes
+		end timeout
 	end tell
-	-- The document is deliberately left open. `close` on a document that has
-	-- just been saved to a new location does not answer — not with `saving no`,
-	-- not inside `with timeout` — and the file is on disk by then, so the
-	-- script returns and the caller's own close/reset clears the app. Closing
-	-- from a *separate* Apple event works, which is what that is.
 	return "from " & templateID & ", " & answer & " sheet(s)"
 end run

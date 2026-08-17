@@ -114,14 +114,32 @@ not one.
 
 Everything layered on top of the cells; depends only on Phase 1.
 
-- [ ] Sort rules and filter rule sets (with the enabled/disabled toggle).
-- [ ] Categories: source column, subcategories, group membership and order,
+- [x] Sort rules and filter rule sets (with the enabled/disabled toggle).
+      *(Rules are read down to `predicate_type`, the qualifiers, the per-rule
+      column and enable flag, and any immediate value. The **condition itself**
+      is a `TSCE` formula in the shape 15.3.1 writes, so "greater than 500"
+      reads as "predicate 37 against a formula" until Phase 5.)*
+- [x] Categories: source column, subcategories, group membership and order,
       summary-row aggregate assignments, per-group collapsed state.
-- [ ] Conditional highlighting rules; custom cell formats (named,
+      *(Two shrinks, both for want of a document: **subcategories** — the
+      recursive group tree is decoded, but no template ships a category more
+      than one level deep, so nesting is unexercised; **per-group collapsed
+      state** — located, decoded from `collapsed_group_uids`, and empty
+      everywhere, because no template ships a collapsed group and no script can
+      collapse one. Both are marked Unverified in FORMAT.md. Of the aggregate
+      codes only `2 = Sum` is proven.)*
+- [x] Conditional highlighting rules; custom cell formats (named,
       document-scoped, with conditional sub-rules).
-- [ ] Pivot tables: source reference, field assignments, summary functions,
+      *(Conditional sub-rules of a custom format are counted, not decoded: the
+      one custom format in the corpus has none.)*
+- [x] Pivot tables: source reference, field assignments, summary functions,
       display modes, totals toggles — read and inventory.
-- [ ] FORMAT.md §Tables extended; pass-through tests so a save never damages
+      *(`show_as_type` — the display mode — is read and is 0 on every field in
+      the corpus, so its other values are unverified.)*
+- [x] Hidden rows and columns actually exercised, which Phase 1 could not do.
+      `hidingState` 1 is the user, 2 is a filter; the model's five hidden
+      counts are zero in a document that hides both.
+- [x] FORMAT.md §Tables extended; pass-through tests so a save never damages
       any of it.
 
 ## Phase 2 — Tables: write
@@ -485,6 +503,119 @@ fixture, and what the app accepted.
     `=B3*2` without anything here understanding the formula.
   - **`iwork cells --raw`** prints the record header and every key for each
     cell. It is the tool for the next question about this format.
+
+- 2026-08-18 — **Phase 1b complete (table data organisation, read).** New
+  section in `src/table.rs`, `iwork organise`, FORMAT.md §5 "How a table is
+  organised", twelve registry entries, and four new fixtures. `cargo fmt
+  --check` and `cargo clippy -D warnings` clean; `cargo test --all-targets`
+  green: 68 unit + 15 fixture + 34 style + 22 table + 3 doc tests. Nothing
+  writes to a table.
+
+  **The fixture problem, and how it was actually solved.** The plan assumed UI
+  scripting. It could not be used: the Mac's screen was locked for the whole
+  session (`CGSSessionScreenIsLocked` true, display asleep), and a locked screen
+  means **no `AXWindow` at all** — `System Events` reports the menu bar and zero
+  windows, every menu item validates as disabled, and `activate` never returns.
+  Accessibility permission was fine; there was simply nothing to drive.
+  Selecting cells without the UI works (`set selection range of table … to
+  range "A4:A5"`), but the menu item that would act on the selection stays
+  disabled without a key window, so `Table ▸ Hide Rows` did nothing, twice.
+
+  What worked instead: **Apple ships templates built around exactly these
+  features.** Scanning all 79 bundled `.nmbtemplate` bundles with this crate for
+  the TST category/pivot/filter types found `21_BasicCategories` (a category
+  with a SUM summary), `21_Pivot_Table_Basics` (two pivots, one deliberately
+  empty), `26_Stocks` (a filter that hides rows, columns hidden by hand,
+  conditional highlighting, a custom cell format) and
+  `44_Notetaking_Colorful_Log_PM` (a sort rule). `make new document with
+  properties {document template: …}` then has **Numbers 15.3.1 write the whole
+  structure out again**, which is what a fixture is for. Templates are addressed
+  by `id` — `Application/21_BasicCategories/Traditional`, the path inside the
+  bundle — never by the localised `name`.
+
+  Two app behaviours cost time and are now recorded in the scripts. `close doc
+  saving no` on a document that has just been saved to a new location does not
+  answer for minutes **and deletes the file that was just written** — three
+  fixtures were lost that way before `saving yes` (which returns at once) fixed
+  it, and `build_template` now fails loudly if a fixture is not on disk after
+  its builder said it was. And no template in the bundle has a collapsed
+  category group, a category more than one level deep, or a hidden row that a
+  filter did not hide.
+
+  **What the documents proved, feature by feature.**
+
+  | Feature | Fixture | Evidence |
+  |---|---|---|
+  | Sort rule | `numbers-sorted` | one rule, column C ascending; every other table's `TableSortOrderArchive` is present and empty |
+  | Filter set | `numbers-rules` | one rule on column A, set enabled, match All; the rows it hides are the nine whose `hidingState` is 2 |
+  | Hidden rows/columns | `numbers-rules` | three columns `hidingState` 1 = user-hidden, matching the extent's three `user_hidden` entries exactly; nine rows `hidingState` 2 = filter-hidden |
+  | Category | `numbers-categories` | grouped by column B; the two groups' rows are exactly the rows whose column B holds `Andy` / `Chloe`; summary = Sum on column E |
+  | Pivot | `numbers-pivot` | fields resolve to columns 2, 1, 0, 3 of `Sales` — which is what the app drew in the pivot table beside them: `Power`, `Product`, `Date (Month)`, `Units (Sum)` |
+  | Conditional highlighting | `numbers-rules` | four rules, predicates 7 and 9 against `"0"` and 36 against `"↑"`/`"↓"`, each with a cell and a text style |
+  | Custom cell format | `numbers-rules` | `Millions`, `format_type` 270, `#,###.##M`, document-scoped |
+  | Pass-through | all four | a save reproduces every entry byte for byte, asserted by name |
+
+  **Four things the published references get wrong, each found the hard way.**
+
+  - `ColumnRowUIDMapArchive` field 1 is `sorted_column_uids` — sorted **by
+    UUID**, not by position — with field 2 giving each one's index. A positional
+    reading is right for every column that is a fixed point of that permutation,
+    which in a five-column table is most of them.
+  - **Filters are written in the pre-pivot slot** (`FilterSetArchive` field 3),
+    not the field 7 the references call current. **Conditional highlighting is
+    written in both**, and only the current shape carries the value the rule
+    compares against — read both and you double-count, read only the old one and
+    the values vanish.
+  - The model's five hidden-row/column counts (fields 14, 15, 40, 41, 42) are
+    **all zero** in a document with three hidden columns and nine hidden rows.
+    Only `hidingState` is reliable. Phase 1's `iwork tables` line was reporting
+    those counts and would have said "nothing hidden".
+  - A pivot's `source_table_uid` is **not equal** to the source table's
+    `haunted_owner.owner_uid`: the lower halves differ by a small constant (35),
+    because every owner a table has is a numbered offset from one base UUID. The
+    upper half is the table's identity and is what joins.
+
+  Also worth keeping: a document with three tables carries **seven** empty
+  `FilterSetArchive`s and an empty `TableSortOrderArchive` per table, so "has
+  one" is not "uses one"; 15.3.1 writes categories **twice**, inline at the
+  deprecated `TableModelArchive` field 81 and by reference at field 86; and
+  `format_type` **270** (a custom format) is outside the 256–269 range Phase 1
+  recorded.
+
+  **What stays Unverified, and why.** Nested subcategories and per-group
+  collapsed state: both are decoded — the group tree recurses, and
+  `HiddenStateExtentArchive.collapsed_group_uids` is the only persisted home for
+  a collapse — but no template ships either and no script can make one. A
+  custom format's conditional sub-rules are counted, not decoded, for the same
+  reason. Aggregate codes other than `2 = Sum` and every `predicate_type` code
+  are reported as numbers; Apple publishes no names and this corpus has four
+  predicate values from one document. `show_as_type` (a pivot's display mode) is
+  read and is 0 everywhere.
+
+  `numbers-rules` comes from the `My Stocks` template and carries **live
+  stock-quote cells** — ground rule 8's "read and pass through, never author",
+  now exercised by a fixture. Its quote values and the extent's filtered-row
+  list change between rebuilds, so the tests assert its structure and never its
+  numbers.
+
+  What Phase 2 (cell writes) must know:
+
+  - **A cell that is hidden, filtered, categorised or highlighted is still an
+    ordinary cell record**; none of this phase's structures live in the tile.
+    But four of them are *keyed off the cell*: the conditional-style key
+    (`0x80`) and conditional-rule key (`0x100`) in the flag word reach a
+    `ConditionalStyleSetArchive`, and a written cell that drops them loses its
+    highlighting.
+  - **Writing a cell changes nothing about a category or a filter by itself,
+    and that is the danger.** A category's group nodes carry row *index* ranges
+    and a filter's hidden state carries row *UUIDs*; a write that adds or moves
+    a row must update both or the document opens with groups that claim the
+    wrong rows. Editing a value in place does not.
+  - `TableModelArchive` fields 14, 15, 40, 41 and 42 are dead in 15.3.1 output —
+    do not maintain them and do not trust them.
+  - Row and column UUIDs are allocated per table and **collide across tables**:
+    two freshly created five-column tables in different documents have the same
+    five column UUIDs. Any UUID index must be per table.
 
 ## Execution notes
 
