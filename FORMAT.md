@@ -763,6 +763,272 @@ the cell the merge began in.** `B2:D2` comes back as `B2 B2 B2`, which is a
 merge map by another route, and `tests/tables.rs` checks the decoded merges
 against it.
 
+### How a table is organised
+
+Everything above is the cell grid. Layered on top of it are the sort rules and
+filters that decide which rows are shown and in what order, the categories that
+group them, the conditional-highlighting rules that recolour them, the custom
+formats that reformat them, and the pivot tables that summarise them.
+
+**None of this is addressable by index.** Cells are; organisation is not. Every
+row, column, group and owner carries a `TSP.UUID` (`{1: lower, 2: upper}`),
+because a sort or a filter moves indexes and a UUID survives it.
+
+Everything below was read out of four documents Numbers 15.3.1 wrote from
+Apple's own templates — `Categories`, `Pivot Table Basics`, `My Stocks` and
+`Note Taking Colourful Log`. **Nothing in Numbers' scripting interface can
+sort, filter, categorise, highlight or pivot a table**, and the menu items that
+can need a document window, so a template is the only way this repository can
+produce one of these documents. `scripts/make-fixtures.sh` builds them; the
+recipe is a template `id` — the path inside the app bundle, which is the same
+on every Mac, unlike the localised `name`.
+
+#### The UUID index — `TST.ColumnRowUIDMapArchive` (6267)
+
+```
+1 repeated TSP.UUID sorted_column_uids     SORTED BY UUID, not by position
+2 repeated uint32   column_index_for_uid   the index of sorted_column_uids[i]
+3 repeated uint32   column_uid_for_index
+4 repeated TSP.UUID sorted_row_uids
+5 repeated uint32   row_index_for_uid
+6 repeated uint32   row_uid_for_index
+```
+
+`TableModelArchive` field 46 is the *base* map — the one to use. Field 6 of the
+table **info** points at a second one for the *view* order, which is longer,
+because a categorised table's view includes its summary rows.
+
+The trap is field 1's name. Reading `sorted_column_uids[i]` as "the UUID of
+column *i*" is correct for every column that is a fixed point of the
+permutation in field 2, which in a five-column table is usually most of them,
+so the mistake survives a casual check and then mislabels one pivot field.
+
+#### Hidden rows and columns
+
+`HeaderStorageBucket` field 3, `hidingState`, has two values in the corpus and
+both are in one document:
+
+| `hidingState` | Meaning |
+|---|---|
+| 0 | visible |
+| 1 | the user hid it |
+| 2 | a filter hid it |
+
+`numbers-rules.numbers` has three columns hidden by hand and nine rows hidden
+by a filter rule, and `tests/tables.rs` asserts both. Phase 1 could only report
+the number, because nothing in the scripting interface hides a row.
+
+**The model's hidden counts are not maintained.** `number_of_hidden_rows` (14),
+`number_of_hidden_columns` (15), `number_of_filtered_rows` (40),
+`number_of_user_hidden_rows` (41) and `number_of_user_hidden_columns` (42) are
+all **zero** in that document, while three columns and nine rows are hidden. A
+reader that trusts them reports a table with nothing hidden. Only `hidingState`
+is reliable.
+
+The other half is `TableModelArchive` field 70, an inline
+`HiddenStatesOwnerArchive`:
+
+```
+70 HiddenStatesOwnerArchive
+   1 TSP.UUID owner_uid
+   2 repeated HiddenStatesArchive
+     1 TSP.UUID hidden_states_uid
+     2 HiddenStateExtentArchive column_hidden_state_extent
+     3 HiddenStateExtentArchive row_hidden_state_extent
+
+HiddenStateExtentArchive
+   1 TSP.UUID hidden_state_extent_uid
+   2 repeated RowOrColumnState base_hidden_states
+        { 1: TSP.UUID row_or_column_uid, 2: user_hidden, 3: filtered,
+          4: pivot_hidden }
+   3 enum   row_or_column_direction   0 column, 1 row
+   7 repeated TSP.UUID collapsed_group_uids
+   8 Reference filter_set
+```
+
+For **columns** this agrees with `hidingState` exactly: the three entries with
+`user_hidden` are the three columns whose state is 1. For **rows** it does not —
+the extent carries an entry with `filtered` set for *every body row of the
+table*, not only the nine the filter hides. Whatever `base_hidden_states` means
+on the row side, it is not "the hidden rows"; the crate reads it and reports it
+separately, and `hidingState` is what answers the question.
+
+#### Sort — `TableModelArchive` field 44
+
+```
+44 TableSortOrderArchive
+   1 enum SortType   0 entire_table, 1 row_range
+   2 repeated SortRuleArchive { 1: uint32 index, 2: Direction 0 asc / 1 desc }
+```
+
+Every table in every document carries this field with `type = 0` and no rules;
+an empty archive is not a sort. `numbers-sorted.numbers` has one rule, on
+column index 2, ascending.
+
+#### Filters — `TST.FilterSetArchive` (6220)
+
+```
+1 enum FilterSetType     0 All (AND), 1 Any (OR)         default All
+2 bool is_enabled                                        default TRUE
+3 repeated FilterRulePrePivotArchive filter_rules_prepivot
+4 bool needs_formula_rewrite_for_import
+5 repeated uint32 filter_offsets      the column each rule is on
+6 repeated bool   filter_enabled      per-rule, for the field-7 rules
+7 repeated FilterRuleArchive filter_rules
+```
+
+A document with three tables carries **seven** of these, all eight bytes long
+and all empty — a table has a filter set whether or not it filters anything, so
+"has a filter set" is not "is filtered".
+
+**Numbers 15.3.1 writes field 3, the slot the published references call
+legacy** — not field 7, which they call current. The two are wire-incompatible
+at the same number and are told apart structurally: `FilterRulePrePivotArchive`
+is `{1: FormulaPredicatePrePivotArchive, 2: bool disabled}` whose predicate
+begins with a length-delimited *formula* at field 1, while `FilterRuleArchive`
+is `{1: FormulaPredicateArchive}` whose field 1 is a varint `predicate_type`.
+Field 1's wire type is the discriminator.
+
+`FormulaPredicateArchive` (current): `1 predicate_type`, `2/3 qualifier1/2`,
+`4/5/6 param_value0/1/2` (`FormulaPredArgArchive`, whose `arg_value` at 2 is a
+`FormulaPredArgDataArchive` — `1 double`, `4 string`, `5 date`, `6 duration`,
+`8 bool`), `7 formula`, `8 for_conditional_style`.
+`FormulaPredicatePrePivotArchive` (legacy): `1 formula`, `2 predicate_type`,
+`3/4 qualifier1/2`, `5/6/7 param_index1/2/0`.
+
+`predicate_type` codes are **not named here**. Apple publishes none, and this
+crate has four values from one document: 7 and 9 against a number, 36 against a
+string, 37 in a filter. Naming the rest would be a guess.
+
+#### Categories — `TST.GroupByArchive` (6373)
+
+Written **twice** in the same document: inline at `TableModelArchive` field 81,
+the field the schema marks `category_owner_deprecated`, and again by reference
+at field 86 through a `CategoryOwnerRefArchive` (6372), whose one repeated field
+is a list of references. The two hold the same tree. The referenced form is the
+one to prefer.
+
+```
+6373 GroupByArchive
+  1  TSP.UUID group_by_uid
+  2  repeated GroupColumnArchive   { 1: column_uid, 2: grouping_type,
+                                     3: grouping_functor, 4: grouping_column_uid }
+  3  GroupNodeArchive group_node_root       inline …
+  5  repeated ColumnAggregateArchive        the summary-row assignments
+  6  bool is_enabled                        the Categories switch
+  17 repeated Reference aggregator_ref  -> 6382
+  18 Reference group_node_root_ref      -> 6383   … and again by reference
+
+6383 GroupNodeArchive        ** field 2 does not exist **
+  1  TSP.UUID group_uid
+  3  repeated GroupNodeArchive child        inline …
+  5  repeated CellCoordinateArchive agg_formula_coords
+  6  FormatManagerArchive format_manager
+  7  CellValueArchive group_cell_value      the value the group is on
+  8  IndexSetArchive row_indexes
+  9  IndexSetArchive row_lookup_uids
+  10 repeated Reference child_ref           … and again by reference
+
+ColumnAggregateArchive
+  1 column_uid   2 level   3 agg_type   4 show_as_type
+```
+
+15.3.1 writes field 9 and not field 8, and its ranges are row indexes:
+`{range_begin, range_end}` **inclusive**. In the fixture the two groups claim
+rows 1–5 and 6–10, and those are exactly the rows whose grouping column holds
+`Andy` and `Chloe`.
+
+`agg_type` **2 is Sum**, proven twice: the pivot fixture's value column is drawn
+by the app as `Units (Sum)`, and the category fixture's accumulator for the same
+code holds 275, the sum of its ten values — not their count, mean, minimum or
+maximum. The other codes are unknown and are reported as codes.
+
+The summary rows themselves are a `TST.SummaryModelArchive` (6316) hanging off
+the table **info** at field 4, with its own inline `DataStore`. Its per-level
+heights and visibilities are the unbounded lists at fields **26–28**; the
+fixed five-level fields 11–25 are deprecated, and a fresh table writes six
+entries in each list.
+
+**Collapsed groups are `HiddenStateExtentArchive.collapsed_group_uids` (7)** —
+the only persisted home for the state; `TST.ExpandCollapseStateArchive` exists
+but appears solely inside command (undo) archives. **Unverified**: no template
+ships a collapsed group and no script can collapse one, so the field is decoded
+and empty everywhere here.
+
+#### Pivot tables — `TST.PivotOwnerArchive` (6370)
+
+```
+    ** there is no field 1 **
+2  TSP.UUID pivot_owner_uid
+3  GroupColumnListArchive grouping_columns_for_rows      { 1: repeated GroupColumn }
+4  GroupColumnListArchive grouping_columns_for_columns
+5  ColumnAggregateListArchive aggregate_columns          the Values well
+6  int32 flattening_dimension
+7  bool  is_empty_pivot
+8  TSP.UUID source_table_uid
+11 bool  hide_grand_total_rows
+12 string source_table_name
+13 bool  hide_grand_total_columns
+```
+
+Reached from `TableModelArchive` field 85; `TableInfoArchive.is_a_pivot_table`
+(16) is the flag that says which of the two tables sharing the archive is the
+pivot.
+
+**A pivot's fields name columns of its source table**, so resolving them needs
+that table's UUID map, not the pivot's own. The join is not equality:
+`source_table_uid` and the source's `haunted_owner.owner_uid`
+(`TableModelArchive` 84) **differ in their lower halves by a small constant** —
+35 in the fixture — because every owner a table has is a numbered offset from
+one base UUID. The **upper half is the table's identity** and is what matches.
+
+Checked against the app's own output: the pivot table Numbers drew in the same
+document reads `Power` and `Product` down the side, `Date (Month)` across the
+top and `Units (Sum)` for the values, and those are columns 2, 1, 0 and 3 of
+`Sales` — which is what the rules resolve to. The date field's `grouping_type`
+is 7 and it carries a `grouping_functor`; the plain ones are type 0 with none.
+
+#### Conditional highlighting — `TST.ConditionalStyleSetArchive` (6010)
+
+```
+1 uint32 ruleCount
+2 repeated ConditionalStyleRulePrePivot rules_prepivot
+3 ConditionalStyleRules rules   { 1: repeated ConditionalStyleRule }
+
+ConditionalStyleRule  { 1: FormulaPredicateArchive, 2: cell_style, 3: text_style }
+```
+
+Here — unlike the filter — **15.3.1 writes both slots, with the same rules in
+each**. They are not equivalent: only the current shape (field 3) carries the
+value the rule compares against, because the pre-pivot shape keeps it inside a
+formula. Reading both double-counts; reading only field 2 loses the values.
+
+A set is reached by key from the table's CONDITIONAL_STYLE `TableDataList`
+(`DataStore` field 18), so a whole column of highlighted cells shares one set
+and one key. The fixture's four rules come back as predicate 7 and 9 against
+`"0"` and predicate 36 against `"↑"` and `"↓"`, which is what its inspector
+shows.
+
+#### Custom cell formats — `TSK.CustomFormatListArchive` (222)
+
+Document-scoped, not table-scoped: one archive per document, and cells reach
+into it by UUID.
+
+```
+222 CustomFormatListArchive
+  1 repeated TSP.UUID uuids            parallel arrays
+  2 repeated CustomFormatArchive custom_formats
+        { 1: name, 2: format_type_pre_bnc, 3: FormatStructArchive default_format,
+          4: repeated Condition, 5: format_type }
+```
+
+`Condition` is `{1: condition_type, 2: float, 3: FormatStructArchive, 4: double}`
+— the conditional sub-rules a custom format can switch on. The format string the
+user typed is `FormatStructArchive.custom_format_string` (18).
+`numbers-rules.numbers` holds one: `Millions`, `format_type` 270,
+`#,###.##M`. **270 is outside the 256–269 range §Data formats records** and is
+not otherwise observed.
+
 ### What a Numbers document does not have
 
 No `TSWP.StorageArchive` anywhere: `iwork text` reads nothing out of a
