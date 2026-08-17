@@ -18,6 +18,14 @@ iwork — inspect and edit Apple iWork documents (.pages, .numbers, .key)
   iwork extract   <file> <dir>             write embedded media to a directory
   iwork roundtrip <file> <out>             decode and re-encode every object
 
+tables
+
+  iwork tables    <file>                   every table: size, headers, geometry
+  iwork cells     <file> <table> [--raw]   every cell of one table, with type and format
+  iwork csv       <file> <table>           one table as CSV
+
+A <table> is an object id, as printed by `iwork tables`, or a table name.
+
 text styles
 
   iwork styles       <file>                            every text style, with its object id
@@ -80,6 +88,10 @@ fn main() -> ExitCode {
         ["apply-style", file, storage, start, end, style, out] => {
             apply_style(file, storage, start, end, style, out)
         }
+        ["tables", file] => tables(file),
+        ["cells", file, table] => cells(file, table, false),
+        ["cells", file, table, "--raw"] => cells(file, table, true),
+        ["csv", file, table] => csv(file, table),
         ["properties"] => properties(),
         ["set-color", file, id, r, g, b, out] => set_color(file, id, r, g, b, out),
         ["paragraphs", file, storage] => {
@@ -214,6 +226,201 @@ fn objects(path: &str, filter: Option<u32>) -> Result<(), Error> {
 }
 
 /// The named style properties, with how far each name can be trusted.
+fn tables(path: &str) -> Result<(), Error> {
+    let doc = Document::open(path)?;
+    let tables = doc.tables();
+    if tables.is_empty() {
+        println!("no tables");
+        return Ok(());
+    }
+    for table in &tables {
+        let where_ = match &table.sheet {
+            Some(sheet) => format!("sheet {sheet}"),
+            None => table.stream.clone(),
+        };
+        println!(
+            "table {:<8} {:<24} {}×{} in {where_}",
+            table.identifier, table.name, table.rows, table.columns
+        );
+        println!(
+            "  headers: {} row(s){}, {} column(s){}, {} footer row(s)",
+            table.header_rows,
+            if table.header_rows_frozen {
+                " frozen"
+            } else {
+                ""
+            },
+            table.header_columns,
+            if table.header_columns_frozen {
+                " frozen"
+            } else {
+                ""
+            },
+            table.footer_rows
+        );
+        let hidden_rows: Vec<String> = table
+            .row_extents
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.hidden())
+            .map(|(i, e)| format!("{i}(state {})", e.hiding_state))
+            .collect();
+        let hidden_columns: Vec<String> = table
+            .column_extents
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.hidden())
+            .map(|(i, e)| format!("{i}(state {})", e.hiding_state))
+            .collect();
+        println!(
+            "  hidden: {} row(s) ({} by the user, {} by a filter), {} column(s) ({} by the user)",
+            table.hidden_rows,
+            table.user_hidden_rows,
+            table.filtered_rows,
+            table.hidden_columns,
+            table.user_hidden_columns
+        );
+        if !hidden_rows.is_empty() {
+            println!("  hidden rows: {}", hidden_rows.join(", "));
+        }
+        if !hidden_columns.is_empty() {
+            println!("  hidden columns: {}", hidden_columns.join(", "));
+        }
+        println!(
+            "  default size: {} × {} pt; {} stored cell(s)",
+            table.default_column_width,
+            table.default_row_height,
+            table.cells().len()
+        );
+        let sized_rows = table
+            .row_extents
+            .iter()
+            .filter(|e| e.size.is_some())
+            .count();
+        let sized_columns = table
+            .column_extents
+            .iter()
+            .filter(|e| e.size.is_some())
+            .count();
+        if sized_rows + sized_columns > 0 {
+            println!("  explicitly sized: {sized_rows} row(s), {sized_columns} column(s)");
+        }
+        for merge in &table.merges {
+            println!(
+                "  merged: {} spanning {} row(s) × {} column(s)",
+                reference_name(merge.row, merge.column),
+                merge.rows,
+                merge.columns
+            );
+        }
+        for problem in &table.problems {
+            println!("  problem: {problem}");
+        }
+    }
+    Ok(())
+}
+
+fn find_table(path: &str, wanted: &str) -> Result<iwork::Table, Error> {
+    let doc = Document::open(path)?;
+    doc.table(wanted)
+        .ok_or_else(|| Error::Format(format!("no table called '{wanted}' in {path}")))
+}
+
+fn cells(path: &str, wanted: &str, raw: bool) -> Result<(), Error> {
+    let table = find_table(path, wanted)?;
+    println!(
+        "table {} — {} — {}×{}",
+        table.identifier, table.name, table.rows, table.columns
+    );
+    for cell in table.cells() {
+        if cell.value.is_empty() && !raw {
+            continue;
+        }
+        let mut notes = Vec::new();
+        notes.push(cell.format.to_string());
+        if let Some(control) = cell.control {
+            notes.push(format!("control: {}", control.as_str()));
+        }
+        if cell.has_formula {
+            notes.push("formula".to_string());
+        }
+        if let Some(merge) = table.merge_at(cell.row, cell.column) {
+            notes.push(format!("merged {}×{}", merge.rows, merge.columns));
+        }
+        let suffix = if notes.is_empty() {
+            String::new()
+        } else {
+            format!("  [{}]", notes.join(", "))
+        };
+        println!(
+            "{:<6} {:<10} {}{suffix}",
+            reference_name(cell.row, cell.column),
+            cell.value.kind(),
+            cell.value.to_text()
+        );
+        if raw {
+            let r = &cell.record;
+            println!(
+                "       type {:<3} reserved {:02x}{:02x}{:02x}{:02x} extras {:04x} flags {:08x} \
+                 keys{}{}{}{}{}{}{}{}{}",
+                r.cell_type,
+                r.reserved[0],
+                r.reserved[1],
+                r.reserved[2],
+                r.reserved[3],
+                r.extras,
+                r.flags,
+                key(" string", r.string_id),
+                key(" rich", r.rich_id),
+                key(" cell-style", r.cell_style_id),
+                key(" text-style", r.text_style_id),
+                key(" formula", r.formula_id),
+                key(" control", r.control_id),
+                key(" format-kind", r.format_kind),
+                key(" number-format", r.number_format_id),
+                key(
+                    " other-format",
+                    r.format_id().filter(|_| r.number_format_id.is_none())
+                ),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn csv(path: &str, wanted: &str) -> Result<(), Error> {
+    let table = find_table(path, wanted)?;
+    for row in table.to_rows() {
+        let fields: Vec<String> = row.iter().map(|field| csv_field(field)).collect();
+        println!("{}", fields.join(","));
+    }
+    Ok(())
+}
+
+fn csv_field(text: &str) -> String {
+    if text.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", text.replace('"', "\"\""))
+    } else {
+        text.to_string()
+    }
+}
+
+fn key(label: &str, value: Option<u32>) -> String {
+    value.map(|v| format!("{label}={v}")).unwrap_or_default()
+}
+
+/// `A1`-style name for a cell, as the app writes it.
+fn reference_name(row: usize, column: usize) -> String {
+    let mut letters = String::new();
+    let mut n = column + 1;
+    while n > 0 {
+        let digit = (n - 1) % 26;
+        letters.insert(0, (b'A' + digit as u8) as char);
+        n = (n - 1) / 26;
+    }
+    format!("{letters}{}", row + 1)
+}
+
 fn properties() -> Result<(), Error> {
     println!("  {:<24} {:<12} evidence", "name", "path");
     for (name, path, confidence) in style::property::BY_NAME {
