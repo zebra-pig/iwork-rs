@@ -43,7 +43,7 @@ osa_bundle "$extension" >/dev/null || exit 2
 osa_acquire
 
 osa_warm "$extension" || exit 1
-osa_run "$timeout" "$here/applescript/drawable-oracle.applescript" "$document"
+osa_try "$extension" "$timeout" "$here/applescript/drawable-oracle.applescript" "$document"
 outcome=$?
 if [ "$outcome" -ne 0 ]; then
 	printf 'drawable-oracle: %s did not answer for %s (status %s)\n' \

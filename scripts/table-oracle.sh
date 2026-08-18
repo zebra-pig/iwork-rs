@@ -45,7 +45,7 @@ osa_warm numbers || exit 1
 # success for every failure and this script exited 0 with nothing to say. A
 # caller then saw an empty answer from a healthy-looking run, which is the one
 # failure mode a harness must never have. Take the status before testing it.
-osa_run "$timeout" "$here/applescript/table-oracle.applescript" "$document"
+osa_try "$extension" "$timeout" "$here/applescript/table-oracle.applescript" "$document"
 status=$?
 if [ "$status" -ne 0 ]; then
 	printf 'table-oracle: Numbers did not answer for %s (status %s)\n' "$document" "$status" >&2

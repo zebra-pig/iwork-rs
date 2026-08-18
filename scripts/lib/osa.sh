@@ -127,6 +127,39 @@ $(cat "$err")"
 	return "$status"
 }
 
+# osa_try EXTENSION SECONDS [osascript arguments...]
+#
+# osa_run, with a second chance from a cold app.
+#
+# A failure here has two causes and they look identical: the app is showing a
+# dialog about something it will not do — which is what the caller wants to
+# hear about — or the app is *busy*, which on a machine running six test
+# binaries at once it repeatedly was. Reporting the second as the first is the
+# failure this repository keeps meeting, in the direction that wastes an
+# afternoon: a green document reported as refused, a different one each run.
+#
+# So every call gets two attempts with a kill and a warm between them. An app
+# that genuinely will not do the thing will not do it twice; an app that was
+# busy is not busy from a cold start. The cost is one extra timeout on a real
+# refusal, which is a few minutes once rather than a wrong answer forever.
+osa_try() {
+	local extension=$1 limit=$2
+	shift 2
+	local attempt outcome=0
+	for attempt in 1 2; do
+		osa_run "$limit" "$@"
+		outcome=$?
+		[ "$outcome" -eq 0 ] && return 0
+		if [ "$attempt" = 1 ]; then
+			printf 'osa: no answer (status %s) — restarting the app and trying once more\n' \
+				"$outcome" >&2
+			osa_kill "$extension"
+			osa_warm "$extension"
+		fi
+	done
+	return "$outcome"
+}
+
 # Start an app and clear whatever it is already holding, so a build begins from
 # the same place every time.
 #

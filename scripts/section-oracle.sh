@@ -48,7 +48,7 @@ esac
 
 osa_acquire
 osa_warm pages || exit 1
-osa_run "$timeout" "$here/applescript/section-oracle.applescript" "$document"
+osa_try pages "$timeout" "$here/applescript/section-oracle.applescript" "$document"
 outcome=$?
 if [ "$outcome" -ne 0 ]; then
 	printf 'section-oracle: Pages did not answer for %s (status %s)\n' \

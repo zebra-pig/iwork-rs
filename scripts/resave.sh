@@ -39,7 +39,7 @@ osa_bundle "$extension" >/dev/null || exit 2
 
 osa_acquire
 osa_warm "$extension" || exit 1
-osa_run "$timeout" "$here/applescript/resave.applescript" "$document"
+osa_try "$extension" "$timeout" "$here/applescript/resave.applescript" "$document"
 outcome=$?
 if [ "$outcome" -ne 0 ]; then
 	printf 'resave: the app would not open or save %s (status %s)\n' "$document" "$outcome" >&2
