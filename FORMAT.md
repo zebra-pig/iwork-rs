@@ -2332,8 +2332,11 @@ them for:
 | 67 | `COLON_TRACT` | any range | 33 sticky bits, 40 tract |
 | 70 | `SPILL_RANGE` | postfix `#` | — |
 
-Forty node types and forty-eight function ids appear across the twenty-one
-fixtures, in 907 node arrays and 1582 nodes. Types this crate names but has
+Forty node types and forty-eight function ids appear across the corpus. The
+count of node arrays and nodes is not pinned here, because it grows with the
+fixtures — `every_formula_archive_re_encodes_to_its_own_bytes` prints the live
+tally (over a thousand arrays and two thousand nodes across the readable
+documents at the time of writing). Types this crate names but has
 never seen: `DATE`(20) and `DURATION`(21) literals, `TOKEN`(23), `THUNK`(26)
 with an inline nested array, the two legacy reference nodes (27, 28),
 `COLON`(29), `REFERENCE_ERROR`(30), `UNKNOWN_FUNCTION`(31), `COLON_NODE_WITH_UIDS`(45),
@@ -2411,10 +2414,14 @@ four required bools, `begin_row`, `begin_column`, `end_row`, `end_column` — an
   from `absolute_column[0]`, the end column from `relative_column[0]`.
 
 The saturation sentinels differ by axis: a row saturates at `0x7fffffff` and a
-column at `0x7fff`. A reference with both saturated is a stored `#REF!`, written
-as `REFERENCE_ERROR_WITH_UIDS` (46) with an `AST_tract_list` (38) of the UUIDs
-that used to be there. The fixture makes one by deleting a column after the
-formula pointing at it was written.
+column at `0x7fff`. A single-cell reference with **both** axes saturated is a
+stored `#REF!`, written as `REFERENCE_ERROR_WITH_UIDS` (46) with an
+`AST_tract_list` (38) of the UUIDs that used to be there. The fixture makes one
+by deleting a column after the formula pointing at it was written. A
+`COLON_TRACT_NODE` endpoint that lands on its axis's sentinel is the same error:
+this crate flags the range as `#REF!` rather than printing the sentinel as a
+column letter and a ten-digit row — a range can lose a single dimension where a
+single cell loses both at once.
 
 ### Cross-table references resolve by identity
 
@@ -2522,6 +2529,8 @@ no formula text for them:
 | `LINKED_CELL_REF` (63) | `#CELL` | The subject of a conditional-highlighting rule: a node with no coordinates at all. No dictionary reports a conditional rule, so there is nothing to match. `=#CELL>0` reads the way the rule reads. |
 | `LINKED_COLUMN_REF` / `LINKED_ROW_REF` | `#COLUMN`, `#ROW` | Same, unexercised. |
 | `CATEGORY_REF` (66) | `#CATEGORY!` | See below. |
+| a cross-table reference with an unresolvable owner UUID | `#TABLE!` | The AST carries an owner UUID that names no table this document holds — a deleted table, or an owner the walk of §"Cross-table references" could not follow. It must not fall through to a bare local reference indistinguishable from a same-table one. |
+| a thunk nested past the depth limit | `#DEPTH!` | A `THUNK_NODE` chain deeper than 256 (`THUNK_DEPTH_LIMIT`) stops with a marker rather than recursing — a hostile document, not anything the app writes. Validation returns a bounded error at the same depth. |
 
 And one function id has no name anywhere: **337**, the internal function behind
 a spilled cell, which **Numbers itself prints as `(null)`** — so this crate

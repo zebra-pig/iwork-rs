@@ -494,7 +494,7 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | Replace an image's bytes; registry and drawables stay in step | — | — | ✅ |
 | A replacement is refused when edit state would make it a lie | ✅ | — | ✅ |
 | Formulas: the AST, its 40 node types and 48 function ids in this corpus | ✅ | ✅ | — (no fixture) |
-| Every formula archive re-encodes to the bytes it came from (907 of them) | ✅ | ✅ | ✅ |
+| Every formula archive re-encodes to the bytes it came from (every one in the corpus) | ✅ | ✅ | ✅ |
 | Every formula validates field by field against the 15.3.1 schema | ✅ | ✅ | ✅ |
 | The reference model: absolute/relative per axis, whole row, whole column | ✅ | ✅ | — |
 | Number literals from their decimal128, not from the double beside it | ✅ | ✅ | — |
