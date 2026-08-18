@@ -297,10 +297,20 @@ for the body, headline, pull quotes, captions, chart labels and credits.
 > A paragraph table may also carry a final entry at the *end* of the text, which
 > is where the style of a paragraph not yet typed comes from.
 
-Paragraphs end at `\n` — and also at **`U+0005`**, which appears where a
-document changes layout mid-storage, and at **`U+0004`**, which marks a section
-boundary. The paragraph table puts a run immediately after either, so reading
-one as ordinary text splits the paragraphs one character wrong.
+Paragraphs end at `\n` — and at **`\r` `U+000D`**, at **`U+0005`**, which appears
+where a document changes layout mid-storage, and at **`U+0004`**, which marks a
+section boundary. The paragraph table puts a run immediately after any of them,
+so reading one as ordinary text splits the paragraphs one character wrong.
+
+**`\r` is the separator the apps write most often.** AppleScript's `return` is a
+carriage return, so every document built by script has them: `pages-styled`'s
+body reads `Überschrift\rEin roter Absatz…` and its paragraph table holds
+`[0, 12, 74, 128]` — the character after each `\r`. Reading `\r` as ordinary
+text makes a four-paragraph storage look like one paragraph of 171 characters,
+which is what this crate did until the paragraph tables of all 389 storages in
+the corpus were checked against the paragraph starts. With `\r` counted, every
+one of them is *exactly* the paragraph starts, plus in 276 cases a trailing
+entry at the end of the text.
 
 `U+0004` was found in a document Pages built from its "Project Proposal"
 template, whose body storage reads `…123-4567\n\u{4}Company Name\n` at each of

@@ -344,7 +344,7 @@ fn the_paragraph_table_holds_entries_at_paragraph_starts() {
                 .into_iter()
                 .map(|r| r.start)
                 .collect();
-            if starts.len() < 2 {
+            if starts.is_empty() {
                 continue;
             }
             let Some(table) = storage

@@ -41,10 +41,20 @@ pub const ATTRIBUTE_TABLES: &[u32] = &[5, 7, 8, 9, 11, 12, 15, 16, 17];
 
 /// Characters that end a paragraph.
 ///
-/// `\n` is the obvious one. The other two are not obvious and matter, because
+/// `\n` is the obvious one. The others are not obvious and matter, because
 /// the paragraph-style table puts a run immediately *after* each of them:
 /// reading one as ordinary text splits the paragraphs one character wrong,
 /// which is enough to make a paragraph style land in the wrong place.
+///
+/// **`\r` (`U+000D`) is the one this crate had wrong**, and it is the one the
+/// apps write most often, because AppleScript's `return` is a carriage return
+/// and every fixture built by script therefore has them. In `pages-styled`,
+/// whose body reads `Überschrift\rEin roter Absatz…`, the paragraph table holds
+/// `[0, 12, 74, 128]` — the characters after each `\r` — while
+/// [`paragraph_ranges`] saw one paragraph of 171 characters. Four storages in
+/// the corpus were affected, in Pages and in Keynote. It went unnoticed because
+/// the test that would have caught it skips storages it believes have fewer
+/// than two paragraphs, which is exactly what this bug made them look like.
 ///
 /// `U+0005` appears where a Pages document changes layout mid-storage.
 /// Verified in a Pages article at `…\n\n\u{5}Features\n`, where the run sits on
@@ -56,7 +66,7 @@ pub const ATTRIBUTE_TABLES: &[u32] = &[5, 7, 8, 9, 11, 12, 15, 16, 17];
 /// paragraph table has a run on the `C`. It also turns up alone as the whole of
 /// a body storage in a document whose text lives in shapes, which is the same
 /// character doing the same job with nothing either side of it.
-pub const PARAGRAPH_BREAKS: &[u16] = &[0x000A, 0x0005, 0x0004];
+pub const PARAGRAPH_BREAKS: &[u16] = &[0x000A, 0x000D, 0x0005, 0x0004];
 
 /// Length of a storage's text in UTF-16 code units — the unit run indices are
 /// counted in.
@@ -301,6 +311,14 @@ mod tests {
             paragraph_ranges("ab\n\n\u{5}Fe"),
             vec![0..3, 3..4, 4..5, 5..7]
         );
+    }
+
+    /// The break the apps actually write: AppleScript's `return` is a carriage
+    /// return, and Pages and Keynote store it as the paragraph separator.
+    #[test]
+    fn a_carriage_return_ends_a_paragraph() {
+        assert_eq!(paragraph_ranges("ab\rcd\r"), vec![0..3, 3..6]);
+        assert_eq!(paragraph_ranges("Überschrift\rEin"), vec![0..12, 12..15]);
     }
 
     #[test]
