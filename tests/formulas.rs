@@ -162,6 +162,48 @@ fn every_formula_archive_re_encodes_to_its_own_bytes() {
     assert!(arrays > 0, "the corpus has formulas in it");
 }
 
+/// A structural claim the corpus round-trip cannot make, because that test
+/// pre-filters on `validate() && is_well_formed()` and then asserts them: a
+/// hand-built `=1+2` decodes, validates, evaluates as a program, re-encodes to
+/// its own bytes and prints the text it should. Any of those can fail.
+#[test]
+fn a_hand_built_ast_round_trips_and_prints() {
+    let leaf = |fields: &[(u32, Value)]| {
+        let mut message = Message::default();
+        for (number, value) in fields {
+            message.fields.push(iwork::pb::Field {
+                number: *number,
+                value: value.clone(),
+            });
+        }
+        Value::Bytes(message.encode())
+    };
+    let number = |value: f64| {
+        leaf(&[
+            (1, Value::Varint(u64::from(node::NUMBER))),
+            (4, Value::Fixed64(value.to_le_bytes())),
+        ])
+    };
+    let mut array = Message::default();
+    for element in [
+        number(1.0),
+        number(2.0),
+        leaf(&[(1, Value::Varint(u64::from(node::ADDITION)))]),
+    ] {
+        array.fields.push(iwork::pb::Field {
+            number: 1,
+            value: element,
+        });
+    }
+    let bytes = array.encode();
+    let ast = Ast::decode(&array).expect("a node array");
+    ast.validate().expect("every field is one the schema has");
+    assert!(ast.is_well_formed(), "1 2 + leaves exactly one value");
+    assert_eq!(ast.encode(), bytes, "re-encodes to its own bytes");
+    let names = formula::Names::default();
+    assert_eq!(ast.text(Site::anonymous(&names)), "1+2");
+}
+
 /// Every node type the corpus uses is one this crate names, and every function
 /// id resolves — except the two that deliberately do not.
 ///
