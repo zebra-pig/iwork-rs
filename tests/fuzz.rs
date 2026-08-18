@@ -42,7 +42,10 @@
 //! stream, which makes a document that opens and whose object 1732608 is
 //! nonsense — a plausible document with wrong numbers in it, which is what runs
 //! through the table decoder, the formula ASTs, the attribute tables and the
-//! chart grids. Every reader the crate exposes is called on whatever comes out.
+//! chart grids. Every reader the crate exposes is called on whatever comes out,
+//! and so is every **pretty-printer**: the formula and predicate text, which
+//! recurse, and which a review found two ways to hang because this sweep used
+//! to stop at the decoders and never print what they produced.
 //!
 //! ## The budget
 //!
@@ -408,7 +411,8 @@ fn read_everything(doc: &mut Document) {
         let _ = doc.text_style(style.identifier);
         let _ = doc.text_style_usage(style.identifier);
     }
-    for table in doc.tables() {
+    let tables = doc.tables();
+    for table in &tables {
         let _ = table.rows;
         for row in 0..table.rows.min(64) {
             for column in 0..table.columns.min(64) {
@@ -421,6 +425,45 @@ fn read_everything(doc: &mut Document) {
         let _ = table.to_rows();
         let _ = table.formula_cells();
         let _ = table.names();
+    }
+    // The pretty-printer — the largest recursive surface in the crate, and the
+    // one a mutation fuzzer never reached before the review found two ways to
+    // hang it there. Every formula and every rule condition is printed, which
+    // is what drives `formula::Ast::text` over hostile bytes.
+    let index = iwork::table::names(&tables);
+    for cell in iwork::table::formulas(&tables) {
+        let _ = cell.text;
+    }
+    for (position, table) in tables.iter().enumerate() {
+        if let Some(filter) = &table.filter {
+            for rule in &filter.rules {
+                let _ = iwork::table::predicate_text(
+                    &rule.predicate,
+                    &index,
+                    position,
+                    rule.column.unwrap_or(0),
+                );
+            }
+        }
+        for set in &table.conditional_styles {
+            for rule in &set.rules {
+                let _ = iwork::table::predicate_text(&rule.predicate, &index, position, 0);
+            }
+        }
+        let _ = &table.sort_rules;
+        let _ = &table.categories;
+        let _ = &table.pivot;
+        let _ = table.row_states.user_hidden.len();
+        let _ = table.column_states.user_hidden.len();
+    }
+    for chart in doc.charts() {
+        let _ = chart.series();
+        let _ = chart.categories();
+        if let Some(references) = &chart.references {
+            for reference in &references.data {
+                let _ = reference.to_text();
+            }
+        }
     }
     for slide in doc.slides() {
         let _ = slide.title;
