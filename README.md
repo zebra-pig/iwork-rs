@@ -111,7 +111,14 @@ iwork charts    Budget.numbers            # every chart: type, placement, the da
 iwork sections  Report.pages              # sections, their text ranges, page
                                           # numbering, headers and footers
 iwork structure Report.pages              # mode, paper, page templates, threads,
-                                          # contents lists, footnotes, columns
+                                          # contents lists, footnotes, columns,
+                                          # change-tracking switches
+
+iwork metadata  Report.pages              # the two plists, the identity, the build
+                                          # history, locale, template, custom formats
+iwork annotations Report.pages            # authors, comments and their anchors,
+                                          # tracked changes — none of which exists
+iwork duplicate Report.pages copy.pages   # a copy with a *new* document identity
 
 iwork styles       Report.pages           # every text style, with its object id
 iwork style        Report.pages 3712      # one style, field by field, and what uses it
@@ -467,6 +474,17 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | Sparse series arrays sized by `count`, not by their entries | ✅ | ✅ | ✅ |
 | A chart too new for an old reader carries a down-level type patch | — | ✅ | — |
 | Every chart-domain archive re-encodes to its bytes (2090 of them) | ✅ | ✅ | ✅ |
+| Both plist forms in the package read; the binary one round-trips (945 of them) | ✅ | ✅ | ✅ |
+| Identity agrees in all three places it is written | ✅ | ✅ | ✅ |
+| Locale, creation locale, document language, template id, custom-format list | ✅ | ✅ | ✅ |
+| A copy gets four new UUIDs and keeps the lineage; a plain save keeps all five | ✅ | ✅ | ✅ |
+| A copy's object streams are the original's, byte for byte | ✅ | ✅ | ✅ |
+| **Pages saves the re-identified copy twice and moves only the version** | ✅ | — | — |
+| A password-protected package is refused by name, hint and all | ✅ | (same shape) | (same shape) |
+| No comment, no reply, no tracked change and no author exists to decode, anywhere | ✅ | ✅ | ✅ |
+| Change tracking is off and its ten fields are at their defaults, everywhere | ✅ | — | — |
+| An edit through a tracked change is refused by name | ✅ | ✅ | ✅ |
+| Alt text (`accessibility_description`) read, in nine fixtures | ✅ | — | ✅ |
 
 Keynote is the gap in that block for one reason only — neither AppleScript nor
 any bundled theme will put a table on a slide, so there is no fixture. The
@@ -681,6 +699,33 @@ its own model. A header this crate invented badly does not survive that.
   written by this crate needs trying in the app before it is trusted —
   `scripts/app-check.sh` is how, and `IWORK_APP_CHECK=1 cargo test` runs it over
   every fixture, on a machine that has the apps.
+- **No comment, no reply and no tracked change exists to decode, anywhere.**
+  All 23 fixtures and all 901 templates the three apps ship carry exactly one
+  `TSK.AnnotationAuthorStorageArchive`, and in every one of those 924 it is
+  empty. No scripting dictionary has a comment command, a comment class or a
+  change-tracking property, and a template ships without review state, so
+  neither AppleScript nor template mining can produce one. Everything below the
+  author storage is therefore decoded from the 15.3.1 schema and marked
+  Unverified in `FORMAT.md`; the reader reports what it finds and never fails,
+  and two tripwire tests fail the day a fixture finally has one.
+- **An edit through a storage with tracked changes is refused.** A tracked
+  deletion keeps its characters — they are still in the text and Pages draws
+  them struck through — so `table_deletion` is not the run table it looks like,
+  and nothing available here can make the app perform such an edit to be
+  watched. `Error::TrackedChanges` declines and names the storage.
+- **A password-protected document is refused, not decrypted.** A locked package
+  is recognised by its `.iwpv2` entry, its hint is read out of `.iwph`, and
+  `Error::Encrypted` says so; every `Index/*.iwa`, every `Data/*` and the build
+  history are ciphertext. Setting or removing a password is something the apps
+  do and this crate does not.
+- **A copy needs a new identity, and the app agrees but iCloud could not be
+  asked.** `save_as_new` gives a copy four fresh UUIDs and keeps
+  `stableDocumentUUID`, which is what Pages' own Save As was measured doing —
+  and Pages then saves that copy repeatedly while moving only its `versionUUID`,
+  whereas it re-identifies a plain byte copy of its own accord. What could not
+  be shown is a *collision*: Pages opens an original and a byte-identical copy
+  side by side without complaint, and there is no iCloud account here to watch
+  the sync layer care.
 - **Applying a character style may not change how text looks.** Pointing a run
   at a different character style is accepted and survives a reopen, but has not
   been observed to change the rendering, so something else evidently wins.

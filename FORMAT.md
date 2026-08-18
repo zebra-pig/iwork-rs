@@ -33,6 +33,7 @@ carry their own compression already.
 | `Metadata/DocumentIdentifier` | Bare UUID, ASCII, no trailing newline |
 | `Metadata/BuildVersionHistory.plist` | XML plist: which app builds have written the file |
 | `preview.jpg`, `preview-web.jpg`, `preview-micro.jpg` | First-page thumbnails |
+| `.iwpv2`, `.iwph` | **Only in a password-protected package** — the key material and the hint (§11) |
 
 This layer is identical in all three apps. A Numbers document with no media has
 no `Data/` directory at all, but the rest is unchanged.
@@ -47,6 +48,11 @@ shareUUID         = '85848C13-7875-4C7E-BB9A-81BB1891ED72'
 documentUUID      = '85848C13-7875-4C7E-BB9A-81BB1891ED72'
 versionUUID       = '4F18C3C1-1479-49CA-84B9-895C6DDFFBF0'
 ```
+
+15.3.1 writes four more keys — `stableDocumentUUID`, `privateUUID` and two
+booleans — and `fileFormatVersion 26.3.1`. **§11** has the ten of them, which of
+them a copy may keep, and what a password-protected package looks like instead
+of all this.
 
 ---
 
@@ -2723,6 +2729,286 @@ bytes, and its behaviour in a real document is Inferred.
 
 ---
 
+## 11. Metadata and document identity
+
+Everything about a document that is not in the object graph, plus the handful
+of object fields that describe the document rather than its contents.
+
+### The two plists are not the same kind of plist
+
+`Metadata/Properties.plist` is a **binary** plist (`bplist00`);
+`Metadata/BuildVersionHistory.plist` is **XML**, Apple DTD and all;
+`Metadata/DocumentIdentifier` is 36 bytes of ASCII with no newline. A reader
+that assumes one plist form reports the other as a corrupt document. *Confirmed*
+— all 44 plists in the corpus and all 901 in the bundled templates parse, and
+the binary ones round-trip through this crate's writer to something `plutil`
+prints identically.
+
+The binary form is a flat object table with an offset index and a 32-byte
+trailer, and containers hold *indices* into that table rather than values.
+CoreFoundation's writer shares some objects and not others: a ten-key
+`Properties.plist` comes out as **21 objects for 20 values**, with one `false`
+referenced three times, two further `false`s written and referenced by nobody,
+and three equal UUID strings written out in full three times over. Sharing is
+invisible to a reader, so this crate's writer shares equal strings, emits no
+orphans, and produces 443 bytes where Pages produces 525. *Confirmed* by
+`plutil` and by Pages opening and re-saving the result.
+
+### The five UUIDs, and which one a copy keeps
+
+`Properties.plist` has ten keys in every document in the corpus and in all 901
+templates, and no eleventh anywhere:
+
+| Key | Type | What it is |
+|---|---|---|
+| `documentUUID` | string | this file's identity |
+| `shareUUID` | string | equal to `documentUUID` in all 924 documents |
+| `stableDocumentUUID` | string | the **lineage** — what this file was copied from |
+| `privateUUID` | string | |
+| `versionUUID` | string | this *save* |
+| `revision` | string | `"<generation>::<versionUUID>"`; the generation is 0 everywhere |
+| `fileFormatVersion` | string | `26.3.1` in 15.3.1's output |
+| `isMultiPage` | bool | |
+| `hasExternalReferenceOrMissingData` | bool | |
+| `hasUnmaterializedRemoteData` | bool | |
+
+`Metadata/DocumentIdentifier` is `documentUUID` again, byte for byte.
+*Confirmed* across the corpus by
+`every_document_identifies_itself_the_same_way_three_times`.
+
+**What Save As does**, measured: `pages-plain.pages` was opened by Pages and
+written to a second path with `save doc in file`, and the two compared.
+
+| Key | Save As |
+|---|---|
+| `documentUUID`, `shareUUID`, `privateUUID`, `versionUUID` | **all new** |
+| `revision` | new, `"0::"` + the new `versionUUID` |
+| `stableDocumentUUID` | **unchanged** |
+| `Metadata/DocumentIdentifier` | new, the new `documentUUID` |
+| `BuildVersionHistory.plist`, `fileFormatVersion`, the three booleans | unchanged |
+| the original file | untouched, byte for byte |
+
+*Confirmed.* `Document::save_as_new` implements exactly that table, and the
+lineage rule shows in the corpus without any probe: `numbers-large` and
+`numbers-links` were built by different routes and share the stable UUID
+`B95BC832-…`, because both descend from the same original.
+
+**The app settles it, twice over.** `iwork duplicate` then `resave.sh`: Pages
+read the rewritten `Properties.plist`, kept `documentUUID`, `shareUUID`,
+`privateUUID` and `stableDocumentUUID` exactly as this crate wrote them, and
+moved only `versionUUID` and `revision` — which is what a save does. Running it
+a second time did the same. A *byte copy* of the same fixture does not survive
+that treatment: Pages gives it a new `documentUUID`, `shareUUID` and
+`privateUUID` and keeps the stable one, re-identifying the file exactly the way
+`save_as_new` does. So the identity this crate writes is the one Pages
+considers settled, and a plain copy is one Pages considers unsettled.
+
+**What could not be shown.** Opening two documents at once does *not*
+distinguish them: Pages opens an original and a byte-identical copy
+simultaneously and reports two documents with two paths, exactly as it does for
+an original and a properly re-identified copy. The identity matters to the sync
+layer, and there is no iCloud account here to watch it matter. The claim that a
+fresh `documentUUID` prevents a collision therefore rests on the measured Save
+As behaviour and on the app re-identifying byte copies of its own accord —
+not on an observed collision. *Inferred.*
+
+### What the document archive says about itself
+
+The route is cross-app but the entry is not. `TSA.DocumentArchive` is the
+`super` of each app's document archive at a **different field number**:
+
+| App | Root archive | `super` field |
+|---|---|---|
+| Pages | `TP.DocumentArchive` (10000) | 15 |
+| Numbers | `TN.DocumentArchive` (1) | 8 |
+| Keynote | `KN.DocumentArchive` (1) | 3 |
+
+*Confirmed* in all three apps. Inside it:
+
+| Field | Name | Observed |
+|---|---|---|
+| 1 | `super` → `TSK.DocumentArchive` | always |
+| 3 | `document_language` | `en-GB` — a **proofing language**, not the locale |
+| 4 | `calculation_engine` → `TSCE.CalculationEngineArchive` (4000) | always |
+| 5 | `view_state` → `TSK.ViewStateArchive` (210) | always |
+| 7 | `tables_custom_format_list` | absent everywhere |
+| 9 | `template_identifier` | `Application/26_Stocks/Traditional` |
+| 12 | `custom_format_list` → `TSK.CustomFormatListArchive` (222) | always |
+
+and one level further in, `TSK.DocumentArchive`:
+
+| Field | Name | Observed |
+|---|---|---|
+| 4 | `locale_identifier` | `en_CH` |
+| 7 | `annotation_author_storage` → 213 | always |
+| 9 | `creation_locale_identifier` | `en_CH` |
+| 17 | `formatting_symbols` | calendar, numbering system, month and currency names |
+
+Field 12 is where the document-*scoped* custom format list lives, and it is the
+`TSK.CustomFormatListArchive` §5 already reads: `numbers-rules` points at the
+one holding its template's `#,###.##M`. *Confirmed.*
+
+**A five-byte string parses as a submessage.** `locale_identifier` is `en_US`,
+and `e` is `0x65` — the tag byte of a `fixed32` at field 12 — so those five
+bytes re-encode as a valid one-field message and a decoder that tries the
+submessage interpretation first reports the document's locale as `200061.72`.
+`iwork dump` does exactly that, which is how it was noticed. Read strings as
+strings.
+
+### Password-protected packages
+
+*Confirmed*, and the only thing in this area any scripting dictionary will do:
+`set password` is in the **shared iWork suite**, so Pages, Numbers and Keynote
+all have it, with a `hint` parameter and a read-only `password protected`
+property to check it took. Four locked documents were made — one per app, plus a
+re-lock of one with a different password and no hint — and they agree:
+
+| Entry | In a locked package |
+|---|---|
+| `.iwpv2` | **new**, 104 bytes, at the package root |
+| `.iwph` | **new**, the hint as raw UTF-8, nothing around it; absent with no hint |
+| `Index/*.iwa` | ciphertext |
+| `Data/*` | ciphertext |
+| `Metadata/BuildVersionHistory.plist` | ciphertext |
+| `Metadata/Properties.plist` | plain, unchanged in shape |
+| `Metadata/DocumentIdentifier` | plain |
+| `preview*.jpg` | **gone** |
+
+`.iwpv2` begins `02 00 01 00 A0 86 01 00` in all four — two 16-bit numbers, 2
+and 1, then a 32-bit 100000 — followed by 96 bytes that differ in every sample
+and in every re-lock. 100000 has the shape of a key-derivation iteration count
+and that is as far as the evidence goes; nothing here names those fields.
+
+Detection is the presence of `.iwpv2`, and it is exact: no unencrypted document
+in the corpus or in any of the 901 bundled templates has one. `Document::open`
+refuses with `Error::Encrypted`, carrying the hint. This crate does not decrypt
+and will not write an encrypted package.
+
+---
+
+## 12. Annotations — comments, authors and change tracking
+
+**Read the boundary first.** Everything in this section below the author
+storage is decoded from the 15.3.1 schema and **has never met a live example**.
+
+* All 23 fixtures and all 901 template bundles the three apps ship carry
+  exactly one `TSK.AnnotationAuthorStorageArchive` (213), and in every one of
+  those 924 its payload is **zero bytes long**. No authors, therefore no
+  comments and no tracked changes.
+* Not one document anywhere on this machine has a 212, a 2013, a 2014, a 2060,
+  a 2061, a 2062 or a 3056 in it, and no storage carries field 21, 22, 23 or 25.
+* No scripting dictionary will make one. `sdef` over all three apps finds
+  "annotation" only in Pages' `include annotations` *export* option, and
+  "change" not at all: there is no comment command, no comment class, and no
+  change-tracking property.
+* Template mining, the substitute for AppleScript everywhere else in this
+  repository, finds nothing either — a template ships without review state.
+
+So: the storage is *Confirmed*, and everything reachable from it is
+*Unverified*. It is written down because a document that arrives from somebody
+else's Mac will have all of it, and a reader that silently ignores a comment
+anchor is a reader that loses one. `tests/fixtures.rs` has the tripwires.
+
+### The graph
+
+```
+ TSK.AnnotationAuthorStorageArchive (213)     Index/AnnotationAuthorStorage*.iwa
+   └── annotation_author (1), repeated → TSK.AnnotationAuthorArchive (212)
+                                           name (1), color (2) TSP.Color,
+                                           public_id (3), is_public_author (4)
+
+ TSD.CommentStorageArchive (3056)   the comment, and each of its replies
+   ├── text (1), creation_date (2) TSP.Date, author (3) → 212
+   ├── replies (4), repeated → more 3056, in order
+   └── storage_uuid (5)
+```
+
+Reached from three places, one per thing a comment can be put on:
+
+| On | Route |
+|---|---|
+| text | `TSWP.StorageArchive` `table_highlight` (23) or `table_overlapping_highlight` (25) → `TSWP.HighlightArchive` (2013) → `commentStorage` (1) |
+| an object | `TSD.DrawableArchive.comment` (6) → 3056 |
+| a cell | `TST.TableDataList` with `listType = 10` (`COMMENT_STORAGE`), entry field 10 → 3056 |
+
+Two hops for text, not one: the table entry points at a `TSWP.HighlightArchive`
+and *that* points at the comment. The bubble drawn beside the page is a
+`TSWP.CommentInfoArchive` (2014), a `TSWP.ShapeInfoArchive` with the same
+comment storage at field 2.
+
+**The two text tables are not the same shape**, and this is the one claim here
+with real consequences. `table_highlight` (23) is a **run** table —
+`{character_index, reference}`, reaching to the next entry — while
+`table_overlapping_highlight` (25) carries an explicit `TSP.Range`, which is how
+two comments cover the same characters. An edit has to remap them differently,
+and this crate does.
+
+The cell route is the same string-table indirection every other cell payload
+uses: the cell holds a key, the list holds the comment. No list of type 10
+exists anywhere in the corpus.
+
+### Change tracking
+
+The document's half is `TP`, and only Pages has it:
+
+| Archive | Field | Name | Everywhere |
+|---|---|---|---|
+| `TP.DocumentArchive` | 40 | `change_tracking_enabled` | absent (false) |
+| | 16 | `change_sessions`, repeated | none |
+| | 17 | `most_recent_change_session` | absent |
+| `TP.SettingsArchive` | 12 | `show_ct_markup` (default true) | absent |
+| | 13 | `show_ct_deletions` (default true) | absent |
+| | 14 | `ct_bubbles_visibility` (int32) | absent |
+| | 15 | `change_bars_visible` (default true) | absent |
+| | 16 | `format_changes_visible` (default true) | absent |
+| | 17 | `annotations_visible` (default true) | absent |
+
+The fields are *Confirmed* to exist; every non-default value is *Unverified*.
+
+The text's half is two attribute tables:
+
+| Field | Name | Points at |
+|---|---|---|
+| 21 | `table_insertion` | `TSWP.ChangeArchive` (2060), `kind = 1` |
+| 22 | `table_deletion` | `TSWP.ChangeArchive` (2060), `kind = 2` |
+
+`TSWP.ChangeArchive` is `{kind (1), session (2) → TSWP.ChangeSessionArchive
+(2062), date (3), text_attribute_uuid_string (4)}`, and a session is
+`{session_uid (1), author (2) → 212, date (3)}`.
+
+**`ChangeKind` has no zero value.** Insertion is 1 and deletion is 2, so an
+archive whose kind field is absent or zero is an invalid archive rather than an
+insertion. A decoder that defaults an enum to its first variant gets this
+exactly wrong.
+
+**A tracked deletion keeps its characters.** The characters are still in the
+storage's text; the deletion is an entry covering them, and Pages draws them
+struck through. Two consequences, and both are load-bearing:
+
+* a reader that ignores field 22 shows deleted text as live text;
+* an edit that treats field 22 as an ordinary run table moves a deletion marker
+  onto characters nobody deleted.
+
+Which of the several possible remappings is right is a question for the app, and
+the app cannot be asked — there is no way to produce a tracked change here and
+watch one. `Document::replace_text` therefore **refuses** any storage carrying
+field 21 or 22, with `Error::TrackedChanges`. *Inferred* that a remap would be
+wrong; *certain* that guessing is worse than declining.
+
+### Alt text, which is not a comment but sits beside one
+
+`TSD.DrawableArchive.accessibility_description` (field 8) is the VoiceOver
+description, and it is the one thing in this area with a real oracle:
+`description` on an `image`, read-write in all three dictionaries, cocoa key
+`scriptAccessibilityDescription`. It is read by `Drawable::description` and
+shows in `iwork drawables`; nine fixtures carry one. *Confirmed.*
+
+The comment field beside it, `TSD.DrawableArchive.comment` (6), is read by
+`Drawable::comment` and is absent everywhere.
+
+
+---
+
 ## Writing documents
 
 Generate **from a template**, not from nothing. The container, the framing and
@@ -2809,3 +3095,19 @@ Rules a writer must respect:
     unrecognised one is far more likely to be a table than not. Refusing the
     edit is the safe answer; carrying it through unchanged while every other
     table moves is the unsafe one.
+19. **A copy is a different document, and saying so is four UUIDs.**
+    `documentUUID`, `shareUUID`, `privateUUID` and `versionUUID` all change and
+    the `revision` follows the version; `stableDocumentUUID` does not change,
+    because it is what says where the copy came from; and
+    `Metadata/DocumentIdentifier` is the new `documentUUID` again. A copy that
+    keeps the old identity is a second *version* of the original as far as the
+    sync layer is concerned. §11 has the measurement. Ordinary saves change
+    nothing here at all.
+20. **`Metadata/*` are stored ZIP entries beside `Index/`.** Rewriting one must
+    not disturb an object stream, and rewriting a *plist* must not disturb the
+    keys it does not mean to change — including keys this crate does not name.
+21. **Refuse an edit to a storage with tracked changes.** Fields 21 and 22 have
+    the shape of run tables and are not run tables in the way that matters: a
+    tracked deletion covers characters that are still in the text. Nothing
+    available can make the app perform such an edit to be watched, so declining
+    is the only honest option. §12.
