@@ -298,6 +298,51 @@ fn live_video_sources_are_read_and_named() {
     }
 }
 
+/// Alt text — `TSD.DrawableArchive.accessibility_description`, field 8 — is the
+/// one accessibility field the apps expose to a script (`description` of an
+/// `image`, read-write), and the corpus is full of it: Apple writes one on the
+/// photographs in its own templates.
+///
+/// This is the assertion the README row rests on. It is a tripwire as much as a
+/// measurement: a decoder that stopped reading the field would leave every one
+/// of these empty and nothing else in the suite would notice.
+#[test]
+fn alt_text_is_read_wherever_the_corpus_has_it() {
+    let mut documents = 0;
+    let mut descriptions = 0;
+    for path in every_fixture() {
+        let doc = Document::open(&path).unwrap();
+        let described: Vec<_> = doc
+            .drawables()
+            .into_iter()
+            .filter(|d| d.description.is_some())
+            .collect();
+        if described.is_empty() {
+            continue;
+        }
+        documents += 1;
+        for drawable in &described {
+            let text = drawable.description.as_deref().unwrap();
+            assert!(
+                !text.trim().is_empty(),
+                "{}: drawable {} has an empty description, which is not a description",
+                path.display(),
+                drawable.identifier
+            );
+            descriptions += 1;
+        }
+    }
+    if documents == 0 {
+        eprintln!("no fixtures — skipping");
+        return;
+    }
+    assert!(
+        documents >= 12 && descriptions >= 59,
+        "the corpus had 59 alt texts in 12 documents; this run found {descriptions} in \
+         {documents}, which means either the corpus or the decoder changed"
+    );
+}
+
 /// The media registry's digest is a raw SHA-1 of the file's bytes. Checked
 /// against every stored file in the corpus, which is what makes it safe for
 /// `replace_media` to compute one.
