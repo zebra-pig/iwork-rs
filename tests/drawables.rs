@@ -235,6 +235,32 @@ fn a_variation_style_inherits_what_it_does_not_override() {
     );
 }
 
+/// A shape owns its text, and the storage is two levels above the geometry —
+/// on the `TSWP.ShapeInfoArchive`, not on the shape or the drawable. Phase 4
+/// will want it: this is how the words in a slide's shapes are reached from the
+/// drawable side.
+#[test]
+fn a_shape_owns_its_text_storage() {
+    let path = fixture!("keynote-shapes.key");
+    let doc = Document::open(&path).unwrap();
+    let said: Vec<String> = doc
+        .drawables()
+        .into_iter()
+        .filter(|d| d.kind == Kind::Shape)
+        .filter_map(|d| d.text)
+        .filter_map(|storage| doc.storage_text(storage).ok())
+        .collect();
+    assert!(
+        said.iter().any(|text| text.contains("Ein Rechteck")),
+        "the shape's own words: {said:?}"
+    );
+    assert!(
+        said.iter()
+            .any(|text| text.contains("Ein Textfeld mit Größe")),
+        "the text box's words: {said:?}"
+    );
+}
+
 /// The wider media model, read but never authored: the Keynote theme ships two
 /// live-video sources, which ground rule 8 says this crate carries and reads
 /// and must not synthesise.

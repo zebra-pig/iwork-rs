@@ -1209,13 +1209,17 @@ pub fn drawables(document: &crate::Document) -> Vec<Drawable> {
     out
 }
 
-/// The `TSWP.ShapeInfoArchive` inside an object, if the drawable sits two
-/// levels down or more.
+/// The `TSWP.ShapeInfoArchive` inside an object.
+///
+/// It is two levels above the drawable archive — shape info, shape, drawable —
+/// so for a bare `TSWP.ShapeInfoArchive` that is the payload itself, and for a
+/// `KN.PlaceholderArchive` it is one level down.
 fn shape_info(archive: &Message, path: &[u32]) -> Option<Message> {
-    if path.len() < 2 {
+    let at = &path[..path.len().saturating_sub(2)];
+    if at.is_empty() {
         return Some(archive.clone());
     }
-    get_path(archive, &path[..path.len() - 2]).and_then(|value| match value {
+    get_path(archive, at).and_then(|value| match value {
         Value::Bytes(raw) => decode_nested(&raw),
         _ => None,
     })
