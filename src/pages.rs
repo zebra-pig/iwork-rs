@@ -119,13 +119,16 @@ pub mod document_field {
 /// The text's half is `table_insertion` (21) and `table_deletion` (22), and
 /// [`crate::annotations`] has both and what they cost an edit.
 ///
-/// **All of this is at its default in every document.** Pages' scripting
-/// dictionary has no change-tracking property — no `change tracking enabled`,
-/// nothing that reads or writes any of these — and no bundled template has
-/// review state in it, so `enabled` is false everywhere, `sessions` is empty
-/// everywhere, and the six display switches sit at the values the 15.3.1
-/// schema gives them. The fields are Confirmed to exist and every non-default
-/// value they can hold is Unverified.
+/// **`pages-tracked.pages` is the one document that has this on.** Track
+/// Changes was turned on there from the menu (an unlocked screen — Pages'
+/// dictionary has no change-tracking property), so `enabled` is true and
+/// `sessions` is 1, and its body storage carries the text half too — a
+/// `table_deletion` an edit is refused through, which is what
+/// [`tests`](crate::annotations) pins. Every other document in the corpus, and
+/// all 640 bundled templates, is at the schema defaults: `enabled` false,
+/// `sessions` empty, the six display switches at rest. Those switch values are
+/// still Confirmed-to-exist and Unverified-in-every-other-setting, because
+/// nothing here moves one on its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChangeTracking {
     /// `TP.DocumentArchive.change_tracking_enabled` (40).
@@ -150,7 +153,7 @@ pub struct ChangeTracking {
 }
 
 impl ChangeTracking {
-    /// Is this the state every document in the corpus is in?
+    /// Is this the state every document but `pages-tracked.pages` is in?
     pub fn is_default(&self) -> bool {
         !self.enabled
             && self.sessions == 0
@@ -171,9 +174,10 @@ pub mod settings_field {
     pub const HEADERS: u32 = 2;
     pub const FOOTERS: u32 = 3;
     pub const HYPHENATION: u32 = 9;
-    /// The six change-tracking *display* switches. Present in every document
-    /// and exercised by none: nothing in Pages' dictionary turns change
-    /// tracking on, so all six are at their schema defaults everywhere.
+    /// The six change-tracking *display* switches. Present in every document;
+    /// `enabled` is exercised by `pages-tracked.pages` but these six sit at
+    /// their schema defaults everywhere, because nothing in Pages' dictionary
+    /// moves one.
     pub const SHOW_CT_MARKUP: u32 = 12;
     pub const SHOW_CT_DELETIONS: u32 = 13;
     pub const CT_BUBBLES_VISIBILITY: u32 = 14;
@@ -238,11 +242,14 @@ impl Mode {
 
 /// How footnotes are gathered, as `TP.SettingsArchive` records it.
 ///
-/// **Nothing in this corpus or in any of the 901 bundled templates has a
-/// footnote**, so every value below is the default one and the named
-/// alternatives are Unverified — they are the enumerators of the 15.3.1
-/// schema, not observations. See [`Structure::footnotes`] for the containment
-/// this crate would read if a document had one.
+/// **`pages-footnotes.pages` has two footnotes**, so the containment
+/// [`Structure::footnotes`] reads is exercised at last — but these four
+/// *settings* are at their defaults in that document too (footnotes, numeric,
+/// continuous, a 10-point gap), and at the same defaults in every other
+/// document and all 640 bundled Pages templates. So the values below are
+/// Confirmed and the named alternatives are still Unverified — the enumerators
+/// of the 15.3.1 schema, not observations — because nothing here moves the
+/// mode, the format or the restart rule off its default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FootnoteSettings {
     /// 0 footnotes, 1 document endnotes, 2 section endnotes.
@@ -670,6 +677,28 @@ fn references(message: &Message, number: u32) -> Vec<u64> {
         .collect()
 }
 
+/// Every reference in a repeated field, each paired with **its index in the
+/// full field** — not its position among the ones that decoded.
+///
+/// The plain [`references`] filter drops any entry that is not a bare
+/// reference, so a header strip with a nil or unrecognised middle entry would
+/// slide the entries after it one slot to the left: the right-hand storage
+/// would come back labelled Centre. Keeping each survivor's true index labels
+/// zones by where they actually sit, and an entry past the third simply has no
+/// zone rather than displacing the ones before it.
+fn indexed_references(message: &Message, number: u32) -> Vec<(usize, u64)> {
+    message
+        .all(number)
+        .enumerate()
+        .filter_map(|(index, value)| match value {
+            Value::Bytes(raw) => decode_nested(raw)
+                .and_then(|r| reference_target(&r))
+                .map(|target| (index, target)),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Read the whole `TP` structure of a document.
 ///
 /// Returns `None` for a document that is not a Pages one — the caller has
@@ -854,7 +883,7 @@ pub fn structure(document: &crate::Document) -> Option<Structure> {
                 continue;
             };
             for (field, footer) in [(1u32, false), (2u32, true)] {
-                for (position, storage) in references(archive, field).into_iter().enumerate() {
+                for (position, storage) in indexed_references(archive, field) {
                     let Some(zone) = Zone::of(position) else {
                         continue;
                     };

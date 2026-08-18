@@ -22,8 +22,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use iwork::pages::Mode;
-use iwork::{Document, Error};
+use iwork::pages::{Mode, Zone};
+use iwork::{iwa, pb, Document, Error, Package};
 
 fn generated(name: &str) -> Option<PathBuf> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -455,15 +455,20 @@ fn deleting_a_section_break_is_refused() {
 fn writing_a_header_rewrites_one_stream_and_nothing_else() {
     let path = fixture!("pages-layout.pages");
     let doc = Document::open(&path).unwrap();
-    let header = doc
+    // A header or footer with text and no smart field: writing into one that
+    // carries a date field is not a no-op (it freezes the field — see the next
+    // test), so the byte-identity assertion at the end needs a plain one, and
+    // asserting about the very storage just edited means it has to be plain
+    // from the top. (pages-layout's plain text storage is a footer.)
+    let strip = doc
         .header_footers()
         .into_iter()
-        .find(|hf| !hf.footer && !hf.text.is_empty())
-        .expect("pages-layout has header text");
+        .find(|hf| !hf.text.is_empty() && smart_fields_of(&doc, hf.storage) == 0)
+        .expect("pages-layout has a plain header or footer with text");
 
     let mut edited = Document::open(&path).unwrap();
     edited
-        .set_text(header.storage, "Kopfzeile von iwork-rs")
+        .set_text(strip.storage, "Neuer Text von iwork-rs")
         .unwrap();
     assert_eq!(edited.changed_streams().len(), 1);
     assert!(edited.problems().is_empty(), "{:?}", edited.problems());
@@ -471,29 +476,22 @@ fn writing_a_header_rewrites_one_stream_and_nothing_else() {
     let found = edited
         .header_footers()
         .into_iter()
-        .find(|hf| hf.storage == header.storage)
+        .find(|hf| hf.storage == strip.storage)
         .unwrap();
-    assert_eq!(found.text, "Kopfzeile von iwork-rs");
-    assert_eq!(found.zone, header.zone);
-    assert_eq!(found.section, header.section);
-    assert!(!found.footer);
+    assert_eq!(found.text, "Neuer Text von iwork-rs");
+    assert_eq!(found.zone, strip.zone);
+    assert_eq!(found.section, strip.section);
+    assert_eq!(found.footer, strip.footer);
 
-    // Writing the text a storage already holds changes nothing at all — as
-    // long as nothing is anchored to the characters being replaced.
-    let plain = doc
-        .header_footers()
-        .into_iter()
-        .find(|hf| hf.storage == found.storage)
-        .map(|_| ())
-        .and(
-            doc.header_footers()
-                .into_iter()
-                .find(|hf| !hf.text.is_empty() && smart_fields_of(&doc, hf.storage) == 0),
-        )
-        .expect("a header or footer with text and no smart field");
+    // Writing a storage the text it already holds changes nothing at all — and
+    // this is the very storage just edited, re-opened clean, not some other
+    // strip that happens to be plain.
     let mut same = Document::open(&path).unwrap();
-    same.set_text(plain.storage, &plain.text).unwrap();
-    assert!(same.changed_streams().is_empty());
+    same.set_text(strip.storage, &strip.text).unwrap();
+    assert!(
+        same.changed_streams().is_empty(),
+        "rewriting a storage its own text is a no-op"
+    );
 }
 
 /// How many smart-field runs a storage carries — the reason rewriting a header
@@ -527,7 +525,17 @@ fn rewriting_a_header_that_holds_a_date_field_replaces_the_field_with_its_text()
         .into_iter()
         .find(|hf| smart_fields_of(&doc, hf.storage) > 0)
         .expect("the newsletter's header has a date field");
-    assert!(dated.text.contains("2026") || dated.text.contains("20"));
+    // The field rendered a full date, so the frozen text carries a four-digit
+    // 20xx year — not merely "20", which any time of day contains too.
+    let has_year =
+        dated.text.as_bytes().windows(4).any(|w| {
+            w == b"2026" || (w.starts_with(b"20") && w.iter().all(|b| b.is_ascii_digit()))
+        });
+    assert!(
+        has_year,
+        "the header's date field rendered a year: {:?}",
+        dated.text
+    );
 
     let mut edited = Document::open(&path).unwrap();
     let report = edited.set_text(dated.storage, "Kopfzeile").unwrap();
@@ -542,6 +550,105 @@ fn rewriting_a_header_that_holds_a_date_field_replaces_the_field_with_its_text()
         "the date field went with the text it rendered"
     );
     assert!(edited.problems().is_empty());
+}
+
+/// Replace the payload of the object `identifier` names, wherever in the
+/// package it lives, with `payload`.
+fn forge_object(path: &Path, identifier: u64, payload: Vec<u8>) -> Package {
+    let mut package = Package::read(path).unwrap();
+    let mut done = false;
+    for (name, data) in package.entries.iter_mut() {
+        if !name.ends_with(".iwa") {
+            continue;
+        }
+        let Ok(mut objects) = iwa::parse(data) else {
+            continue;
+        };
+        let mut touched = false;
+        for object in &mut objects {
+            if object.identifier == identifier {
+                object.messages[0].payload = payload.clone();
+                touched = true;
+            }
+        }
+        if touched {
+            *data = iwa::serialize(&objects);
+            done = true;
+        }
+    }
+    assert!(done, "no object {identifier} to forge");
+    package
+}
+
+/// A header strip's zones are assigned by an entry's index in the full repeated
+/// field, not by its position among the entries that decoded. A nil or
+/// unrecognised middle entry used to slide the right-hand storage into the
+/// Centre zone; now it keeps its place and the right storage is still Right.
+#[test]
+fn a_nil_middle_header_does_not_mislabel_the_right_zone() {
+    let path = fixture!("pages-layout.pages");
+    let doc = Document::open(&path).unwrap();
+
+    // A section template with all three header zones filled by distinct storages.
+    let template = doc
+        .header_footers()
+        .into_iter()
+        .filter(|hf| !hf.footer)
+        .fold(BTreeMap::<u64, Vec<(Zone, u64)>>::new(), |mut acc, hf| {
+            acc.entry(hf.section_template)
+                .or_default()
+                .push((hf.zone, hf.storage));
+            acc
+        })
+        .into_iter()
+        .find(|(_, zones)| {
+            zones.iter().any(|(z, _)| *z == Zone::Left)
+                && zones.iter().any(|(z, _)| *z == Zone::Centre)
+                && zones.iter().any(|(z, _)| *z == Zone::Right)
+        })
+        .map(|(id, _)| id)
+        .expect("pages-layout has a header strip with three zones");
+    let right_storage = doc
+        .header_footers()
+        .into_iter()
+        .find(|hf| !hf.footer && hf.section_template == template && hf.zone == Zone::Right)
+        .unwrap()
+        .storage;
+
+    // Rewrite the template's header field (1) so its middle entry is a varint,
+    // not a bare reference — a nil in the strip. The left and right stay bytes.
+    let (_, template_archive) = doc.object(template).unwrap();
+    let mut archive = pb::Message::decode(template_archive.payload()).unwrap();
+    let mut header_index = 0usize;
+    for field in archive.fields.iter_mut() {
+        if field.number != 1 {
+            continue;
+        }
+        if header_index == 1 {
+            field.value = pb::Value::Varint(0);
+        }
+        header_index += 1;
+    }
+    assert!(header_index >= 3, "the strip had three header entries");
+    let package = forge_object(&path, template, archive.encode());
+
+    let forged = Document::from_package(package).unwrap();
+    let zones: Vec<(Zone, u64)> = forged
+        .header_footers()
+        .into_iter()
+        .filter(|hf| !hf.footer && hf.section_template == template)
+        .map(|hf| (hf.zone, hf.storage))
+        .collect();
+    // The right storage is still Right — not slid into Centre — and the nil
+    // middle entry simply has no zone.
+    assert!(
+        zones.contains(&(Zone::Right, right_storage)),
+        "the right storage kept its zone: {zones:?}"
+    );
+    assert!(
+        !zones.iter().any(|(z, _)| *z == Zone::Centre),
+        "the nil middle entry did not become a zone: {zones:?}"
+    );
 }
 
 // -- the app -----------------------------------------------------------------
@@ -781,14 +888,14 @@ fn a_page_number_carries_its_own_format() {
 // -- change tracking (phase 7) ------------------------------------------------
 
 /// **A tripwire, and a survey.** Change tracking has a document half in `TP`
-/// and a text half in the storage's tables, and neither is exercised anywhere:
-/// Pages' scripting dictionary has no change-tracking property at all, so no
-/// probe here can turn it on, and no bundled template ships with review state.
-/// Every one of the ten fields is therefore at its schema default in every
-/// Pages document in the corpus.
-///
-/// The day this fails, `src/pages.rs`'s `ChangeTracking` and
-/// `src/annotations.rs`'s change decoders have their first real example.
+/// and a text half in the storage's tables. `pages-tracked.pages` — Track
+/// Changes turned on from the menu on an unlocked screen — is the one document
+/// that has either: `enabled` true, one session, and a `table_deletion` in its
+/// body (the text half, refused by `src/annotations.rs`'s decoders and pinned
+/// in `tests/text.rs`). Every other Pages document in the corpus, and all 640
+/// bundled templates, keeps the ten fields at their schema defaults; Pages'
+/// dictionary has no change-tracking property, so nothing here moves a display
+/// switch on its own.
 #[test]
 fn change_tracking_is_on_exactly_where_it_was_turned_on() {
     for path in pages_fixtures() {
