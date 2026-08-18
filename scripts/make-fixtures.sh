@@ -294,6 +294,14 @@ build numbers-values numbers 180
 build numbers-formats numbers 240
 build numbers-large numbers 300 "$csv" "$(basename "$csv" .csv)"
 
+# The formula zoo. AppleScript will not make a category or a chart, but it will
+# put any string into a cell, and a string beginning with `=` is a formula — so
+# the whole calculation engine is reachable from a script even though none of
+# its structures are. Sixty-five cases, one per AST node type, operator,
+# reference shape and literal kind, plus a table renamed *after* the formula
+# that points at it was written: the cross-table identity proof.
+build numbers-formulas numbers 300
+
 # Everything a table is *organised* by. One template per feature cluster:
 #
 #   categories  a two-level category on a text column, with a SUM summary row
