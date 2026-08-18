@@ -358,14 +358,14 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | Entries increase, fit the text, and start at 0 | ✅ | ✅ | ✅ |
 | Paragraph entries sit at paragraph starts — over all 901 bundled templates | ✅ | ✅ | ✅ |
 | Insert, delete and replace a range; everything anchored moves with it | ✅ | ✅ | ✅ |
-| **Ten edits reproduce Pages' own archive byte for byte** | ✅ | — | — |
+| **Ten edits Pages made, reproduced entry for entry** | ✅ | — | — |
 | A paragraph created or destroyed keeps the bookkeeping exact | ✅ | ✅ | ✅ |
 | An edit inside a surrogate pair, or over an anchor, is refused by name | ✅ | ✅ | ✅ |
-| **The app reads back inserted, deleted and replaced text** | ✅ | — | ✅ |
-| Hyperlinks: read, and their target changed | — | ✅ | — |
-| Smart fields: run extents, terminated and unterminated | ✅ | ✅ | — |
-| List level and list style per paragraph | ✅ | ✅ | ✅ |
-| A run resolved to its named style plus its local overrides | ✅ | ✅ | ✅ |
+| **The app reads back inserted, deleted and replaced text** | ✅ | ✅ | ✅ |
+| Hyperlinks: read, and their target changed | — (none exist) | ✅ | — (none exist) |
+| Smart-field run extents, terminated and unterminated | — | ✅ | — |
+| List level and list style per paragraph | ✅ | — | — |
+| A run resolved to its named style plus its local overrides | ✅ | — | — |
 | Copy a style: one new object, text untouched | ✅ | ✅ | ✅ |
 | Apply a style, leave every other stream alone | ✅ | ✅ | ✅ |
 | A copy keeps the template's kind (named vs variation) | ✅ | ✅ | ✅ |
