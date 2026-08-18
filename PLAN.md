@@ -1207,7 +1207,7 @@ fixture, and what the app accepted.
   rebuilt from six entries to twelve, four of which were wrong; five new
   fixtures. `cargo fmt --check` and `cargo clippy --all-targets -D warnings`
   clean; `cargo test --all-targets` green: 107 unit + 16 cell + 18 drawable +
-  15 fixture + **16 pages** + 34 style + 22 table + 14 text + 3 doc.
+  15 fixture + **17 pages** + 34 style + 22 table + 14 text + 3 doc.
   `IWORK_APP_CHECK=1` green over the whole suite, twenty fixtures.
 
   **What the app was made to say, and what it would not.** Pages' dictionary

@@ -434,6 +434,10 @@ pub struct Section {
     /// 0 continue from the previous section, 1 start at
     /// [`Section::page_number_start`]. Both observed.
     pub page_number_kind: u64,
+    /// The number to start at. The schema gives the field no default, so a
+    /// section that does not carry one reads as 0 rather than as an invented
+    /// 1 — though every section in this corpus and in all 640 bundled
+    /// templates writes it, and 1045 of the 1048 write exactly 1.
     pub page_number_start: u64,
     /// Hide the header and footer on the section's first page.
     pub hides_header_footer_on_first_page: bool,
@@ -742,7 +746,7 @@ pub fn structure(document: &crate::Document) -> Option<Structure> {
             page_number_kind: archive.varint(section_field::PAGE_NUMBER_KIND).unwrap_or(0),
             page_number_start: archive
                 .varint(section_field::PAGE_NUMBER_START)
-                .unwrap_or(1),
+                .unwrap_or(0),
             hides_header_footer_on_first_page: flag(
                 archive,
                 section_field::FIRST_PAGE_HIDES_HEADER_FOOTER,
