@@ -242,7 +242,7 @@ impl Reader<'_> {
             }
             0x6 => {
                 let (length, at) = self.length(low, body)?;
-                let raw = self.slice(at, length * 2)?;
+                let raw = self.slice(at, double(length)?)?;
                 let units: Vec<u16> = raw
                     .chunks_exact(2)
                     .map(|c| u16::from_be_bytes([c[0], c[1]]))
@@ -254,7 +254,7 @@ impl Reader<'_> {
             0xa => {
                 let (length, at) = self.length(low, body)?;
                 let refs = self.references(at, length)?;
-                let mut items = Vec::with_capacity(length);
+                let mut items = Vec::with_capacity(refs.len());
                 for reference in refs {
                     items.push(self.object(reference, depth + 1)?);
                 }
@@ -262,7 +262,7 @@ impl Reader<'_> {
             }
             0xd => {
                 let (length, at) = self.length(low, body)?;
-                let refs = self.references(at, length * 2)?;
+                let refs = self.references(at, double(length)?)?;
                 let mut entries = Vec::with_capacity(length);
                 for i in 0..length {
                     let key = match self.object(refs[i], depth + 1)? {
@@ -303,18 +303,37 @@ impl Reader<'_> {
     }
 
     fn references(&self, at: usize, count: usize) -> Result<Vec<usize>, Error> {
-        let raw = self.slice(at, count * self.ref_size)?;
+        let width = count.checked_mul(self.ref_size).ok_or_else(|| {
+            Error::Format("binary property list: reference count overflows".into())
+        })?;
+        let raw = self.slice(at, width)?;
         Ok(raw
             .chunks_exact(self.ref_size)
             .map(|c| be(c) as usize)
             .collect())
     }
 
+    /// Every length in a binary plist is a number read out of the file, and the
+    /// biggest of them is eight bytes wide — so `at + length` is an addition of
+    /// two attacker-chosen integers and it wraps. Checked, so a length of
+    /// `0xFFFF_FFFF_FFFF_FFFF` is "truncated" rather than an arithmetic panic
+    /// in a debug build and a slice of the wrong memory in a release one.
     fn slice(&self, at: usize, length: usize) -> Result<&[u8], Error> {
+        let end = at
+            .checked_add(length)
+            .ok_or_else(|| Error::Format("binary property list: length overflows".into()))?;
         self.bytes
-            .get(at..at + length)
+            .get(at..end)
             .ok_or_else(|| Error::Format("binary property list is truncated".into()))
     }
+}
+
+/// Twice a count read out of the file: a UTF-16 string's bytes, or a
+/// dictionary's keys *and* its values. Both wrap for a large enough count.
+fn double(count: usize) -> Result<usize, Error> {
+    count
+        .checked_mul(2)
+        .ok_or_else(|| Error::Format("binary property list: length overflows".into()))
 }
 
 fn be(bytes: &[u8]) -> u64 {
