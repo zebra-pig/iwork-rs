@@ -480,18 +480,8 @@ scope — six per document in the samples, attached to charts.
 
 ### Images — `TSD.ImageArchive` (type 3005)
 
-```
-1  { geometry: position (-157.00, -122.68), size 872.49 × 581.53 }
-4  placed size 872.49 × 581.53   (points)
-9  natural size 2126 × 1417      (pixels)
-12 { 1: 11 }  -> DataInfo id 11
-15 { 1: 16 }  -> filtered variant
-16 { 1: 17 }  -> filtered thumbnail
-19 crop path: explicit 4-point polygon
-```
-
-iWork keeps up to four representations of a placed image — original,
-downscaled, filtered, filtered thumbnail — and chooses per context.
+Images, shapes, movies and everything else with a position have a section of
+their own: see §6 Drawables and §7 Media.
 
 ### Numbers specifics
 
@@ -1165,6 +1155,326 @@ string table.
 
 ---
 
+## 6. Drawables — `TSD`
+
+A drawable is anything placed on a page, a sheet or a slide: an image, a shape,
+a text box, a line, a movie, a group, a table, a chart. `TSD` type ids live in
+the **common** registry, so the same number means the same thing in all three
+apps — one table serves Pages, Numbers and Keynote — and a shape made in
+Keynote is the same archive as a shape imported into Pages. Confirmed against
+the three type registries carved out of the 15.3.1 binaries, which agree entry
+for entry across the 3000-block.
+
+### Inheritance is nesting
+
+`super` is field 1 and is a submessage, so a class hierarchy is literally
+nesting on the wire. A Keynote title placeholder is four levels deep:
+
+```
+KN.PlaceholderArchive (7)
+  1: TSWP.ShapeInfoArchive (2011)
+    1: TSD.ShapeArchive (3004)
+      1: TSD.DrawableArchive (3002)
+        1: geometry
+```
+
+An image is one level (`TSD.ImageArchive` → `DrawableArchive`), a mask is one,
+a table is one. **Nothing may assume a depth.** This crate walks field 1 until
+it reaches a message whose own field 1 is a geometry — a message with a point,
+a size, a small varint and a float and nothing else — and every read and write
+goes through the path that walk returns. Across the corpus that path is one,
+two or three levels; the four-level case is a Keynote placeholder.
+
+### `TSD.GeometryArchive`
+
+| Field | Wire | Contents |
+|---|---|---|
+| 1 | message | position: `{1: x, 2: y}` as two floats, points, y downward |
+| 2 | message | size: `{1: width, 2: height}` |
+| 3 | varint | flags |
+| 4 | f32 | angle, **degrees counter-clockwise** about the centre |
+
+Position is in the **parent's** coordinate space. Flags are 3 on an ordinary
+object, 1 on a shape that sizes itself to its text, 0 on a zero-size one; the
+individual bits are not decoded here and are carried through.
+
+The angle is degrees and it is counter-clockwise: a line drawn from
+(100, 600) to (500, 700) — down and to the right — is stored as a 412.31-point
+geometry at **345.96°**, which is −14.04°, the angle that line makes.
+
+### What the app calls an object's rectangle is not the geometry
+
+Two corrections sit between the archive and what AppleScript reports, and both
+were established by asking the app rather than by reading a schema.
+
+**A masked image is reported as its mask.** `TSD.ImageArchive.mask` (field 5)
+points at a `TSD.MaskArchive` (3006) whose `super.parent` is the image, so the
+mask's geometry is in the *image's* coordinate space. Pages reports the photo in
+`pages-report.pages` at 60 × 123, 475 × 383. The archive says:
+
+```
+image  33.86 × 66.28,  511.86 × 466.13
+mask   25.89 × 56.52,  475.00 × 383.00     (parent: the image)
+```
+
+`33.86 + 25.89 = 59.75` and `66.28 + 56.52 = 122.80`, and the size is the
+mask's. **The app's rectangle is `image.position + mask.position` by
+`mask.size`.**
+
+**Position is the corner of the rotated bounding box; size is not rotated.** A
+220 × 180 shape stored at 100 × 100 and turned 30° is reported by Keynote at
+**470 × 57**, still 220 × 180 — which is the centre (610, 190) minus half of
+`(220·cos30 + 180·sin30) × (220·sin30 + 180·cos30)`. The line above, stored at
+93.84 × 650, comes back at exactly 100 × 600 by the same arithmetic.
+
+What no rule can correct for: a shape that **sizes itself to its text** stores a
+height of 0 and flags 1, and its stored position is the centre of a box that
+only exists once the text has been laid out. Keynote reports such a text box 58
+points above the stored position and 115 points tall — half the height it
+computed. `Geometry::fits_its_text` says when a rectangle is an anchor rather
+than a box.
+
+### Containment and z-order
+
+Containment is written **twice**: downward from the container and upward as each
+drawable's `parent`. The downward list is the one that carries z-order, back to
+front.
+
+| App | Archive | Field |
+|---|---|---|
+| Numbers | `TN.SheetArchive` (2) | 2 |
+| Keynote | `KN.SlideArchive` (5) | 7 |
+| Pages | `TP.FloatingDrawablesArchive` (10010) | 1 |
+| Pages | `TP.SectionTemplateArchive` (10143) | 3 |
+| Pages | `TP.DrawablesZOrderArchive` (10015) | 1 — depth only |
+| any | `TSD.GroupArchive` (3008) | 2 |
+| any | `TSWP.StorageArchive` (2001) | 9 — the attachment table |
+
+Pages is the one that needs care. `TP.DrawablesZOrderArchive` lists **every**
+drawable in one document-wide order — the body storage and the image anchored
+inside it side by side — so it answers "how deep" and nothing about "where".
+Reading it as the floating list reports an anchored image as floating.
+
+An **anchored or inline** drawable in Pages is reached through the body
+storage's attachment table: `{1: character index, 2: → TSWP.DrawableAttachmentArchive}`,
+and the attachment's field 1 is the drawable. The report fixture's photo is
+anchored at character 12 of storage 57940, and its `parent` is that storage.
+
+A drawable named by no container list still has a `parent`, and that is how a
+mask (parent: its image) and a Keynote slide-number placeholder (referenced from
+`KN.SlideArchive` field 20, not field 7) are placed.
+
+### Shapes, text boxes and lines
+
+All three are `TSWP.ShapeInfoArchive` (2011) — `{1: TSD.ShapeArchive,
+2: owned text storage, 4: the same storage again, 6: a flag}` — and the
+difference between them is the path source, not the type. `TSD.ShapeArchive` is
+`{1: DrawableArchive, 2: style, 3: PathSourceArchive, 6: stroke pattern offset}`.
+
+`TSD.PathSourceArchive` is a tagged union: `{1: horizontal flip, 2: vertical
+flip}` plus exactly one of `3` point (arrows, stars), `4` scalar (rounded
+rectangle, polygon, chevron), `5` bezier, `6` callout, `7` connection line,
+`8` editable bezier. Everything Keynote creates from a script is a **baked
+bezier**: a rectangle is six elements and a line is two.
+
+Six, not five, because **iWork writes a redundant `moveTo(0, 0)` after the
+closing element**, and both public writers reproduce it deliberately. Every
+rectangle in the corpus — shape paths, mask paths, image traced paths — has it.
+A path without it is not what iWork writes.
+
+### The object style — `TSD.ShapeStyleArchive` (3015) / `TSD.MediaStyleArchive` (3016)
+
+Fill, stroke, opacity, shadow and reflection are not on the drawable. They are
+on a style object it points at, usually a `TSWP.ShapeStyleArchive` (2025) which
+wraps the `TSD` one at field 1 and adds its own text-inset properties at 10/11.
+
+```
+2025 { 1: 3015 { 1: TSS.StyleArchive, 10: override_count, 11: properties },
+       10: override_count, 11: TSWP properties }
+```
+
+**The two property numberings differ, and the difference is silent:**
+
+| | Shape (3015 field 11) | Media (3016 field 11) |
+|---|--:|--:|
+| fill | 1 | — |
+| stroke | 2 | 1 |
+| opacity | 3 | 2 |
+| shadow | 4 | 3 |
+| reflection | 5 | 4 |
+
+A media style has no fill, so everything after it moves down one. Reading a
+media style with a shape style's numbering reports its stroke as a fill.
+
+**A property a style does not carry is inherited from its parent**
+(`TSS.StyleArchive` field 3). Told to set a shape to 50% opacity with a 40%
+reflection, Keynote wrote a **new variation style** carrying nothing but
+`{11: {3: 0.5, 5: {1: 0.4}}}`, `is_variation: true` and a parent — and every
+other property of that shape comes from the parent. Resolution therefore walks
+the chain; `iwork drawables` prints the result.
+
+Leaf shapes, as observed:
+
+- **Fill** (`TSD.FillArchive`): a union of `1` colour, `2` gradient, `3` image
+  fill. An **empty message is a fill that paints nothing**, which is not the
+  same as an absent one.
+- **Stroke**: `{1: colour, 2: width, 3: cap, 4: join, 5: miter limit,
+  6: pattern}`. The pattern's `type` is `1` solid, `2` empty (no line at all),
+  `0` patterned — and **dashes and dots are both type 0**, told apart by the
+  first entry being below 1. `count` is not the number of floats: iWork writes
+  six whatever it says.
+- **Shadow**: every field has a non-zero default — angle 315, offset 5, radius
+  1 (an *integer*), opacity 1, and `is_enabled` defaults to **true**, so an
+  absent flag means the shadow is on.
+- **Reflection**: `{1: opacity}`, defaulting to 0.5. Keynote wrote 0.4 for
+  "reflection value 40".
+- **Colour**: `{1: model, 3: r, 4: g, 5: b, 6: a, 12: colour space,
+  13: headroom}`, channels 0–1. Always write `model`, `a` and the space: a
+  colour serialised without alpha has been observed to crash Pages.
+
+### Writing geometry
+
+`iwork set-geometry` takes the rectangle the *app* reports and converts it back:
+the rotated bounding box's corner becomes the stored corner, and a masked image
+is addressed by its mask's window. Rotation, flags and every other field are
+left exactly as they were.
+
+Three things travel with a resize, all of them because the app moves them too:
+
+1. **A media drawable's `originalSize`.** Keynote and Pages both rewrote field 4
+   of an image to the new size when a script resized it.
+2. **A shape's path source.** *A shape's size lives in two places.* Told to make
+   a 200 × 200 shape 444 × 128, Keynote rewrote the geometry **and** the bezier
+   path source — its natural size and all six corners. A document with only the
+   geometry changed opens with the app still reporting 200 × 200, which is a
+   silent wrong render, and nothing in the archive says so.
+3. **A masked image's whole assembly.** Asked to make the 475-point-wide cropped
+   photo 300 wide, Pages multiplied the picture's own size, the mask's offset,
+   the mask's size and the mask path's natural size by 300/475, and moved the
+   picture so that `image.position + mask.position` still landed on the frame's
+   corner. This crate reproduces that transformation; against the document Pages
+   itself wrote, the mask comes out **byte-identical** and the image differs in
+   the last two ulps of one float.
+
+**A mask is the exception to (2), and it is the app's exception.** Resizing the
+mask changed its path's *natural size* and left every point of the path where it
+was, while resizing the shape moved both. So masks get the natural size only.
+
+Horizontal and vertical scale factors are taken separately, which reduces to
+what was observed whenever the resize is proportional. Every image in the corpus
+has `aspect_ratio_locked` set and the app will not perform a non-proportional
+one, so that case is **Unverified**.
+
+---
+
+## 7. Media — `TSP.DataInfo` and the `Data/` directory
+
+**TSD has no `bytes` fields at all.** Every blob is a `TSP.DataReference`
+(`{1: identifier}`) into `TSP.PackageMetadata.datas`, a list of `TSP.DataInfo`
+records, each naming a file under `Data/`.
+
+| Field | Contents |
+|---|---|
+| 1 | identifier — what a `DataReference` names |
+| 2 | **a raw 20-byte SHA-1 of the file's bytes** |
+| 3 | `preferred_file_name` — the name the file had outside the document |
+| 4 | `file_name` — the entry under `Data/`, `<stem>-<identifier>.<ext>` |
+| 5 | path inside the app's theme bundle, for assets not copied in |
+| 10 | attributes; `100` is `TSD.ImageDataAttributes`, whose field 1 is the pixel size |
+| 18 | `materialized_length` — the file's byte length |
+
+The digest was checked rather than assumed: `shasum Data/probe-9077.png` gives
+`9b157e9e…`, and so does field 2. `tests/drawables.rs` checks every stored file
+in the corpus.
+
+Two things follow that a writer must know.
+
+**A theme asset has no bytes in the document.** `file_name` is empty and field 5
+names a path inside the app's own bundle — `ginger/02_theme/aa043252_750x683`.
+The photo in the Pages report fixture is one: the package holds only its
+thumbnail. There is nothing to replace in place.
+
+**The registry is refcounted, exactly like a table's interned string list.**
+Replacing an image in Keynote twice left the first replacement's `DataInfo`
+*and* its `Data/` entry gone the moment nothing referred to them, and the next
+one took a fresh identifier. An entry nobody uses is removed, not left.
+
+`MessageInfo.data_references` — field 6 of the framing, packed varints — lists
+the data ids the object's payload uses. Across the corpus it is exactly that
+set, no extras and none missing, which makes it an invariant `iwork check`
+enforces.
+
+### The non-destructive edit state
+
+**This is the caveat PLAN.md flagged, and it is real.** Between an image's
+stored pixels and what is drawn sit:
+
+| Where | What |
+|---|---|
+| `ImageArchive.mask` (5) → `MaskArchive` (3006) | the crop, or a mask shaped like something other than a rectangle |
+| `ImageArchive.instantAlphaPath` (10) | the Instant Alpha knockout path |
+| `ImageArchive.imageAdjustments` (14) | exposure, saturation, contrast, highlights, shadows, sharpness, denoise, temperature, tint, levels, gamma, enhance — `top_level` defaults to **1**, the rest to 0 |
+| `ImageArchive.originalData` (13), `adjustedImageData` (15), `thumbnailAdjustedImageData` (16), `enhancedImageData` (17) | renderings **derived from the old pixels** |
+| `ImageArchive.traced_path` (19) | an outline of the content |
+| `ImageArchive.background_removed` (22) | |
+
+None of it is in a file being swapped in and none of it can be recomputed from
+one. Replacing the bytes underneath produces a document that opens, reports the
+same geometry through AppleScript, passes every structural check — and renders
+the wrong thing. `Document::replace_media` therefore **refuses by name**,
+listing what it found.
+
+What is *not* an objection: an **identity mask**, whose window is the whole
+picture at 0, 0. That is what the app installs when it replaces an image itself,
+and it hides nothing. Nor is a `traced_path` that is the plain rectangle of the
+picture's natural size — every one in the corpus is — which is rewritten with
+the new size, as the app rewrites it.
+
+### What the app does when it replaces an image
+
+Keynote's `set file name of image` is scriptable, so its own replacement could
+be watched. Given a 32 × 24 picture for an image in an 8 × 8 frame it:
+
+- allocated a **new** `DataInfo` and `Data/` entry, `probe-a-9084.png`, with the
+  digest, the byte length and the pixel size of the new file;
+- set `naturalSize` (9) to 32 × 24 and rewrote `traced_path` (19) as the
+  rectangle of that size;
+- set `flags` (7) to **2** — `was_media_replaced`; the other bit, 1, is
+  `is_placeholder`, which is what a theme's picture carries;
+- left the geometry and `originalSize` alone, and instead **scaled the picture
+  to fill the old frame and cropped the overflow with a mask**: the image became
+  10.67 × 8 at x − 1.33 behind an 8 × 8 mask offset by 1.33, so the frame the
+  app reports never moved.
+
+`replace_media` does all of that except the last: it swaps the bytes in place
+under the same identifier, keeps the frame, and **says** when the new picture is
+a different shape from the old one, because it will then be drawn stretched.
+Fitting it is `set-geometry`'s job.
+
+**What an app round trip can and cannot prove here.** It proves the document
+opens, that the picture is still where it was, and that the app is content with
+the registry entry. It cannot prove the pixels drawn are the new ones: nothing
+on a locked screen can see what is rendered.
+
+### The wider media model, read
+
+| Thing | Where | State |
+|---|---|---|
+| Movies and audio | `TSD.MovieArchive` (3007): `movieData` 14, `posterImageData` 15, trim `3`/`4`, poster time 5, volume 7, `audioOnly` 9, `loop_option` 24 (6 is the deprecated integer), `movieRemoteURL` 17 | read; the only ones in the corpus are Keynote's live-video placeholders |
+| Live video | `MovieArchive.is_live_video` (30) and the Keynote-only `KN.LiveVideoInfo` extension at field 100 | read and named; **never authored** (ground rule 8) |
+| Galleries | `TSA.GalleryInfo`, extension **200** of `TSD.ImageArchive` | detected by the extension's presence |
+| Web video | `TSA.WebVideoInfo`, extension **300** of `ImageArchive` | detected |
+| 3D objects | `TSA.Object3DInfo`, extension **200** of `MovieArchive` | detected |
+| Freehand drawings | `TSD.FreehandDrawingArchive`, extension **100** of `TSD.GroupArchive` | detected; stroke order is load-bearing for "Animate Drawing" and is carried, never rebuilt |
+| Pencil annotations | `DrawableArchive.pencil_annotations` (9) → `TSD.PencilAnnotationArchive` (3086) → `TSD.PencilAnnotationStorageArchive` (**242**, not a 3000-block id) | counted per drawable |
+| Equations | extensions 100–103 of `ImageArchive` | detected |
+
+A proto2 extension is a plain high-numbered field on the wire, so the *host*
+message is the only thing that says what it means: 100 on a movie is live video,
+100 on a group is a freehand drawing, 100 on an image is an equation.
+
+---
+
 ## Writing documents
 
 Generate **from a template**, not from nothing. The container, the framing and
@@ -1208,4 +1518,18 @@ Rules a writer must respect:
 12. **Refcounted side tables are refcounted both ways.** Taking a reference to
     an interned entry raises its count; giving up the last one removes the
     entry. A writer that only ever adds leaves a list that grows on every save
-    and disagrees with itself.
+    and disagrees with itself. The media registry is one of these.
+13. **A `DataInfo`'s digest is a SHA-1 of the bytes it names**, and its
+    `materialized_length` is their length. Writing new bytes under an old digest
+    is accepted at open time and is a lie afterwards.
+14. **A size that appears twice must be changed twice.** A shape's size is in
+    its geometry *and* its path source; a media object's is in its geometry
+    *and* its `originalSize`; a picture's is in its `naturalSize`, its traced
+    outline *and* its `DataInfo`'s image attributes. The app maintains all of
+    them, and a document with one of them changed opens and renders as though
+    nothing had been done.
+15. **Refuse an edit whose consequences are outside the file you were given.**
+    Replacing an image's bytes cannot recompute the crop, the mask, the Instant
+    Alpha path or the adjustments that were derived from the old pixels. The
+    only honest options are to refuse or to redo the whole non-destructive
+    stack; this crate refuses, by name.
