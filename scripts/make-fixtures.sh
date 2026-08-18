@@ -320,6 +320,20 @@ build_template numbers-pivot 300 "Application/21_Pivot_Table_Basics/Traditional"
 build_template numbers-rules 300 "Application/26_Stocks/Traditional"
 build_template numbers-sorted 240 "Application/44_Notetaking_Colorful_Log_PM/Traditional"
 
+# Charts, the other thing no script can make in Numbers. `chart` is an element
+# of a sheet in all three dictionaries, but there is no `make new chart`
+# anywhere and the class carries nothing but the geometry it inherits — so a
+# Numbers chart, with its `TN.ChartMediatorArchive` binding it to a table, has
+# to come from a template.
+#
+# All 901 bundles were scanned for `TSCH.ChartDrawableArchive` (5021): **69 have
+# one**, none of them a Keynote theme, and `21_Simple_Charts` has **twelve** —
+# eleven distinct chart types in one document, including the two nothing else
+# here can produce. Type 20 `multiDataColumnChartType2D` is an **interactive**
+# chart (the slider/buttons kind), and type 11 `twoAxisChartType2D` is a mixed
+# chart with a second value axis.
+build_template numbers-charts 300 "Application/21_Simple_Charts/Traditional"
+
 # The only hyperlinks in the whole install, and the one fixture no app can be
 # made to write.
 #
@@ -352,6 +366,15 @@ build keynote-deck key 240 "$png"
 # the corpus. Keynote is the only app that will create a drawable from a
 # script, and TSD is cross-app, so this deck is the shape fixture for all three.
 build keynote-shapes key 300 "$wide" "$square"
+
+# The chart zoo, and the only oracle a chart's data has. No app reports a
+# chart's contents — `chart` inherits geometry and nothing else — so the values
+# a decoder is measured against have to be the ones the app was *told*.
+# Keynote's `add chart` takes row names, column names and a grid of numbers, and
+# writes exactly those into the chart's private `TSCH.ChartGridArchive`.
+# Nineteen slides: seventeen chart types (all eight 3-D ones among them), one
+# grouped by column instead of by row, and one with a blank cell.
+build keynote-charts key 600
 
 printf '\n%d built, %d left alone, %d failed\n' "$built" "$skipped" "$failed"
 [ "$failed" = 0 ]
