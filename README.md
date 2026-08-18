@@ -57,6 +57,12 @@ iwork check     Report.pages              # look for a broken object graph
 iwork extract   Report.pages ./media      # embedded media, byte-identical
 iwork roundtrip Report.pages out.pages    # decode and re-encode every object
 
+iwork drawables Talk.key                  # every placed object: geometry, style,
+                                          # media, non-destructive edit state
+iwork media     Talk.key                  # every media file, its digest and its users
+iwork set-geometry Talk.key 2652464 250 300 400 120 out.key
+iwork replace-media Talk.key 2652622 new.png out.key
+
 iwork tables    Budget.numbers            # every table: size, headers, merges, geometry
 iwork cells     Budget.numbers Zellarten  # every cell, with its type and data format
 iwork cells     Budget.numbers 904769 --raw   # …and the cell record behind each one
@@ -244,6 +250,84 @@ A formula that *reads* an edited cell keeps its stale cached value — Numbers
 recalculates it on open, so the app is right and a reader trusting the cache is
 not.
 
+### Drawables, geometry and media
+
+A drawable is anything placed on a page, a sheet or a slide — an image, a
+shape, a text box, a line, a movie, a group, a table, a chart. `TSD` is
+cross-app in the strongest sense: the type ids live in the *common* registry, so
+one table of names serves all three apps.
+
+```rust
+let doc = iwork::Document::open("Talk.key")?;
+for drawable in doc.drawables() {
+    let mask = drawable.mask().and_then(|id| doc.drawable(id));
+    let frame = drawable.frame(mask.as_ref());          // what the app reports
+    println!("{} {} at {},{} {}×{} — {}", drawable.identifier,
+             drawable.kind.as_str(), frame.x, frame.y, frame.width, frame.height,
+             drawable.placement.as_str());
+}
+```
+
+**The geometry is not at a fixed depth.** `super` is field 1 and is a
+submessage, so a Keynote title placeholder is four levels of nesting before its
+geometry and an image is one. Nothing here assumes a depth: the walk follows
+field 1 until it finds a geometry, and every read and write goes through the
+path it returns.
+
+**What the app calls an object's rectangle is not what the archive says**, and
+both corrections came from asking the app rather than reading a schema:
+
+- **A masked image is reported as its mask.** The mask is a separate object
+  whose geometry is in the *image's* coordinate space, so the rectangle is
+  `image.position + mask.position` by `mask.size`. Pages reports 60 × 123,
+  475 × 383 for a photo whose own geometry says 33.86 × 66.28, 511.86 × 466.13.
+- **A rotated object is reported at the corner of its rotated bounding box**,
+  and at its *unrotated* size. A 220 × 180 shape turned 30° at 100 × 100 comes
+  back as 470 × 57, still 220 × 180.
+
+`iwork drawables` prints the corrected rectangle, and `IWORK_APP_CHECK=1 cargo
+test` compares every one of them with what Keynote and Pages report.
+
+**Object styling is a separate object, and it inherits.** Fill, stroke,
+opacity, shadow and reflection live in a `TSD.ShapeStyleArchive` — or a
+`TSD.MediaStyleArchive`, which has no fill and therefore *numbers everything
+one lower*, a difference that is silent if you get it wrong. Told to set a
+shape to 50% opacity, Keynote wrote a new variation style carrying nothing but
+the opacity and the reflection; everything else comes from its parent, so
+resolution walks the chain.
+
+**A drawable can be moved and resized, app-verified.** `iwork set-geometry`
+takes the rectangle the app reports and converts it back. Three things travel
+with a resize because the app moves them too: a media object's `originalSize`;
+a shape's **path source**, whose natural size and every baked point Keynote
+rewrites — a document with only the geometry changed opens with the app still
+reporting the old size; and a masked image's whole assembly, scaled by one
+factor so the frame lands where it was asked to. Against the document Pages
+itself wrote for the same resize, the mask comes out byte-identical and the
+image differs in the last two ulps of one float.
+
+**Media is refcounted, digested and easy to falsify.** A drawable never carries
+pixels: it carries a reference into `TSP.PackageMetadata.datas`, whose entries
+name files under `Data/` and carry a **raw SHA-1** of their bytes. Replace an
+image in Keynote twice and the first replacement's registry entry and file are
+both gone — nothing points at them any more.
+
+`iwork replace-media` swaps the bytes, the digest, the byte length, the recorded
+pixel size and every drawable's `naturalSize` and traced outline, and marks the
+image as replaced — which is what Keynote does when it replaces one itself.
+**And it refuses when it would be lying.** An image can carry a crop, a shaped
+mask, an Instant Alpha path, tone adjustments, cached renderings of the old
+pixels or a traced outline of them; none of that is in the new file and none of
+it can be recomputed. Swapping bytes underneath produces a document that opens,
+reports the same geometry, passes every structural check and draws the wrong
+thing — so the replacement is refused by name instead. An *identity* mask is not
+an objection: that is what the app installs when it replaces an image, and it
+hides nothing.
+
+An honest limit, worth stating plainly: an app round trip proves the document
+opens and that the picture is still where it was. It cannot prove the pixels
+drawn are the new ones — nothing on a locked screen can see what is rendered.
+
 ## What is verified
 
 Everything below is asserted by `cargo test` when you supply fixtures.
@@ -279,6 +363,19 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | A written cell keeps its styles, format and undecoded bytes | ✅ | ✅ | — |
 | Writing a cell what it already holds changes no byte | ✅ | ✅ | — |
 | **The app reads back the written value** | ✅ | ✅ | — |
+| Drawables: geometry, rotation, lock, parent, z-order, containment | ✅ | ✅ | ✅ |
+| Shapes, text boxes, lines: path source and its natural size | ✅ | — | ✅ |
+| Masked images: the crop, and the frame the app reports | ✅ | — | ✅ |
+| Object styles: fill, stroke, opacity, shadow, reflection, inheritance | ✅ | ✅ | ✅ |
+| Media registry: digest is the SHA-1 of the bytes, every stored file | ✅ | — | ✅ |
+| Non-destructive edit state detected: crop, shaped mask, Instant Alpha, adjustments, derived renderings | ✅ | — | ✅ |
+| Movies, live video, galleries, 3D, drawings, pencil: read and named | — | — | ✅ |
+| Every geometry re-encodes to the bytes it came from | ✅ | ✅ | ✅ |
+| **Every rectangle agrees with the app** | ✅ | — | ✅ |
+| Move and resize a drawable; only the touched stream is rewritten | ✅ | — | ✅ |
+| **The app reads back the moved rectangle** | — | — | ✅ |
+| Replace an image's bytes; registry and drawables stay in step | — | — | ✅ |
+| A replacement is refused when edit state would make it a lie | ✅ | — | ✅ |
 
 Keynote is the gap in that block for one reason only — neither AppleScript nor
 any bundled theme will put a table on a slide, so there is no fixture. The
@@ -337,15 +434,25 @@ instead:
 scripts/make-fixtures.sh          # into tests/fixtures/generated/, gitignored
 ```
 
-Twelve documents that between them cover plain and styled text, non-Latin text
-including emoji, a table and an image, two sheets of typed cells and formulas, a
-300-row imported table, a deck of slides with presenter notes and a skipped
-slide — and four spreadsheets built from templates Apple ships, carrying a
+Thirteen documents that between them cover plain and styled text, non-Latin
+text including emoji, a table and an image, two sheets of typed cells and
+formulas, a 300-row imported table, a deck of slides with presenter notes and a
+skipped slide, a slide carrying one of every drawable a script can make — a
+shape, a rotated shape, a shape at half opacity with a reflection, a text box, a
+line, an image, a locked shape and an image Keynote itself cropped — and four
+spreadsheets built from templates Apple ships, carrying a
 category with a summary row, two pivot tables, a filter that hides rows,
 columns hidden by hand, conditional highlighting, a custom cell format and a
 sort rule. Existing files are left alone unless `--force` is given.
 
-The last four come from templates for a reason: Numbers' scripting dictionary
+Keynote builds the drawable fixture because it is the only one of the three
+apps that will create a drawable from a script: Pages and Numbers answer `make
+new shape` with "Don't know how to create TMAScriptShapeInfoProxy". `TSD` is
+cross-app, so that deck is the shape fixture for all three. `make new group` and
+`make new movie` are accepted and then do nothing, so groups and movies stay
+read-only here, exercised by the themes that ship with them.
+
+The four spreadsheets come from templates for a reason: Numbers' scripting dictionary
 has no sort, filter, category, highlight or pivot command, and the menu items
 that do need a document window and therefore an unlocked screen. The generator
 names them by template `id`, which is the path inside the app bundle and the
@@ -356,6 +463,8 @@ And the check the rest of the suite cannot make — does the app open it?
 ```
 scripts/app-check.sh out.pages "A new headline"   # exit 0 if Pages agrees
 scripts/app-check.sh --self-test Report.pages     # prove it fails when it should
+scripts/table-oracle.sh Budget.numbers            # every cell, as Numbers reads it
+scripts/drawable-oracle.sh Talk.key               # every rectangle, as the app reports it
 
 IWORK_APP_CHECK=1 cargo test                      # every fixture, through the app
 ```
@@ -406,6 +515,24 @@ harness that always says yes is worse than none.
   formula depends on leaves that formula's **cached value stale**. Numbers
   recalculates on open, so the app shows the right answer; anything that reads
   the file without evaluating — this crate included — shows the old one.
+- **Media is replaced in place, and the frame does not follow.** A replacement
+  of a different shape is drawn stretched into the frame the old picture had —
+  `replace-media` says so and `set-geometry` fixes it, but the app would instead
+  have re-fitted the picture and cropped it with a mask. And a picture whose
+  drawable carries a crop, a shaped mask, an Instant Alpha path, adjustments or
+  cached renderings of the old pixels is not replaced at all: that state is
+  computed from the pixels being thrown away, and the result would open and
+  render wrong.
+- **A shape that sizes itself to its text has no size in the archive.** Its
+  stored height is 0 and its stored position is the centre of a box the app
+  computes when it lays the text out — Keynote reports such a text box 58 points
+  above where the file puts it. `Geometry::fits_its_text` says when a rectangle
+  is an anchor rather than a box; nothing here can turn one into the other
+  without doing layout.
+- **Groups, movies and drawings are read, never authored.** No script can make
+  Keynote create a group or a movie, so nothing here writes one; the archives
+  are decoded and carried through. Live video sources, recorded presentations
+  and pencil annotations are on the never-author list by design.
 - **A cell is written one at a time, into a row that already has cells.**
   `set_cell` changes a value in place. It does not add or remove rows and
   columns, does not write a formula, does not touch rich-text cells, and gives
