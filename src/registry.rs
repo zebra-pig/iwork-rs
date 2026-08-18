@@ -186,6 +186,63 @@ const ENTRIES: &[Entry] = &[
         confidence: Unverified,
         app: App::Any,
     },
+    // The table of contents, in four pieces. 2051 is the style-inclusion map —
+    // "which paragraph styles become entries" — and a document has one of its
+    // own plus one per placed list; `pages-toc` has both and they disagree,
+    // the document's naming two styles and the list's six. 2240 is the placed
+    // list, which is a drawable. 2052 is one line of it as last laid out,
+    // carrying the heading text and the page number. Only two of the 640
+    // bundled Pages templates have a 2240 at all.
+    Entry {
+        message_type: 2051,
+        name: "TSWP.TOCSettingsArchive",
+        confidence: Confirmed,
+        app: App::Any,
+    },
+    Entry {
+        message_type: 2052,
+        name: "TSWP.TOCEntryInstanceArchive",
+        confidence: Confirmed,
+        app: App::Any,
+    },
+    Entry {
+        message_type: 2240,
+        name: "TSWP.TOCInfoArchive",
+        confidence: Confirmed,
+        app: App::Any,
+    },
+    // Linked text boxes. 2410 is one thread — a storage and the boxes it flows
+    // through, in order — and 2411 is the document's list of them. Nineteen of
+    // the 640 Pages templates have a thread; every one of them has the
+    // container, empty or not.
+    Entry {
+        message_type: 2410,
+        name: "TSWP.FlowInfoArchive",
+        confidence: Confirmed,
+        app: App::Any,
+    },
+    Entry {
+        message_type: 2411,
+        name: "TSWP.FlowInfoContainerArchive",
+        confidence: Confirmed,
+        app: App::Any,
+    },
+    // The footnote mark in the text, and the anchor half of a bookmark.
+    // **Neither exists anywhere that can be reached from here** — not in this
+    // corpus and not in any of the 901 bundled templates — so both are named
+    // from the 15.3.1 schema and nothing has decoded one.
+    Entry {
+        message_type: 2008,
+        name: "TSWP.FootnoteReferenceAttachmentArchive",
+        confidence: Unverified,
+        app: App::Any,
+    },
+    Entry {
+        message_type: 2035,
+        name: "TSWP.BookmarkFieldArchive",
+        confidence: Unverified,
+        app: App::Any,
+    },
     // The smart fields, all of which are anchored from `StorageArchive` field
     // 11 and all of which wrap a `TSWP.SmartFieldArchive` carrying a UUID.
     // 2031 is the placeholder — the commonest by far, 9335 of them across the
@@ -608,6 +665,21 @@ const ENTRIES: &[Entry] = &[
         app: App::Any,
     },
     // -- Pages ---------------------------------------------------------------
+    //
+    // This block was wrong in four of its six entries, and all four were the
+    // same mistake: the only published `TP` tables are a 2013 snapshot, and
+    // Apple renumbered and renamed most of this range afterwards. The registry
+    // dumped out of the installed 15.3.1 binaries
+    // (`reference/protos-15.3/registry-pages.tsv`) settles it, and every entry
+    // below has been decoded out of a document as well — 10012's booleans are
+    // the Document inspector's switches, 10143 really does hold three headers
+    // and three footers, 10017 really does name a page.
+    //
+    // The headline rename is **"page master" → "section template"**: 2013's
+    // `TP.PageMasterArchive` is 15.3.1's `TP.SectionTemplateArchive`, and the
+    // new `TP.PageTemplateArchive` at 10017 is a different thing again. Seven
+    // ids in the whole 730-id table carry a different message than the mined
+    // references claim, and all seven are `TP`.
     Entry {
         message_type: 10000,
         name: "TP.DocumentArchive",
@@ -615,32 +687,88 @@ const ENTRIES: &[Entry] = &[
         app: InPages,
     },
     Entry {
-        message_type: 10011,
-        name: "TP.SectionArchive",
-        confidence: Inferred,
-        app: InPages,
-    },
-    Entry {
-        message_type: 10012,
+        message_type: 10001,
         name: "TP.ThemeArchive",
         confidence: Inferred,
         app: InPages,
     },
     Entry {
-        message_type: 10015,
-        name: "TP.SettingsArchive",
+        message_type: 10010,
+        name: "TP.FloatingDrawablesArchive",
         confidence: Inferred,
         app: InPages,
     },
+    // Named by its `name` field — "Blank", "Chapter Opener" — and by the three
+    // section templates it points at through fields 23, 24 and 25.
+    Entry {
+        message_type: 10011,
+        name: "TP.SectionArchive",
+        confidence: Confirmed,
+        app: InPages,
+    },
+    // Was `TP.ThemeArchive` here, which is 10001. Field 1 is `body`, the
+    // word-processing/page-layout switch; 30–33 are the footnote settings and
+    // 34 is `facing_pages`, all of which the document inspector shows.
+    Entry {
+        message_type: 10012,
+        name: "TP.SettingsArchive",
+        confidence: Confirmed,
+        app: InPages,
+    },
+    // Was `TP.SettingsArchive`. It is one repeated reference field listing
+    // every drawable in the document, which is what Phase 3 found it to be.
+    Entry {
+        message_type: 10015,
+        name: "TP.DrawablesZOrderArchive",
+        confidence: Confirmed,
+        app: InPages,
+    },
+    // Was `TP.BodyStorageArchive`, a message that does not exist in any
+    // version of the schema. It holds `{page index, guide storage}` pairs.
     Entry {
         message_type: 10016,
-        name: "TP.BodyStorageArchive",
+        name: "TP.UserDefinedGuideMapArchive",
+        confidence: Inferred,
+        app: InPages,
+    },
+    // Page-layout documents only, and there exactly: of the 640 bundled Pages
+    // templates the 388 that carry one are precisely the 388 whose
+    // `TP.SettingsArchive.body` is false.
+    Entry {
+        message_type: 10017,
+        name: "TP.PageTemplateArchive",
+        confidence: Confirmed,
+        app: InPages,
+    },
+    // Was `TP.PageLayoutArchive` — the 2013 name for this id was
+    // `TP.PageMasterArchive` and neither is right. Field 1 is three header
+    // storages and field 2 three footer storages, in every one of the 1734
+    // instances the bundled templates carry.
+    Entry {
+        message_type: 10143,
+        name: "TP.SectionTemplateArchive",
+        confidence: Confirmed,
+        app: InPages,
+    },
+    // 10133 and 10147 swapped places between 2013 and 15.3.1: what the mined
+    // table calls `TP.ViewStateArchive` at 10133 is now `TP.UIStateArchive`,
+    // and 10147 — `TP.UIStateArchive` in that table — is now the root that
+    // points at the layout state and the view state.
+    Entry {
+        message_type: 10131,
+        name: "TP.LayoutStateArchive",
         confidence: Inferred,
         app: InPages,
     },
     Entry {
-        message_type: 10143,
-        name: "TP.PageLayoutArchive",
+        message_type: 10133,
+        name: "TP.UIStateArchive",
+        confidence: Inferred,
+        app: InPages,
+    },
+    Entry {
+        message_type: 10147,
+        name: "TP.ViewStateRootArchive",
         confidence: Inferred,
         app: InPages,
     },
