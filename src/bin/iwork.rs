@@ -200,6 +200,25 @@ fn inspect(path: &str) -> Result<(), Error> {
     let doc = Document::open(path)?;
     println!("{} document — {path}", doc.kind().as_str());
 
+    // Pages has two kinds of document and they are not the same file at all:
+    // one has a body storage the text flows through, the other has named page
+    // templates and text only in boxes. Saying which, first, saves a reader the
+    // question.
+    if let Some(structure) = doc.structure() {
+        println!(
+            "{}, {} section(s), {:.0} × {:.0} pt{}",
+            structure.mode.as_str(),
+            structure.sections.len(),
+            structure.setup.width,
+            structure.setup.height,
+            if structure.setup.facing_pages {
+                ", facing pages"
+            } else {
+                ""
+            }
+        );
+    }
+
     println!("\n== package entries ==");
     for (name, data) in &doc.package().entries {
         println!("  {name:<48} {:>10} bytes", data.len());
