@@ -71,6 +71,20 @@ exactly a tenth.
 
   iwork set-cell Budget.numbers Sales B3 n:43 out.numbers
 
+Pages document structure
+
+  iwork sections  <file>                   sections, their text ranges, page
+                                           numbering and header/footer storages
+  iwork structure <file>                   document mode, paper and margins,
+                                           page templates, linked text-box
+                                           threads, contents lists, footnotes,
+                                           bookmarks, columns
+
+Both are Pages-only; a Numbers or Keynote document has no `TP.DocumentArchive`
+and they say so. A header or footer is an ordinary text storage, so editing one
+is `iwork set-text <file> <storage> <text> <out>` with the id `iwork sections`
+prints.
+
 text styles
 
   iwork styles       <file>                            every text style, with its object id
@@ -160,6 +174,8 @@ fn main() -> ExitCode {
         ["set-cell", file, table, row, column, value, out] => index(row)
             .and_then(|row| Ok((row, index(column)?)))
             .and_then(|(row, column)| set_cell(file, table, row, column, value, out)),
+        ["sections", file] => sections(file),
+        ["structure", file] => structure(file),
         ["properties"] => properties(),
         ["set-color", file, id, r, g, b, out] => set_color(file, id, r, g, b, out),
         ["paragraphs", file, storage] => {
@@ -398,6 +414,349 @@ fn objects(path: &str, filter: Option<u32>) -> Result<(), Error> {
             registry::describe_in(doc.kind(), message_type),
             object.payload().len()
         );
+    }
+    Ok(())
+}
+
+/// One line of preview text, with the characters that are not text named.
+fn oneline(text: &str, width: usize) -> String {
+    let mut out = String::new();
+    for character in text.chars() {
+        if out.chars().count() >= width {
+            out.push('…');
+            break;
+        }
+        match character {
+            '\n' | '\r' | '\u{000C}' => out.push('⏎'),
+            '\u{FFFC}' => out.push('▨'),
+            '\u{0004}' => out.push('§'),
+            '\u{0005}' => out.push('¶'),
+            '\t' => out.push('→'),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn sections(path: &str) -> Result<(), Error> {
+    let doc = Document::open(path)?;
+    let Some(structure) = doc.structure() else {
+        println!("not a Pages document — sections are a TP archive");
+        return Ok(());
+    };
+    let body = structure
+        .body_storage
+        .map(|id| doc.storage_text(id).unwrap_or_default())
+        .unwrap_or_default();
+
+    println!(
+        "{} document, {} section(s)",
+        structure.mode.as_str(),
+        structure.sections.len()
+    );
+    for section in &structure.sections {
+        let name = if section.name.is_empty() {
+            String::new()
+        } else {
+            format!(" \"{}\"", section.name)
+        };
+        println!(
+            "\nsection {} id={}{} — [{}, {}), {} unit(s)",
+            section.index + 1,
+            section.identifier,
+            name,
+            section.start,
+            section.end,
+            section.length()
+        );
+        let text = slice_units(&body, section.start, section.end);
+        if !text.is_empty() {
+            println!("  text  {}", oneline(&text, 64));
+        }
+        println!("  pages {}", section.numbering());
+        let mut switches = Vec::new();
+        if section.inherits_header_footer {
+            switches.push("inherits the previous header and footer");
+        }
+        if section.first_page_different {
+            switches.push("first page different");
+        }
+        if section.even_odd_different {
+            switches.push("even and odd pages different");
+        }
+        if section.hides_header_footer_on_first_page {
+            switches.push("first page hides the header and footer");
+        }
+        if section.has_background {
+            switches.push("has a background fill");
+        }
+        if section.hyperlink_uuid {
+            switches.push("can be linked to");
+        }
+        if !switches.is_empty() {
+            println!("  {}", switches.join(", "));
+        }
+        for (slot, page) in iwork::pages::TemplatePage::ALL.iter().enumerate() {
+            let Some(template) = section.templates[slot] else {
+                continue;
+            };
+            let zones: Vec<String> = structure
+                .header_footers
+                .iter()
+                .filter(|hf| hf.section_template == template)
+                .map(|hf| {
+                    let text = if hf.text.is_empty() {
+                        "empty".to_string()
+                    } else {
+                        format!("\"{}\"", oneline(&hf.text, 28))
+                    };
+                    format!(
+                        "    {:<6} {:<6} id={:<8} {text}",
+                        hf.kind(),
+                        hf.zone.as_str(),
+                        hf.storage
+                    )
+                })
+                .collect();
+            println!("  {} page template id={template}", page.as_str());
+            for zone in zones {
+                println!("{zone}");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// UTF-16 code units `start..end` of a string, for printing a section.
+fn slice_units(text: &str, start: u64, end: u64) -> String {
+    let units: Vec<u16> = text.encode_utf16().collect();
+    let from = (start as usize).min(units.len());
+    let to = (end as usize).min(units.len());
+    String::from_utf16_lossy(&units[from..to])
+}
+
+fn structure(path: &str) -> Result<(), Error> {
+    let doc = Document::open(path)?;
+    let Some(s) = doc.structure() else {
+        println!("not a Pages document — the structure is a TP archive");
+        return Ok(());
+    };
+
+    println!("mode      {}", s.mode.as_str());
+    println!(
+        "paper     {:.0} × {:.0} pt {} ({}), scale {}",
+        s.setup.width,
+        s.setup.height,
+        if s.setup.portrait() {
+            "portrait"
+        } else {
+            "landscape"
+        },
+        if s.setup.paper_id.is_empty() {
+            "no paper id"
+        } else {
+            &s.setup.paper_id
+        },
+        s.setup.scale
+    );
+    println!(
+        "margins   left {:.0} right {:.0} top {:.0} bottom {:.0}, header {:.0} footer {:.0}",
+        s.setup.left_margin,
+        s.setup.right_margin,
+        s.setup.top_margin,
+        s.setup.bottom_margin,
+        s.setup.header_margin,
+        s.setup.footer_margin
+    );
+    let mut switches = Vec::new();
+    if s.setup.facing_pages {
+        switches.push("facing pages".to_string());
+    }
+    if s.setup.single_header_footer {
+        switches.push("one header and footer for the whole document".to_string());
+    }
+    if !s.setup.headers_shown {
+        switches.push("headers hidden".to_string());
+    }
+    if !s.setup.footers_shown {
+        switches.push("footers hidden".to_string());
+    }
+    if s.setup.rtl {
+        switches.push("right to left".to_string());
+    }
+    if s.setup.body_vertical {
+        switches.push("body laid out vertically".to_string());
+    }
+    if !s.setup.language.is_empty() {
+        switches.push(format!("language {}", s.setup.language));
+    }
+    if !s.setup.template.is_empty() {
+        switches.push(format!("from template {}", s.setup.template));
+    }
+    if !switches.is_empty() {
+        println!("          {}", switches.join(", "));
+    }
+
+    println!("sections  {} — `iwork sections` for each", s.sections.len());
+    let with_text = s.header_footers.iter().filter(|hf| !hf.text.is_empty());
+    println!(
+        "headers   {} storage(s), {} with text",
+        s.header_footers.len(),
+        with_text.count()
+    );
+
+    if s.page_templates.is_empty() {
+        println!("templates none — a word-processing document has no page templates");
+    } else {
+        println!("templates {}", s.page_templates.len());
+        for template in &s.page_templates {
+            let mut notes = Vec::new();
+            if template.matches_previous_page {
+                notes.push("matches the previous page");
+            }
+            if template.hides_headers_footers {
+                notes.push("hides headers and footers");
+            }
+            if template.has_background {
+                notes.push("has a background fill");
+            }
+            println!(
+                "    id={:<8} \"{}\" — {} drawable(s), {} placeholder(s){}{}",
+                template.identifier,
+                template.name,
+                template.drawables,
+                template.placeholders,
+                if notes.is_empty() { "" } else { "; " },
+                notes.join(", ")
+            );
+        }
+    }
+
+    if s.threads.is_empty() {
+        println!("threads   none");
+    } else {
+        println!("threads   {}", s.threads.len());
+        for thread in &s.threads {
+            let boxes: Vec<String> = thread.boxes.iter().map(u64::to_string).collect();
+            println!(
+                "    id={:<8} number {} — storage {} through {} box(es): {}",
+                thread.identifier,
+                thread.number,
+                thread
+                    .storage
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "none".into()),
+                thread.boxes.len(),
+                boxes.join(" → ")
+            );
+        }
+    }
+
+    if s.contents.is_empty() {
+        println!("contents  none");
+    } else {
+        println!("contents  {} settings archive(s)", s.contents.len());
+        for toc in &s.contents {
+            let shown = toc.rules.iter().filter(|r| r.show).count();
+            println!(
+                "    id={:<8} \"{}\" scope {} — {} of {} paragraph style(s) included{}",
+                toc.identifier,
+                toc.name,
+                toc.scope,
+                shown,
+                toc.rules.len(),
+                match toc.placed_in {
+                    Some(owner) => format!(", placed in {owner}"),
+                    None => ", the document's own".to_string(),
+                }
+            );
+            for (heading, page) in &toc.entries {
+                println!("      p{page:<4} {heading}");
+            }
+        }
+    }
+
+    let notes = &s.footnote_settings;
+    println!(
+        "footnotes {} as {}, numbered {}, gap {} pt — {} in the text",
+        notes.kind_name(),
+        notes.format_name(),
+        notes.numbering_name(),
+        notes.gap,
+        if s.footnotes.is_empty() {
+            "none".to_string()
+        } else {
+            s.footnotes.len().to_string()
+        }
+    );
+    for note in &s.footnotes {
+        println!(
+            "    storage {} at {} → {} {}",
+            note.storage,
+            note.index,
+            note.body
+                .map(|b| b.to_string())
+                .unwrap_or_else(|| "no body".into()),
+            oneline(&note.text, 48)
+        );
+    }
+
+    println!(
+        "bookmarks {}",
+        if s.bookmarks.is_empty() {
+            "none".to_string()
+        } else {
+            s.bookmarks.len().to_string()
+        }
+    );
+    for (storage, index, object) in &s.bookmarks {
+        println!(
+            "    storage {storage} at {index} → {}",
+            object
+                .map(|o| o.to_string())
+                .unwrap_or_else(|| "nothing".into())
+        );
+    }
+
+    if let Some(body) = s.body_storage {
+        let layouts = doc.column_layouts(body);
+        if layouts.is_empty() {
+            println!("columns   none recorded on the body storage");
+        } else {
+            println!("columns   {} layout(s) on the body storage", layouts.len());
+            for layout in &layouts {
+                // Widths and gaps are fractions of the text width, not
+                // points, so they are printed as percentages.
+                let shape = match (&layout.equal, &layout.unequal) {
+                    (Some((count, gap)), _) => {
+                        format!("{count} equal column(s), gap {:.1}%", gap * 100.0)
+                    }
+                    (_, Some(_)) => {
+                        let parts: Vec<String> = layout
+                            .fractions()
+                            .iter()
+                            .map(|f| format!("{:.1}%", f * 100.0))
+                            .collect();
+                        format!(
+                            "{} unequal column(s): {}",
+                            layout.count(),
+                            parts.join(" | ")
+                        )
+                    }
+                    _ if layout.none => "no columns".to_string(),
+                    _ => "one column".to_string(),
+                };
+                println!(
+                    "    [{}, {}) style {} — {shape}",
+                    layout.start,
+                    layout.end,
+                    layout
+                        .style
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "none".into())
+                );
+            }
+        }
     }
     Ok(())
 }
