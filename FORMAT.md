@@ -3014,11 +3014,12 @@ prior art; every claim below that is marked *Confirmed* was checked against
 Keynote itself through `scripts/slide-oracle.sh`, which is the richest oracle of
 the three apps' dictionaries.
 
-The corpus this rests on is four decks — `keynote-deck` (6 slides, an image
+The corpus this rests on is six decks — `keynote-deck` (6 slides, an image
 slide, a skipped slide), `keynote-slides` (8 slides, 6 layouts, 2 skipped, 5
 transitions, slide numbers on), `keynote-shapes` (1 slide, every scriptable
-drawable), `keynote-charts` (19 slides) — plus the 182 `.kth` theme bundles the
-app ships.
+drawable), `keynote-charts` (19 slides), `keynote-transitions` (46 blank slides
+carrying all 44 effects) and `keynote-playback` (2 slides and four playback
+settings off their defaults) — plus the 182 `.kth` theme bundles the app ships.
 
 ### The show graph
 
@@ -3078,7 +3079,7 @@ the show lists the slides' nodes, the theme lists the layouts'.
 | Field | Meaning | Evidence |
 |---|---|---|
 | 1 | `style` → `KN.SlideStyleArchive` (9), one per layout, shared by every slide on it, and living in the document stylesheet | *Confirmed* |
-| 2 | `builds` → `KN.BuildArchive` (8) | *never seen* |
+| 2 | `builds` → `KN.BuildArchive` (8) | *never seen, decoded from the schema* |
 | 4 | `transition` → `KN.TransitionArchive` | *Confirmed* |
 | 5, 6, 20, 30 | title, body, slide-number and object placeholders | *Confirmed* |
 | 7 | `owned_drawables` | *Confirmed* |
@@ -3091,7 +3092,7 @@ the show lists the slides' nodes, the theme lists the layouts'.
 | 31, 35 | `bodyParagraphStyles`, `bodyListStyles` — **five each, one per outline level** | *Confirmed* |
 | 36 | `userDefinedGuideStorage` | *Confirmed* |
 | 42 | `drawables_z_order` | *Confirmed* |
-| 43 | `buildChunks` → `KN.BuildChunkArchive` (153) | *never seen* |
+| 43 | `buildChunks` → `KN.BuildChunkArchive` (153) | *never seen, decoded from the schema* |
 | 45 | `instructional_text_map`: `{drawable, "Slide Title"}` … , layouts only | *Confirmed* |
 
 **Field 31 is a positional array, not a style list.** Five bare style
@@ -3174,57 +3175,233 @@ the app shows a localised display name, `"Basic White"`, which is **nowhere in
 the document**. A reader that wants the app's name has to have a table this
 crate does not have.
 
-### Transitions — the inventory
+### Transitions
 
 ```text
  KN.SlideArchive.transition (4)
    └── KN.TransitionArchive.attributes (2)
-         └── KN.TransitionAttributesArchive.animationAttributes (8)
-               └── KN.AnimationAttributesArchive
-                     1 animation_type   "Transition"
-                     2 effect           the identifier
-                     3 duration         double, seconds
-                     4 direction
-                     5 delay            double, seconds
-                     6 is_automatic     advance without a click
-                     11 random_number_seed
-                     16 writing_direction_is_rtl
+         └── KN.TransitionAttributesArchive
+               ├── 8 animationAttributes → KN.AnimationAttributesArchive
+               │     1 animation_type   "Transition"
+               │     2 effect           the identifier
+               │     3 duration         double, seconds
+               │     4 direction        uint32; ABSENT is 0, "the effect's own"
+               │     5 delay            double, seconds
+               │     6 is_automatic     advance without a click
+               │     7 color            TSP.Color — Fade Through Colour's
+               │     11 random_number_seed
+               │     16 writing_direction_is_rtl
+               └── 9–20 the custom_* block: the parameters of the EFFECT
 ```
 
-The effect is **the identifier the app's own dictionary lists**, which is what
-makes this an inventory rather than a guess. `keynote-slides` carries five, set
-by script and read back:
+**A transition belongs to the slide it leaves.** Keynote plays a slide's
+transition on the way *out* of it. PowerPoint's belongs to the slide being
+entered, and Keynote's own importer shifts the whole deck by one to reconcile
+them — pptx slide *n+1*'s transition becomes Keynote slide *n*'s, and the last
+pptx slide's is dropped. Watched both ways, exporting and re-importing.
+*Confirmed.*
+
+#### The effect identifiers
+
+The effect is **the identifier the app's own dictionary lists**: the
+`transition effects` enumeration gives 44 names and a `cocoa string-value` for
+each, and the string is exactly what lands in field 2. `keynote-transitions`
+sets all 44 from a script on 44 otherwise identical blank slides, and the oracle
+reads every one of them back — so the whole table is app-verified, not
+transcribed. It lives in `keynote::EFFECTS`. Three entries are worth naming here
+because nothing about them could be guessed:
 
 | App's name | `effect` |
 |---|---|
-| no transition effect | `none` |
-| dissolve | `apple:dissolve` |
-| push | `apple:push` |
-| magic move | `apple:magic-move-implied-motion-path` |
-| wipe | `apple:wipe` |
-| confetti | `com.apple.iWork.Keynote.KLNConfetti` |
+| flip | `apple:revolve` |
+| object revolve | `apple:ca-revolve` |
+| move in | `apple:slide` |
 
 Duration, delay and `is_automatic` match the app's `transition duration`,
-`transition delay` and `automatic transition` exactly. The remaining
-`custom_*` fields of `KN.TransitionAttributesArchive` — twist, mosaic size and
-type, bounce, magic-move fade, timing curve, text delivery, motion blur, travel
-distance, angle, blur — are named from the schema and **unexercised**; they are
-phase 8b's. `random_number_seed` differs on every slide and is copied verbatim
-by the app's own duplicate.
+`transition delay` and `automatic transition` exactly. `random_number_seed`
+differs on every slide and is copied verbatim by the app's own duplicate.
 
-### Builds — nothing to report, and why
+#### The custom_\* block, and what belongs to what
+
+`KN.TransitionAttributesArchive` fields 9–20 are the parameters of the *effect*,
+not of the transition. **Keynote writes exactly the ones the chosen effect
+has**, whatever their value: `apple:scale` and `apple:ca-revolve` both carry
+`custom_bounce` = *false*, so a decoder that read absent as false would report a
+parameter these effects do not have and miss one they do. Reading them as
+optional is the whole of getting this right.
+
+Measured by diffing: 44 blank slides, same layout, no text, same duration, same
+delay, same automatic flag, one effect each. Anything that differs between two
+of them is the effect. Two control slides repeat `wipe` and `magic move` at
+other timings and carry **the same block**, which is what says the block does
+not depend on the timing.
+
+| Field | Name | Type | Observed on |
+|---|---|---|---|
+| 9 | `custom_twist` | float, degrees | `BUKTwist` = 3.3 *Confirmed* |
+| 10 | `custom_mosaic_size` | uint32 | none of the 44 *Schema only* |
+| 11 | `custom_mosaic_type` | uint32 | none of the 44 *Schema only* |
+| 12 | `custom_bounce` | bool | `ca-dissolve-and-flip`, `3D-cube`, `revolve`, `BLTRevolvingDoor` = true; `ca-revolve`, `scale` = false *Confirmed* |
+| 13 | `custom_magic_move_fade_unmatched_objects` | bool | magic move = true *Confirmed* |
+| 14 | — | — | **a hole in the schema**; a decoder reports it |
+| 15 | `custom_timing_curve` | enum 1–5 | magic move = 4, ease in / ease out *Confirmed* |
+| 16 | `custom_text_delivery_type` | enum 1–4 | magic move = 1, by object *Confirmed* |
+| 17 | `custom_motion_blur` | bool | none of the 44 *Schema only* |
+| 18 | `custom_travel_distance` | float | `fade-and-move` = 1.0 *Confirmed* |
+| 19 | `custom_angle` | float, degrees | `radial wipe` = 90 *Confirmed* |
+| 20 | `custom_blur_amount` | float | `radial wipe` = 0.5 *Confirmed* |
+
+Enum values, both from the 15.3.1 schema: timing curve 1 linear, 2 ease in,
+3 ease out, 4 ease in and out, 5 custom; text delivery 1 by object, 2 by word,
+3 by character, 4 by line. **2 and 3 are confirmed** — see the next section.
+
+**Magic Move's whole parameter surface is fields 13, 15 and 16** — Fade
+Unmatched Objects, Acceleration, and the text granularity the app's inspector
+calls "Text: Blend / Word / Character". There is no separate match mode: what
+matches is the objects' identity, and the only choice about the unmatched ones
+is whether they fade. *Confirmed* — set from a script on two slides at different
+timings, identical both times.
+
+Fields 1–7 of the same message are deprecated `database_*` copies of the
+animation attributes and are absent everywhere. Fourteen is a hole. Anything
+else is unnamed by 15.3.1, and `keynote::Transition::unknown_parameters` reports
+it: **empty over all six decks, all 17 layouts of each, and all 182 themes**.
+
+#### Direction, which the app will not write
+
+`AnimationAttributesArchive.direction` (4) is **absent from every transition
+Keynote 15.3.1 wrote in this corpus** — all 44 effects, all six decks, all 182
+themes — and absent is 0, "whatever this effect does by default". The scripting
+record has no direction member, so no probe can set one.
+
+The values come from the one route that does not need the UI: **give Keynote a
+PowerPoint file with a direction on it and read back what the importer wrote.**
+Export a deck to `.pptx`, patch the `<p:transition>` elements, open the result,
+save as `.key`. Two families, consistent across `apple:push`, `apple:wipe`,
+`apple:slide` and `com.apple.iWork.Keynote.BLTBlinds`:
+
+| Value | Travel | From PowerPoint |
+|---|---|---|
+| 11 | left to right | `<p:push dir="r"/>`, `<p:wipe dir="r"/>` |
+| 12 | right to left | `dir="l"` |
+| 13 | top to bottom | `dir="d"` |
+| 14 | bottom to top | `dir="u"` |
+| 21 | top left to bottom right | `<p:cover dir="rd"/>` |
+| 22 | top right to bottom left | `dir="ld"` |
+| 23 | bottom left to top right | `dir="ru"` |
+| 24 | bottom right to top left | `dir="lu"` |
+
+*Observed, through the importer* — which is weaker than the rest of this
+section, and marked as such: what is proven is the wire values and their
+geometry, not the English the inspector puts on them. The same probe confirmed
+`custom_text_delivery_type` **2 = by word** and **3 = by character**, from
+`<p159:morph option="byWord"/>` and `"byChar"`.
+
+### Playback
+
+`KN.ShowArchive` carries the whole of Document ▸ Presentation. Four of its
+settings have scripting terms and were moved to prove which field each one is —
+`keynote-playback` differs from every other deck here in exactly those four:
+
+| Field | Name | App's term | Evidence |
+|---|---|---|---|
+| 8 | `loop_presentation` | `auto loop` | false in five decks, true in one *Confirmed* |
+| 9 | `mode` | — | 0 normal, 1 auto-play, 2 hyperlinks only. Written explicitly at 0 by every deck; **no scripting term** *Schema only* |
+| 10 | `autoplay_transition_delay` | — | double, default 5 s; written at its default everywhere *Schema only* |
+| 11 | `autoplay_build_delay` | — | double, default 2 s; likewise *Schema only* |
+| 15 | `idle_timer_active` | `auto restart` | *Confirmed* |
+| 16 | `idle_timer_delay` | `maximum idle duration` | **seconds**, default 900 *Confirmed* |
+| 18 | `automatically_plays_upon_open` | `auto play` | *Confirmed* |
+
+**The dictionary's `maximum idle duration` is in minutes and the field is in
+seconds.** `set maximum idle duration of doc to 137` wrote 8220, and the app
+reads 137 back. A reader that took the field at face value would say a deck
+restarts after two and a quarter *hours*. The oracle compares minutes with
+seconds ÷ 60 on every deck for exactly this reason.
+
+**`auto play` is not the self-playing mode.** It is field 18, "start the show
+when the file is opened"; the self-playing presentation type is field 9, and
+nothing can move it.
+
+### The soundtrack
+
+`KN.ShowArchive.soundtrack` (17) → `KN.Soundtrack` (21), one per deck, in
+`Index/Document.iwa`, **in every deck this crate has seen and empty in all of
+them**: volume 1, mode 0 (play once), no tracks, eleven bytes on the wire.
+
+| Field | Meaning |
+|---|---|
+| 1 | `volume`, double, 0–1 |
+| 2 | `mode`: 0 play once, 1 loop, 2 do not play |
+| 3 | `movie_media`, repeated `TSP.DataReference` — **the track list, in play order** |
+
+A `TSP.DataReference` is `{1: identifier}` and nothing else, and the identifier
+is a media id in the same `TSP.DataInfo` table `iwork media` lists. That shape
+is decoded and **unexercised**, because nothing available can fill one in: there
+is no soundtrack term anywhere in Keynote's sdef, and `audio clip` — which *is*
+in the dictionary, as an element of a slide — cannot be made. `make new audio
+clip … with properties {file name:POSIX file "…"}` answers **no error at all**,
+the slide's `audio clips` still count zero, and the saved package holds no new
+`Data/` entry. An app trap worth the whole probe: a `make` that succeeds and
+does nothing.
+
+### Builds — decoded from the schema, never measured
 
 `KN.SlideArchive.builds` (2) and `buildChunks` (43) are **empty in every deck in
 this corpus and in all 182 bundled `.kth` themes**. Keynote's scripting
 dictionary has no build vocabulary at all — `transition properties` on a slide
 is the entire animation surface it exposes — and template mining does not help
-because a theme carries masters, not animations. So the build *count* this crate
-reports is always zero, and `KN.BuildArchive` (8) and `KN.BuildChunkArchive`
-(153) stay Inferred. Phase 8b needs a deck from somewhere else.
+because a theme carries masters, not animations. Nothing available can make one.
 
-`KN.RecordingArchive` (16) is in the same position, and stays there on purpose:
-a recorded presentation is read and passed through, never authored (ground
-rule 8).
+So the shape below is the 15.3.1 schema and nothing else. It is decoded anyway,
+so that a deck from *outside* is reported rather than counted as nothing, and
+`tests/keynote.rs` fails the day a fixture grows one — which is the signal to
+come back and measure it, not to trust it.
+
+```text
+ KN.BuildArchive (8)                                        *** UNVERIFIED ***
+   ├── 1 drawable      → what is animated
+   ├── 2 delivery      required string; values unknown, carried verbatim
+   ├── 4 attributes  → KN.BuildAttributesArchive
+   │     ├── 4  eventTrigger      On Click / With Build / After Build
+   │     ├── 18 animationAttributes → the SAME KN.AnimationAttributesArchive a
+   │     │      transition carries: effect, duration, delay, direction, automatic
+   │     ├── 20 custom_textDelivery    1 object, 2 word, 3 character, 4 line
+   │     ├── 21 custom_deliveryOption  1 forward, 2 backward, 3 from centre,
+   │     │                             4 from edges, 5 random
+   │     ├── 22 action_motionPathSource → TSD.PathSourceArchive (action builds)
+   │     ├── 9–13 action_* rotation, scale, colour alpha, acceleration
+   │     ├── 27, 28 startOffset, endOffset — the by-bullet-group range
+   │     └── 19, 23–26, 29, 30, 33–41 the custom_* block
+   └── 5 chunk_id_seed
+
+ KN.BuildChunkArchive (153)                                 *** UNVERIFIED ***
+   1 build → the KN.BuildArchive, 3 delay, 4 duration, 5 automatic, 6 referent,
+   7 build_chunk_identifier, 8 build_id
+```
+
+The **chunks are the delivery**: one stage each, in the order the slide lists
+them, each with its own delay, duration and automatic flag — which is where "With
+Build 2, after 0.3 s" would live. `startOffset`/`endOffset` are where a
+by-bullet-group text build would put its range. All of that is a reading of the
+schema; none of it has been watched.
+
+### Recordings and cameras — identified, never authored
+
+Two of ground rule 8's never-author cases live in the show.
+
+`KN.ShowArchive.recording` (7) → `KN.RecordingArchive` (16): event tracks (17),
+a movie track (18) whose `KN.MovieSegmentArchive`s name `Data/` entries, a
+duration and a sync state. **There is none anywhere in this corpus** — Play ▸
+Record Slideshow is menu-only and has no scripting term, so none can be made.
+`iwork slides` names one if it meets one and this crate never writes one.
+
+`KN.ThemeArchive.live_video_source_collection` (9) →
+`KN.LiveVideoSourceCollection` (185), whose `sources` (1) is **empty in every
+deck** and whose `default_source` (2) names the one `KN.LiveVideoSource` (184)
+each deck has: `"Default Camera"`, `is_default_source` true. A reader that
+walked only the `sources` list would report no cameras at all. A live-video feed
+is a device rather than a document; it is read and passed through.
 
 ### What a duplicate has to touch
 
