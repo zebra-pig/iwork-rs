@@ -2625,3 +2625,39 @@ fixture, and what the app accepted.
   Confirmed. Five tripwires flipped into pinning tests; tripwires remain for
   replies, resolved state, cell comments, table 25, and accept/reject
   residue. Full suite green (14 binaries), fmt/clippy clean.
+
+- 2026-08-18 — **A review of the text and style write path, and the twelve
+  things it found.** One critical, and it was the previous entry's discovery
+  turning round to bite: `destroyed_anchors` decided whether an edit destroyed
+  an anchor by *reading the character*, and its list was `U+FFFC` and `U+0004`,
+  so a footnote mark — `U+000E` — walked through. `iwork delete-text
+  pages-footnotes.pages 1732539 20 30` exited 0, orphaned the attachment and
+  its kind-2 storage, and `check` found nothing. The character is no longer
+  consulted at all: a character-anchored entry whose character goes is
+  destroyed whatever the character was, and not recognising it is the reason
+  to stop rather than a licence to proceed. `U+000E` joined `UNWRITABLE` from
+  the other side, and `check` learned to report a footnote attachment no mark
+  anchors and a kind-2 storage no attachment contains.
+
+  Two writers were producing the table their own checker rejects — one that
+  begins after character 0. `apply-style` on a storage with no table of that
+  kind wrote its first entry at the range's start; `delete-style … None`
+  dropped the entry at 0 outright. Both now write what Pages writes, a head
+  entry carrying nothing, which FORMAT.md's own probe fixture had recorded
+  (`[0 nil, 19 bold, 30 nil]`) without anyone reading it as a rule.
+
+  The rest: an attribute table whose bytes fail `decode_nested` was skipped by
+  the remapper *and* by `problems()` while every other table moved (now
+  `Error::UndecodableAttributeTable`); text that is not UTF-8 was read lossily
+  and written back (now `Error::InvalidText`); the anchor and section checks
+  read only the first occurrence of a field `apply` rewrites in full; the
+  end-of-text paragraph entry was dropped by an insertion at the end of the
+  text, which is what typing at the end of a text box is; `apply_text_style`
+  clamped an out-of-range range instead of refusing it and appended its new
+  field out of order. `text::refusal` now answers all six preconditions in one
+  place and `apply` asserts it in debug builds, because a contract listing
+  three of its six checks is how the other three come to be skipped.
+
+  Every fix carries the reviewer's own reproduction as a test. Full suite
+  green with `IWORK_APP_CHECK=1` — including Pages opening an edit made beside
+  a footnote and reading it back, with both notes still attached.
