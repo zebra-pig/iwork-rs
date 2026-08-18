@@ -118,6 +118,19 @@ and they say so. A header or footer is an ordinary text storage, so editing one
 is `iwork set-text <file> <storage> <text> <out>` with the id `iwork sections`
 prints.
 
+Keynote decks
+
+  iwork slides    <file>                   the deck: every slide, its layout,
+                                           its placeholders and their text, its
+                                           presenter notes, its transition and
+                                           how many builds it carries
+  iwork layouts   <file>                   the theme's slide layouts, in the
+                                           order the app lists them
+
+Both are Keynote-only; a Pages or Numbers document has no `KN.ShowArchive`
+and they say so. A skipped slide has no number: the app answers -1 for it and
+numbers the rest around it.
+
 text styles
 
   iwork styles       <file>                            every text style, with its object id
@@ -215,6 +228,8 @@ fn main() -> ExitCode {
         ["duplicate", file, out] => duplicate(file, out),
         ["sections", file] => sections(file),
         ["structure", file] => structure(file),
+        ["slides", file] => slides(file),
+        ["layouts", file] => layouts(file),
         ["properties"] => properties(),
         ["set-color", file, id, r, g, b, out] => set_color(file, id, r, g, b, out),
         ["paragraphs", file, storage] => {
@@ -837,6 +852,162 @@ fn slice_units(text: &str, start: u64, end: u64) -> String {
     let from = (start as usize).min(units.len());
     let to = (end as usize).min(units.len());
     String::from_utf16_lossy(&units[from..to])
+}
+
+// -- Keynote -----------------------------------------------------------------
+
+fn slides(path: &str) -> Result<(), Error> {
+    let doc = Document::open(path)?;
+    let Some(show) = doc.show() else {
+        println!("not a Keynote document — a show is a KN archive");
+        return Ok(());
+    };
+
+    let theme = if show.theme_name.is_empty() {
+        "unnamed theme".to_string()
+    } else {
+        format!("theme {}", show.theme_name)
+    };
+    println!(
+        "{} slide(s), {} layout(s), {} × {} points, {}",
+        show.slides.len(),
+        show.layouts.len(),
+        show.width,
+        show.height,
+        theme
+    );
+    let mut playback = vec![format!(
+        "slide numbers {}",
+        if show.slide_numbers_visible {
+            "shown"
+        } else {
+            "hidden"
+        }
+    )];
+    playback.push(format!("presentation {}", show.mode_name()));
+    if show.loop_presentation {
+        playback.push("loops".into());
+    }
+    if show.plays_on_open {
+        playback.push("plays on open".into());
+    }
+    if show.idle_timer_active {
+        playback.push(format!("restarts after {}s idle", show.idle_timer_delay));
+    }
+    println!("  {}", playback.join(", "));
+    if let Some(track) = &show.soundtrack {
+        println!(
+            "  soundtrack id={} {} track(s), volume {}, {}",
+            track.identifier,
+            track.tracks,
+            track.volume,
+            track.mode_name()
+        );
+    }
+    if let Some(recording) = show.recording {
+        println!("  recorded presentation id={recording} — read only, never authored");
+    }
+
+    for slide in &show.slides {
+        let number = match slide.number {
+            Some(n) => format!("slide {n}"),
+            None => "skipped".to_string(),
+        };
+        let layout = if slide.layout_name.is_empty() {
+            String::new()
+        } else {
+            format!(" on \"{}\"", slide.layout_name)
+        };
+        println!(
+            "\n[{}] {} id={} node={}{} — {}",
+            slide.index, number, slide.identifier, slide.node, layout, slide.stream
+        );
+        for text in &slide.texts {
+            let shown = match text.role {
+                iwork::keynote::Role::Title if !slide.title_showing() => " (not shown)",
+                iwork::keynote::Role::Body if !slide.body_showing() => " (not shown)",
+                _ => "",
+            };
+            println!(
+                "  {:<18} storage {}{} {}",
+                text.role.as_str(),
+                text.storage,
+                shown,
+                oneline(&text.text, 56)
+            );
+        }
+        if !slide.transition.is_none() {
+            println!(
+                "  transition         {} {}s, {}",
+                slide.transition.effect,
+                slide.transition.duration,
+                if slide.transition.automatic {
+                    format!("automatic after {}s", slide.transition.delay)
+                } else {
+                    "on click".to_string()
+                }
+            );
+        }
+        if slide.builds > 0 || slide.build_chunks > 0 {
+            println!(
+                "  builds             {} build(s), {} chunk(s)",
+                slide.builds, slide.build_chunks
+            );
+        }
+        println!(
+            "  drawables          {} owned, {} in z-order",
+            slide.drawables.len(),
+            slide.z_order.len()
+        );
+    }
+    Ok(())
+}
+
+fn layouts(path: &str) -> Result<(), Error> {
+    let doc = Document::open(path)?;
+    let Some(show) = doc.show() else {
+        println!("not a Keynote document — a slide layout is a KN archive");
+        return Ok(());
+    };
+    let used: std::collections::BTreeMap<u64, usize> =
+        show.slides.iter().fold(Default::default(), |mut acc, s| {
+            if let Some(layout) = s.layout {
+                *acc.entry(layout).or_default() += 1;
+            }
+            acc
+        });
+    println!("{} slide layout(s)", show.layouts.len());
+    for layout in &show.layouts {
+        let count = used.get(&layout.identifier).copied().unwrap_or(0);
+        println!(
+            "\n[{}] \"{}\" id={} node={} — {} slide(s) use it",
+            layout.index + 1,
+            layout.name,
+            layout.identifier,
+            layout.node,
+            count
+        );
+        for placeholder in &layout.placeholders {
+            println!(
+                "  {:<14} id={} {}{}",
+                placeholder.kind.as_str(),
+                placeholder.identifier,
+                if placeholder.shown {
+                    ""
+                } else {
+                    "(not shown) "
+                },
+                oneline(&placeholder.text, 48)
+            );
+        }
+        println!(
+            "  {:<14} {} drawable(s), {} outline level style(s)",
+            "carries",
+            layout.drawables,
+            layout.body_paragraph_styles.len()
+        );
+    }
+    Ok(())
 }
 
 fn structure(path: &str) -> Result<(), Error> {

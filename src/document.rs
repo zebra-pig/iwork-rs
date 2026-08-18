@@ -2557,6 +2557,29 @@ impl Document {
         crate::pages::column_layouts(self, storage)
     }
 
+    // -- the Keynote show ----------------------------------------------------
+
+    /// The deck: theme, slide size, every slide with its layout, placeholders,
+    /// presenter notes, transition and build counts, and every slide layout the
+    /// theme carries.
+    ///
+    /// `None` for a document with no `KN.ShowArchive`, which is every Pages and
+    /// Numbers document.
+    pub fn show(&self) -> Option<crate::keynote::Show> {
+        crate::keynote::show(self)
+    }
+
+    /// The slides of a Keynote document, in deck order.
+    pub fn slides(&self) -> Vec<crate::keynote::Slide> {
+        self.show().map(|s| s.slides).unwrap_or_default()
+    }
+
+    /// The slide layouts a Keynote document's theme carries, in the order the
+    /// app lists them.
+    pub fn slide_layouts(&self) -> Vec<crate::keynote::Layout> {
+        self.show().map(|s| s.layouts).unwrap_or_default()
+    }
+
     /// Comments, their authors, and tracked changes.
     ///
     /// Present in every document — the author storage always is — and empty in
