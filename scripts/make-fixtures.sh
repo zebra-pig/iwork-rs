@@ -289,6 +289,17 @@ copy_template pages-columns \
 	"Pages Creator Studio.app/Contents/SharedSupport/Templates/02_ResearchPaper_JP/ISO.template" \
 	pages
 
+# A password-protected package, which is a document this crate deliberately
+# **cannot read** — and the only thing in the whole comments/metadata area any
+# of the three dictionaries will do. `set password` is in the shared iWork
+# suite, so Pages, Numbers and Keynote all have it; one fixture is enough,
+# because the three were probed and the shape is identical.
+#
+# The password is `p4ssw0rd` and the hint is `the probe`. Nothing is committed,
+# so nothing is being published; the point is that `iwork` says
+# "password-protected" by name rather than "unexpected chunk marker 0x56".
+build pages-locked pages 300 "$dir/pages-plain.pages"
+
 osa_warm numbers
 build numbers-values numbers 180
 build numbers-formats numbers 240
