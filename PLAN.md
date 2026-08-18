@@ -404,14 +404,28 @@ confidently. Read-first, then the safest writes.
 
 ## Phase 8b — Keynote: builds, transitions, playback (read)
 
-- [ ] Build parameters: effect, direction, duration, build order, delivery
+- [x] Build parameters: effect, direction, duration, build order, delivery
       mode (On Click / After Transition / With/After Build n + delay),
       action builds with motion paths, by-bullet-group text builds.
-- [ ] Transition parameters incl. Magic Move's match modes; playback
+      *(Decoded from the 15.3.1 schema and honestly labelled **Unverified**:
+      there is no build in six decks or in 182 themes and nothing can make
+      one — 8a's boundary, respected. `keynote::Build` and `BuildChunk` report
+      one if a deck from outside ever carries one, and
+      `no_fixture_has_a_build_yet` fails the day a fixture does.)*
+- [x] Transition parameters incl. Magic Move's match modes; playback
       settings (presentation type, loop, auto-advance); soundtrack.
-- [ ] Recorded presentations: identify and pass through (never author —
-      ground rule 8).
-- [ ] FORMAT.md §Keynote: builds/transitions as observed.
+      *(The `custom_*` block measured by diffing 44 otherwise identical slides,
+      one per effect; the four scriptable playback settings measured against a
+      deck that moves them; the presentation type and the two self-playing
+      delays schema-only because nothing can move them; the soundtrack empty in
+      every deck and its track list decoded and unexercised.)*
+- [x] Recorded presentations: identify and pass through (never author —
+      ground rule 8). *(And live-video cameras with them: one per deck, the
+      collection's `default_source` and in no `sources` list.)*
+- [x] FORMAT.md §Keynote: builds/transitions as observed.
+      *(§13 gained six sections: transitions, the `custom_*` table with an
+      evidence tag per field, direction, playback, the soundtrack, builds, and
+      recordings and cameras.)*
 
 ## Phase 9 — Document creation and hardening
 
@@ -2238,6 +2252,127 @@ fixture, and what the app accepted.
     these *can* be exercised.
   - **A recorded presentation would hang off `KN.ShowArchive.recording` (7)**,
     and there is none; ground rule 8 says read and pass through, never author.
+
+- 2026-08-18 — **Phase 8b complete (Keynote: builds, transitions, playback,
+  read).** Two new fixtures (`keynote-transitions.key`, `keynote-playback.key`),
+  a new probe (`scripts/transition-direction-probe.sh` + `applescript/
+  keynote-powerpoint.applescript`), a `playback` line in the slide oracle, the
+  whole `custom_*` block and the effect table in `src/keynote.rs`, schema-level
+  `Build`/`BuildChunk`/`Recording`/`LiveVideoSource`, six new sections in
+  FORMAT.md §13, three registry entries added and four rewritten, and eight new
+  tests in `tests/keynote.rs`. `cargo fmt --check` and `cargo clippy
+  --all-targets -D warnings` clean; `cargo test --all-targets` green: 152 unit +
+  16 cell + 18 chart + 18 drawable + 24 fixture + 14 formula + **32 keynote** +
+  18 pages + 34 style + 22 table + 15 text + 4 doc. `IWORK_APP_CHECK=1
+  cargo test --all-targets` green over all **26 fixtures**, the two new decks
+  among them.
+
+  **What got A/B evidence, and what could not.** The rule the phase turned on is
+  that `transition settings` is a four-member record — effect, duration, delay,
+  automatic — so anything else about a transition has to be *diffed* rather than
+  read back. `keynote-transitions` is that diff: **44 blank slides, one per
+  effect in the app's own enumeration, identical in every other respect**, plus
+  two control slides that repeat an effect at another duration, delay and
+  automatic flag.
+
+  - **The `custom_*` block belongs to the effect.** Eleven of the 44 effects
+    write a parameter and thirty-three write none: `custom_bounce` on six object
+    effects, `custom_twist` = 3.3 on Twist, `custom_travel_distance` = 1 on Fade
+    and Move, `custom_angle` = 90 and `custom_blur_amount` = 0.5 on Radial Wipe,
+    and Magic Move's three — `custom_magic_move_fade_unmatched_objects` = true,
+    `custom_timing_curve` = 4 (ease in and out), `custom_text_delivery_type` = 1
+    (by object). The controls carry **the same block** at other timings, which is
+    what says the block is a function of the effect alone.
+  - **Absent is not false.** `apple:scale` and `apple:ca-revolve` both write
+    `custom_bounce` = *false*; the app writes the parameters an effect *has*,
+    whatever their value. Every one is an `Option` for that reason, and a
+    decoder that read absent as false would both invent a parameter and lose one.
+  - **Magic Move has no match mode.** Its whole surface is fields 13, 15 and 16 —
+    fade unmatched, acceleration, text granularity. What matches is the objects'
+    identity; the only choice about the rest is whether they fade.
+  - **Fade Through Colour writes a `TSP.Color`** at animation field 7 — black,
+    opaque — and is the only one of the 44 that writes one.
+  - **`custom_mosaic_size`, `custom_mosaic_type` and `custom_motion_blur` stay
+    schema-only.** Mosaic was set from a script and wrote neither of its two.
+  - **The playback A/B landed on four fields.** `keynote-playback` sets `auto
+    loop`, `auto play`, `auto restart` and `maximum idle duration`, and differs
+    from every other deck in exactly fields 8, 18, 15 and 16. `mode` (9) and the
+    two self-playing delays (10, 11) are written explicitly at their defaults by
+    every deck and have **no scripting term at all**, so they stay schema-only.
+
+  **The trap of the phase: `maximum idle duration` is in minutes and field 16 is
+  in seconds.** `set maximum idle duration to 137` wrote 8220. The oracle now
+  compares the app's minutes with the field ÷ 60 on every deck, because a reader
+  that took the number at face value would say a deck restarts after two and a
+  quarter hours.
+
+  **Direction came through PowerPoint, and that is the whole story.** Keynote
+  writes no direction: field 4 is absent from every transition in six decks and
+  182 themes, and the record has no member for it. The one door left that does
+  not need the user interface is the importer — export a deck to `.pptx`, patch
+  the `<p:transition>` elements, open the result, save as `.key`. Eight values,
+  two families, consistent across `apple:push`, `apple:wipe`, `apple:slide` and
+  `BLTBlinds`: **11 left-to-right, 12 right-to-left, 13 top-to-bottom, 14
+  bottom-to-top; 21–24 the four diagonals.** The same probe confirmed
+  `custom_text_delivery_type` **2 = by word** and **3 = by character** from
+  `<p159:morph option="byWord"/>`. Marked *Observed, through the importer* —
+  weaker than the rest of §13 and labelled so.
+
+  That probe also produced a fact about the format itself: **a transition
+  belongs to the slide it leaves.** PowerPoint's belongs to the slide being
+  entered, and Keynote's importer shifts the whole deck by one to reconcile them
+  — pptx slide *n+1* lands on Keynote slide *n*, and the last is dropped. It cost
+  an hour to notice and it explains the whole first round of results.
+
+  **All 44 effect identifiers are now app-verified rather than transcribed.**
+  `keynote::EFFECTS` pairs the dictionary's name with the identifier on the wire,
+  and the oracle test makes Keynote read all 46 slides back and compares every
+  pairing. Three could not have been guessed: `apple:revolve` is *flip*,
+  `apple:ca-revolve` is *object revolve*, `apple:slide` is *move in*.
+
+  **The soundtrack is a dead end, and now a documented one.** Every deck has a
+  `KN.Soundtrack` and every one is empty — volume 1, play once, eleven bytes.
+  There is no soundtrack term anywhere in the sdef. The nearest thing, `audio
+  clip`, is an element of a *slide*, and `make new audio clip … with properties
+  {file name:…}` is the worst kind of failure: **no error at all**, the slide's
+  `audio clips` still count zero, and the saved package holds no new `Data/`
+  entry. So `movie_media` (3) is decoded as what the schema says it is — a
+  repeated `TSP.DataReference`, an ordered list of media ids into the same table
+  `iwork media` prints — and left Unverified.
+
+  **Builds are 8a's boundary and it held.** Zero `KN.BuildArchive` in six decks,
+  zero in 182 themes, no dictionary vocabulary. `KN.BuildArchive`,
+  `KN.BuildAttributesArchive` and `KN.BuildChunkArchive` are decoded from the
+  15.3.1 schema — drawable, delivery string carried verbatim, event trigger, the
+  shared animation attributes, text delivery and delivery option, the action
+  motion path, the start/end offsets a by-bullet-group build would use — and
+  `no_fixture_has_a_build_yet` fails the day a fixture produces one, which is the
+  signal to measure rather than to trust.
+
+  **Two never-author cases identified.** There is no `KN.RecordingArchive`
+  anywhere (Record Slideshow is menu-only), and there is exactly one
+  `KN.LiveVideoSource` per deck — `"Default Camera"`, `is_default_source` true.
+  It is the collection's `default_source` and is in **no** `sources` list, so a
+  reader that walked the list would report no cameras at all.
+
+  What Phase 9 should know:
+
+  - **The corpus is 26 fixtures now**, two of them Keynote decks built for
+    diffing. `keynote-transitions` has 46 slides and 1677 objects and is the
+    largest deck here; `iwork check` and `iwork roundtrip` are clean on both.
+  - **A `.pptx` round trip is a probe route the harness now owns.**
+    `scripts/transition-direction-probe.sh` exports, patches and re-imports, and
+    the shift-by-one is handled. Anything else Keynote's importer can express and
+    its dictionary cannot — build directions among them, if PowerPoint animation
+    XML survives the import — is reachable the same way. It is worth trying
+    against `<p:anim>`/`<p:animEffect>` before declaring builds unreachable
+    forever; this phase did not, because the schema decode was the deliverable.
+  - **Nothing in 8b writes.** The phase is read-only on documents by brief, so
+    there is no new writing rule and rules 22–23 stand unchanged.
+  - **`Slide::builds` and `Slide::build_chunks` changed type** from `usize` to
+    `Vec<Build>` / `Vec<BuildChunk>`, and `Soundtrack::tracks` from a field to a
+    method. `Show::recording` is now `Option<Recording>` rather than
+    `Option<u64>`. Anything outside this repository using those would break.
 
 ## Execution notes
 
