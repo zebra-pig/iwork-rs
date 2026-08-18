@@ -18,6 +18,17 @@ iwork — inspect and edit Apple iWork documents (.pages, .numbers, .key)
   iwork extract   <file> <dir>             write embedded media to a directory
   iwork roundtrip <file> <out>             decode and re-encode every object
 
+drawables and media
+
+  iwork drawables <file>                   every placed object: geometry, style,
+                                           media and non-destructive edit state
+  iwork set-geometry <file> <id> <x> <y> [<w> <h>] <out>
+                                           move or resize one drawable
+
+An <id> is an object identifier as printed by `iwork drawables`.
+Positions and sizes are in points, and are the rectangle the app reports — for
+a cropped image that is the mask's window, not the picture's own rectangle.
+
 tables
 
   iwork tables    <file>                   every table: size, headers, geometry
@@ -103,6 +114,11 @@ fn main() -> ExitCode {
             .and_then(|(id, replacement)| delete_style(file, id, Some(replacement), out)),
         ["apply-style", file, storage, start, end, style, out] => {
             apply_style(file, storage, start, end, style, out)
+        }
+        ["drawables", file] => drawables(file),
+        ["set-geometry", file, id, x, y, out] => set_geometry(file, id, x, y, None, out),
+        ["set-geometry", file, id, x, y, w, h, out] => {
+            set_geometry(file, id, x, y, Some((w, h)), out)
         }
         ["tables", file] => tables(file),
         ["cells", file, table] => cells(file, table, false),
@@ -330,6 +346,273 @@ fn tables(path: &str) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+fn drawables(path: &str) -> Result<(), Error> {
+    let doc = Document::open(path)?;
+    let all = doc.drawables();
+    if all.is_empty() {
+        println!("no drawables");
+        return Ok(());
+    }
+    let by_id: BTreeMap<u64, &iwork::Drawable> = all.iter().map(|d| (d.identifier, d)).collect();
+    let mut place = String::new();
+
+    for drawable in &all {
+        let where_ = drawable.placement.as_str();
+        if where_ != place {
+            println!("== {where_} ==");
+            place = where_;
+        }
+        let mask = drawable.mask().and_then(|id| by_id.get(&id)).copied();
+        let frame = drawable.frame(mask);
+        let mut what = drawable.kind.as_str().to_string();
+        if drawable
+            .path_source
+            .as_ref()
+            .is_some_and(|p| p.looks_like_a_line())
+        {
+            what = "line".to_string();
+        }
+        println!(
+            "  {:<8} z{:<3} {:<12} {:>8.1},{:<8.1} {:>8.1} × {:<8.1}{}",
+            drawable.identifier,
+            drawable.z,
+            what,
+            frame.x,
+            frame.y,
+            frame.width,
+            frame.height,
+            match drawable.geometry.angle {
+                angle if angle != 0.0 => format!("  {angle:.1}°"),
+                _ => String::new(),
+            }
+        );
+        let mut notes: Vec<String> = Vec::new();
+        if drawable.locked {
+            notes.push("locked".into());
+        }
+        if drawable.aspect_ratio_locked {
+            notes.push("aspect locked".into());
+        }
+        if drawable.geometry.flags != 3 {
+            notes.push(format!("geometry flags {}", drawable.geometry.flags));
+        }
+        if let Some(parent) = drawable.parent {
+            notes.push(format!("parent {parent}"));
+        }
+        if let Some(text) = drawable.text {
+            notes.push(format!("text storage {text}"));
+        }
+        if let Some(comment) = drawable.comment {
+            notes.push(format!("comment {comment}"));
+        }
+        if !drawable.pencil_annotations.is_empty() {
+            notes.push(format!(
+                "{} pencil annotation(s)",
+                drawable.pencil_annotations.len()
+            ));
+        }
+        if !notes.is_empty() {
+            println!("      {}", notes.join(", "));
+        }
+        if let Some(link) = &drawable.hyperlink {
+            println!("      link {link}");
+        }
+        if let Some(description) = &drawable.description {
+            println!("      description {description:?}");
+        }
+        if !drawable.children.is_empty() {
+            let list: Vec<String> = drawable.children.iter().map(u64::to_string).collect();
+            println!("      children (back to front): {}", list.join(", "));
+        }
+        if let Some(source) = &drawable.path_source {
+            println!(
+                "      path: {:?}{}{}",
+                source.kind,
+                match source.natural_size {
+                    Some((w, h)) => format!(" natural {w:.1} × {h:.1}"),
+                    None => String::new(),
+                },
+                match source.elements {
+                    0 => String::new(),
+                    n => format!(", {n} element(s)"),
+                }
+            );
+        }
+        if let Some(media) = &drawable.media {
+            let name = media
+                .data
+                .and_then(|id| doc.data_files().into_iter().find(|d| d.identifier == id))
+                .map(|d| {
+                    if d.stored_name.is_empty() {
+                        format!("{} (theme asset)", d.original_name)
+                    } else {
+                        format!("Data/{}", d.stored_name)
+                    }
+                })
+                .unwrap_or_else(|| "none".to_string());
+            println!(
+                "      media: {name}{}{}{}",
+                match media.natural_size {
+                    Some((w, h)) => format!(", natural {w:.0} × {h:.0}"),
+                    None => String::new(),
+                },
+                if media.is_placeholder() {
+                    ", placeholder"
+                } else {
+                    ""
+                },
+                if media.was_replaced() {
+                    ", replaced"
+                } else {
+                    ""
+                }
+            );
+            let mut playback: Vec<String> = Vec::new();
+            if let Some((start, end)) = media.trim {
+                playback.push(format!("trimmed {start:.2}s–{end:.2}s"));
+            }
+            if let Some(time) = media.poster_time {
+                playback.push(format!("poster at {time:.2}s"));
+            }
+            if let Some(volume) = media.volume {
+                playback.push(format!("volume {:.0}%", volume * 100.0));
+            }
+            if let Some(option) = media.loop_option {
+                playback.push(format!("loop {option}"));
+            }
+            if media.audio_only {
+                playback.push("audio only".into());
+            }
+            if media.live_video {
+                playback.push("live video source".into());
+            }
+            if let Some(url) = &media.remote_url {
+                playback.push(format!("streams from {url}"));
+            }
+            if !playback.is_empty() {
+                println!("      playback: {}", playback.join(", "));
+            }
+        }
+        if !drawable.extensions.is_empty() {
+            println!("      carries: {}", drawable.extensions.join(", "));
+        }
+        if let Some(state) = &drawable.edit_state {
+            if let Some(mask) = state.mask {
+                println!(
+                    "      mask {mask}{}",
+                    if state.crops {
+                        " (crops)"
+                    } else {
+                        " (identity)"
+                    }
+                );
+            }
+            for objection in state.objections() {
+                println!("      edit state: {objection}");
+            }
+        }
+        if let Some(style) = drawable.style.and_then(|id| doc.object_style(id)) {
+            let mut parts: Vec<String> = Vec::new();
+            if let Some(name) = &style.name {
+                parts.push(format!("{name:?}"));
+            }
+            if let Some(fill) = &style.fill {
+                parts.push(match fill {
+                    iwork::drawable::Fill::Color(colour) => format!("fill {colour}"),
+                    other => format!("fill {}", other.as_str()),
+                });
+            }
+            if let Some(stroke) = &style.stroke {
+                parts.push(format!(
+                    "stroke {:?} {:.1}pt{}",
+                    stroke.pattern,
+                    stroke.width,
+                    match stroke.color {
+                        Some(colour) => format!(" {colour}"),
+                        None => String::new(),
+                    }
+                ));
+            }
+            if let Some(opacity) = style.opacity {
+                parts.push(format!("opacity {:.0}%", opacity * 100.0));
+            }
+            if let Some(shadow) = &style.shadow {
+                parts.push(format!(
+                    "shadow {}{:.0}° {:.0}pt r{}",
+                    if shadow.enabled { "" } else { "off " },
+                    shadow.angle,
+                    shadow.offset,
+                    shadow.radius
+                ));
+            }
+            if let Some(reflection) = style.reflection {
+                parts.push(format!("reflection {:.0}%", reflection * 100.0));
+            }
+            println!(
+                "      style {}{}: {}",
+                style.identifier,
+                match style.override_count {
+                    Some(n) if n > 0 => format!(" (+{n} override(s))"),
+                    _ => String::new(),
+                },
+                if parts.is_empty() {
+                    "nothing this crate reads".to_string()
+                } else {
+                    parts.join(", ")
+                }
+            );
+        }
+    }
+    println!("\n{} drawable(s)", all.len());
+    Ok(())
+}
+
+fn set_geometry(
+    path: &str,
+    id: &str,
+    x: &str,
+    y: &str,
+    size: Option<(&str, &str)>,
+    out: &str,
+) -> Result<(), Error> {
+    let identifier = identifier(id)?;
+    let number = |text: &str| -> Result<f32, Error> {
+        text.parse::<f32>()
+            .map_err(|_| Error::Format(format!("'{text}' is not a number of points")))
+    };
+    let position = Some((number(x)?, number(y)?));
+    let size = match size {
+        Some((w, h)) => Some((number(w)?, number(h)?)),
+        None => None,
+    };
+
+    let mut doc = Document::open(path)?;
+    let before = doc
+        .drawable(identifier)
+        .ok_or(Error::NoSuchObject(identifier))?;
+    if before.locked {
+        println!("note: drawable {identifier} is locked, so the app will not let a user move it");
+    }
+    let change = doc.set_geometry(identifier, position, size)?;
+    println!(
+        "{} {}: {:.1},{:.1} {:.1} × {:.1} -> {:.1},{:.1} {:.1} × {:.1}",
+        before.kind.as_str(),
+        change.drawable,
+        change.before.x,
+        change.before.y,
+        change.before.width,
+        change.before.height,
+        change.after.x,
+        change.after.y,
+        change.after.width,
+        change.after.height
+    );
+    if let Some(mask) = change.mask {
+        println!("  mask {mask} scaled with it");
+    }
+    save(&doc, out)
 }
 
 /// Hidden rows or columns, each with the reason the model gives.

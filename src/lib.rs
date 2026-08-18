@@ -40,6 +40,7 @@
 //! ```
 
 pub mod document;
+pub mod drawable;
 pub mod iwa;
 pub mod package;
 pub mod pb;
@@ -49,6 +50,7 @@ pub mod table;
 pub mod text;
 
 pub use document::{Component, DataFile, Document, Kind, TextStorage};
+pub use drawable::{Drawable, Geometry, Placement};
 pub use package::Package;
 pub use style::{CreatedStyle, Label, StyleDeletion, StyleKind, StyleUse, TextStyle};
 pub use table::{Cell, CellControl, CellFormat, CellValue, Merge, Table};

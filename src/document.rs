@@ -913,6 +913,312 @@ impl Document {
         self.set_archive(list, &archive)
     }
 
+    // -- drawables -----------------------------------------------------------
+
+    /// Every drawable in the document — images, shapes, text boxes, lines,
+    /// movies, groups, tables and charts — in stream and z-order.
+    ///
+    /// See [`crate::drawable`] for what a drawable is made of and why the
+    /// enumeration does not assume how deep the geometry sits.
+    pub fn drawables(&self) -> Vec<crate::drawable::Drawable> {
+        crate::drawable::drawables(self)
+    }
+
+    /// One drawable by object identifier.
+    pub fn drawable(&self, identifier: u64) -> Option<crate::drawable::Drawable> {
+        self.drawables()
+            .into_iter()
+            .find(|d| d.identifier == identifier)
+    }
+
+    /// A drawable's fill, stroke, shadow, reflection and opacity, resolved up
+    /// the style chain.
+    pub fn object_style(&self, identifier: u64) -> Option<crate::drawable::ObjectStyle> {
+        crate::drawable::object_style(self, identifier)
+    }
+
+    /// Move or resize a drawable.
+    ///
+    /// The rectangle is the one the **app** reports, which for a masked image
+    /// is the mask's window and not the picture's own rectangle. Give `None`
+    /// for either half to leave it alone.
+    ///
+    /// What travels with it, because the app maintains it and a document that
+    /// does not is inconsistent with every other document:
+    ///
+    /// * a media drawable's `originalSize`, which Keynote and Pages both
+    ///   rewrote to the new size when a script resized an image;
+    /// * a mask's geometry and its path source's natural size. Resizing a
+    ///   masked image scales the whole assembly by one factor: Pages, asked to
+    ///   make a 475-point-wide masked photo 300 wide, multiplied the picture's
+    ///   own size, the mask's offset, the mask's size and the mask path's
+    ///   natural size by 300/475 and moved the picture so that
+    ///   `image.position + mask.position` still landed on the frame's corner.
+    ///   That is what this reproduces, with the horizontal and vertical factors
+    ///   taken separately — which reduces to what was observed whenever the
+    ///   resize is proportional, and is **unverified** when it is not, because
+    ///   the app would not perform one: every image in the corpus has its
+    ///   aspect ratio locked.
+    ///
+    /// Rotation, the geometry flags and everything else in the archive are left
+    /// exactly as they were.
+    ///
+    /// Refused by name: an object carrying version patches (see
+    /// [`Document::patched_objects`]), and resizing something whose current
+    /// width or height is zero, where the scale factor is not a number. A
+    /// **locked** drawable is not refused — the lock is a rule the app's UI
+    /// keeps, not one the format keeps — but it is reported, because the app
+    /// will not let a user undo the move by hand.
+    pub fn set_geometry(
+        &mut self,
+        identifier: u64,
+        position: Option<(f32, f32)>,
+        size: Option<(f32, f32)>,
+    ) -> Result<crate::drawable::GeometryChange, Error> {
+        use crate::drawable::Frame;
+
+        let drawable = self
+            .drawable(identifier)
+            .ok_or(Error::NoSuchObject(identifier))?;
+        let mask = drawable.mask().and_then(|id| self.drawable(id));
+        let before = drawable.frame(mask.as_ref());
+        for object in [Some(identifier), mask.as_ref().map(|m| m.identifier)]
+            .into_iter()
+            .flatten()
+        {
+            if self.patched_objects().iter().any(|&(id, _)| id == object) {
+                return Err(Error::Format(format!(
+                    "drawable {identifier}: object {object} carries version patches, and \
+                     rewriting it would leave them describing where it used to be"
+                )));
+            }
+        }
+
+        let after = Frame {
+            x: position.map(|p| p.0).unwrap_or(before.x),
+            y: position.map(|p| p.1).unwrap_or(before.y),
+            width: size.map(|s| s.0).unwrap_or(before.width),
+            height: size.map(|s| s.1).unwrap_or(before.height),
+        };
+        let resizing = after.width != before.width || after.height != before.height;
+        if resizing && (before.width == 0.0 || before.height == 0.0) {
+            return Err(Error::Format(format!(
+                "drawable {identifier}: it is {} × {} and there is no factor that scales \
+                 zero to something else",
+                before.width, before.height
+            )));
+        }
+        let (sx, sy) = if resizing {
+            (after.width / before.width, after.height / before.height)
+        } else {
+            (1.0, 1.0)
+        };
+
+        // The requested rectangle is the *reported* one, whose origin is the
+        // rotated bounding box's corner. Turn it back into the unrotated
+        // origin the archive stores, which is the inverse of what
+        // `Drawable::frame` does and is the identity at zero degrees.
+        let (extent_x, extent_y) =
+            crate::drawable::rotated_extent(after.width, after.height, drawable.geometry.angle);
+        let base = Frame {
+            x: after.x + extent_x / 2.0 - after.width / 2.0,
+            y: after.y + extent_y / 2.0 - after.height / 2.0,
+            width: after.width,
+            height: after.height,
+        };
+
+        let mut rewritten = Vec::new();
+        let mut geometry = drawable.geometry;
+        match &mask {
+            Some(mask) => {
+                geometry.width *= sx;
+                geometry.height *= sy;
+                let mut mask_geometry = mask.geometry;
+                mask_geometry.x *= sx;
+                mask_geometry.y *= sy;
+                mask_geometry.width = base.width;
+                mask_geometry.height = base.height;
+                geometry.x = base.x - mask_geometry.x;
+                geometry.y = base.y - mask_geometry.y;
+                self.write_geometry(mask.identifier, &mask.path, mask_geometry)?;
+                if resizing {
+                    self.scale_path_source(mask, base.width, base.height)?;
+                }
+                rewritten.push(mask.identifier);
+            }
+            None => {
+                geometry.x = base.x;
+                geometry.y = base.y;
+                geometry.width = base.width;
+                geometry.height = base.height;
+            }
+        }
+        self.write_geometry(identifier, &drawable.path, geometry)?;
+        if resizing && mask.is_none() && drawable.path_source.is_some() {
+            self.scale_path_source(&drawable, base.width, base.height)?;
+        }
+        rewritten.push(identifier);
+
+        // Media keeps its placed size beside its geometry, and the app moves
+        // the two together.
+        if resizing && drawable.kind.is_media() {
+            let mut archive = self.archive_of(identifier)?;
+            let field = match drawable.kind {
+                crate::drawable::Kind::Image => crate::drawable::image_field::ORIGINAL_SIZE,
+                _ => 20,
+            };
+            let path: Vec<u32> = drawable.path[..drawable.path.len().saturating_sub(1)].to_vec();
+            let mut body = if path.is_empty() {
+                archive.clone()
+            } else {
+                match style::get_path(&archive, &path) {
+                    Some(Value::Bytes(raw)) => crate::pb::decode_nested(&raw).unwrap_or_default(),
+                    _ => Message::default(),
+                }
+            };
+            if body.get(field).is_some() {
+                let mut point = body
+                    .bytes(field)
+                    .and_then(crate::pb::decode_nested)
+                    .unwrap_or_default();
+                point.set_in_order(1, Value::Fixed32(geometry.width.to_le_bytes()));
+                point.set_in_order(2, Value::Fixed32(geometry.height.to_le_bytes()));
+                body.set_in_order(field, Value::Bytes(point.encode()));
+                if path.is_empty() {
+                    archive = body;
+                } else {
+                    style::set_path(&mut archive, &path, Some(Value::Bytes(body.encode())))
+                        .map_err(|e| Error::Format(format!("drawable {identifier}: {e}")))?;
+                }
+                self.set_archive(identifier, &archive)?;
+            }
+        }
+
+        Ok(crate::drawable::GeometryChange {
+            drawable: identifier,
+            before,
+            after,
+            mask: mask.map(|m| m.identifier),
+            rewritten,
+        })
+    }
+
+    /// Write a geometry back at the field path the drawable was found through.
+    fn write_geometry(
+        &mut self,
+        identifier: u64,
+        path: &[u32],
+        geometry: crate::drawable::Geometry,
+    ) -> Result<(), Error> {
+        let mut archive = self.archive_of(identifier)?;
+        let mut full: Vec<u32> = path.to_vec();
+        full.push(crate::drawable::field::GEOMETRY);
+        let Some(Value::Bytes(raw)) = style::get_path(&archive, &full) else {
+            return Err(Error::Format(format!(
+                "drawable {identifier}: no geometry at field {}",
+                full.iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(".")
+            )));
+        };
+        let mut message = crate::pb::decode_nested(&raw).ok_or_else(|| {
+            Error::Format(format!("drawable {identifier}: geometry does not decode"))
+        })?;
+        geometry.write_into(&mut message);
+        style::set_path(&mut archive, &full, Some(Value::Bytes(message.encode())))
+            .map_err(|e| Error::Format(format!("drawable {identifier}: {e}")))?;
+        self.set_archive(identifier, &archive)
+    }
+
+    /// Resize a shape's or a mask's path source with the object.
+    ///
+    /// **A shape's size lives in two places**, which is the thing this exists
+    /// for. Told to make a 200 × 200 Keynote shape 444 × 128, the app rewrote
+    /// the geometry *and* the bezier path source — its natural size and every
+    /// one of the rectangle's corners — and a document with only the geometry
+    /// changed opens with the app still reporting 200 × 200. Nothing about that
+    /// is visible from the archive alone; it took writing one and asking.
+    ///
+    /// **A mask is the exception, and it is the app's exception rather than a
+    /// simplification here.** Asked to resize the cropped photo in the Pages
+    /// report, Pages changed the mask path's natural size from 475 × 383 to
+    /// 300 × 241.89 and left every point of the path exactly where it was —
+    /// while Keynote, resizing a shape, moved both. So masks get the natural
+    /// size only, shapes get both, and each matches what the app that owns it
+    /// wrote. The points are additionally left alone when they are plainly not
+    /// drawn in the frame's coordinates, which is the case for a line.
+    fn scale_path_source(
+        &mut self,
+        drawable: &crate::drawable::Drawable,
+        width: f32,
+        height: f32,
+    ) -> Result<(), Error> {
+        let identifier = drawable.identifier;
+        let mut archive = self.archive_of(identifier)?;
+        // The path source hangs off the concrete class — field 3 of a shape,
+        // field 2 of a mask — which is one level above the drawable archive.
+        let body_path: Vec<u32> = drawable.path[..drawable.path.len().saturating_sub(1)].to_vec();
+        let field = match drawable.kind {
+            crate::drawable::Kind::Mask => 2u32,
+            _ => 3,
+        };
+        let mut body = if body_path.is_empty() {
+            archive.clone()
+        } else {
+            match style::get_path(&archive, &body_path) {
+                Some(Value::Bytes(raw)) => crate::pb::decode_nested(&raw).unwrap_or_default(),
+                _ => return Ok(()),
+            }
+        };
+        let Some(mut source) = body.bytes(field).and_then(crate::pb::decode_nested) else {
+            return Ok(());
+        };
+
+        // The natural size sits at a different field per path-source kind: 3
+        // for the point and scalar sources, 2 for the bezier ones, 1 for a
+        // callout. Only the arm that is set is touched.
+        for (arm, natural) in [(3u32, 3u32), (4, 3), (5, 2), (6, 1), (8, 2)] {
+            let Some(mut arm_body) = source.bytes(arm).and_then(crate::pb::decode_nested) else {
+                continue;
+            };
+            let Some(mut point) = arm_body.bytes(natural).and_then(crate::pb::decode_nested) else {
+                continue;
+            };
+            let was = (float_field(&point, 1), float_field(&point, 2));
+            point.set_in_order(1, Value::Fixed32(width.to_le_bytes()));
+            point.set_in_order(2, Value::Fixed32(height.to_le_bytes()));
+            arm_body.set_in_order(natural, Value::Bytes(point.encode()));
+
+            if matches!(arm, 5 | 8) && drawable.kind != crate::drawable::Kind::Mask {
+                let factor = |before: f32, after: f32| {
+                    if before.abs() < f32::EPSILON {
+                        1.0
+                    } else {
+                        after / before
+                    }
+                };
+                scale_path_points(
+                    &mut arm_body,
+                    3,
+                    was,
+                    (factor(was.0, width), factor(was.1, height)),
+                );
+            }
+
+            source.set_in_order(arm, Value::Bytes(arm_body.encode()));
+            body.set_in_order(field, Value::Bytes(source.encode()));
+            if body_path.is_empty() {
+                archive = body;
+            } else {
+                style::set_path(&mut archive, &body_path, Some(Value::Bytes(body.encode())))
+                    .map_err(|e| Error::Format(format!("drawable {identifier}: {e}")))?;
+            }
+            return self.set_archive(identifier, &archive);
+        }
+        Ok(())
+    }
+
     // -- text styles ---------------------------------------------------------
 
     /// Every character, paragraph and list style in the document.
@@ -1850,6 +2156,59 @@ impl Document {
             .and_then(|raw| iwa::decompress(raw).ok())
             .is_some_and(|original| original == framed)
     }
+}
+
+/// A float field, or zero.
+fn float_field(message: &Message, number: u32) -> f32 {
+    match message.get(number) {
+        Some(Value::Fixed32(bytes)) => f32::from_le_bytes(*bytes),
+        _ => 0.0,
+    }
+}
+
+/// Scale every point of a baked path, when the path is drawn in the space the
+/// natural size describes.
+fn scale_path_points(body: &mut Message, field: u32, was: (f32, f32), scale: (f32, f32)) {
+    let Some(mut path) = body.bytes(field).and_then(crate::pb::decode_nested) else {
+        return;
+    };
+    let mut extent = (0.0f32, 0.0f32);
+    let mut points: Vec<Message> = Vec::new();
+    for value in path.all(1) {
+        let Value::Bytes(raw) = value else { return };
+        let Some(element) = crate::pb::decode_nested(raw) else {
+            return;
+        };
+        if let Some(point) = element.bytes(2).and_then(crate::pb::decode_nested) {
+            extent.0 = extent.0.max(float_field(&point, 1));
+            extent.1 = extent.1.max(float_field(&point, 2));
+        }
+        points.push(element);
+    }
+    // Not drawn in the frame's coordinates: leave it exactly as it is.
+    let close = |a: f32, b: f32| (a - b).abs() <= (a.abs().max(b.abs()) * 1e-3).max(1e-3);
+    if !close(extent.0, was.0) || !close(extent.1, was.1) {
+        return;
+    }
+    for element in &mut points {
+        let Some(mut point) = element.bytes(2).and_then(crate::pb::decode_nested) else {
+            continue;
+        };
+        point.set_in_order(
+            1,
+            Value::Fixed32((float_field(&point, 1) * scale.0).to_le_bytes()),
+        );
+        point.set_in_order(
+            2,
+            Value::Fixed32((float_field(&point, 2) * scale.1).to_le_bytes()),
+        );
+        element.set_in_order(2, Value::Bytes(point.encode()));
+    }
+    path.clear(1);
+    for element in points {
+        path.append_in_order(1, Value::Bytes(element.encode()));
+    }
+    body.set_in_order(field, Value::Bytes(path.encode()));
 }
 
 fn dotted(path: &[u32]) -> String {
