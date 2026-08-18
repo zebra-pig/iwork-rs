@@ -2832,6 +2832,11 @@ impl Document {
         // exist. See `structure_problems`.
         problems.extend(self.structure_problems());
 
+        // So does the Keynote show: the slide tree against the nodes, the nodes
+        // against their slides, layouts that resolve, placeholders whose kind
+        // matches the field that names them. See `show_problems`.
+        problems.extend(self.show_problems());
+
         // Tables check themselves: keys that resolve, refcounts that match the
         // cells, cell counts that match the records. See `Table::audit` for why
         // each of those is a rule.
@@ -3010,6 +3015,127 @@ impl Document {
                         chart.identifier
                     )),
                     _ => {}
+                }
+            }
+        }
+        problems
+    }
+
+    /// What a Keynote show has to hold, and what the phase-8a writes could
+    /// break.
+    ///
+    /// Nothing here fires on a document Keynote wrote.
+    ///
+    /// * **Every entry in the slide tree is a `KN.SlideNodeArchive`, and no
+    ///   node is in it twice.** The tree is a positional list of references;
+    ///   a reorder that duplicated an entry would show the same slide twice and
+    ///   the app would still open the deck.
+    /// * **Every node names a slide, and the slide exists and is a
+    ///   `KN.SlideArchive`.** A node whose slide did not load is what an
+    ///   undeclared slide component looks like from the outside: the app counts
+    ///   the slide and answers `missing value` for everything on it.
+    /// * **Every slide names a layout, and the layout is one the theme lists.**
+    ///   A `template_slide` pointing at anything else is a slide with no
+    ///   master, which is how the app reports a copy gone wrong.
+    /// * **A placeholder's kind matches the field that names it.** Field 5 is a
+    ///   title (kind 2), 6 a body (3), 20 a slide number (1), 30 an object
+    ///   well (4) — true of all 86 placeholders in `keynote-deck` and of every
+    ///   one in the other two decks.
+    /// * **A slide's own objects are in its own component.** A slide whose
+    ///   placeholders or note storage live in another stream is a copy that
+    ///   shared what it should have duplicated.
+    /// * **Two slides never share a stream.** Each slide is its own component;
+    ///   a copy that wrote into the original's stream would open, and the two
+    ///   would be one slide as far as loading goes.
+    fn show_problems(&self) -> Vec<String> {
+        let mut problems = Vec::new();
+        let Some(show) = self.show() else {
+            return problems;
+        };
+        let layouts: BTreeSet<u64> = show.layouts.iter().map(|l| l.identifier).collect();
+        let mut seen_nodes: BTreeSet<u64> = BTreeSet::new();
+        let mut seen_streams: BTreeMap<String, u64> = BTreeMap::new();
+
+        for slide in &show.slides {
+            if !seen_nodes.insert(slide.node) {
+                problems.push(format!(
+                    "slide node {} is in the slide tree more than once",
+                    slide.node
+                ));
+            }
+            match self.object(slide.node) {
+                Some((_, object)) if object.message_type() == crate::keynote::TYPE_SLIDE_NODE => {}
+                Some((_, object)) => problems.push(format!(
+                    "slide tree entry {} is type {}, not a KN.SlideNodeArchive",
+                    slide.node,
+                    object.message_type()
+                )),
+                None => problems.push(format!("slide tree names missing node {}", slide.node)),
+            }
+            match self.object(slide.identifier) {
+                Some((_, object)) if object.message_type() == crate::keynote::TYPE_SLIDE => {}
+                Some((_, object)) => problems.push(format!(
+                    "slide node {} names {}, which is type {}, not a KN.SlideArchive",
+                    slide.node,
+                    slide.identifier,
+                    object.message_type()
+                )),
+                None => problems.push(format!(
+                    "slide node {} names missing slide {}",
+                    slide.node, slide.identifier
+                )),
+            }
+            match slide.layout {
+                Some(layout) if layouts.contains(&layout) => {}
+                Some(layout) => problems.push(format!(
+                    "slide {} is built on {layout}, which is not a layout the theme lists",
+                    slide.identifier
+                )),
+                None => problems.push(format!("slide {} names no layout", slide.identifier)),
+            }
+            for (place, wanted, field) in [
+                (&slide.title, crate::keynote::PlaceholderKind::Title, 5),
+                (&slide.body, crate::keynote::PlaceholderKind::Body, 6),
+                (
+                    &slide.slide_number,
+                    crate::keynote::PlaceholderKind::SlideNumber,
+                    20,
+                ),
+                (&slide.object, crate::keynote::PlaceholderKind::Object, 30),
+            ] {
+                let Some(place) = place else { continue };
+                if place.kind != wanted {
+                    problems.push(format!(
+                        "slide {}: field {field} names placeholder {}, whose kind is {}, not {}",
+                        slide.identifier,
+                        place.identifier,
+                        place.kind.as_str(),
+                        wanted.as_str()
+                    ));
+                }
+            }
+            if !slide.stream.is_empty() {
+                if let Some(other) = seen_streams.insert(slide.stream.clone(), slide.identifier) {
+                    problems.push(format!(
+                        "slides {other} and {} are both in {}",
+                        slide.identifier, slide.stream
+                    ));
+                }
+                for object in slide
+                    .texts
+                    .iter()
+                    .map(|t| t.storage)
+                    .chain(slide.note)
+                    .chain(slide.drawables.iter().copied())
+                {
+                    if let Some((stream, _)) = self.object(object) {
+                        if stream != slide.stream {
+                            problems.push(format!(
+                                "slide {} owns {object}, which is in {stream}, not {}",
+                                slide.identifier, slide.stream
+                            ));
+                        }
+                    }
                 }
             }
         }
