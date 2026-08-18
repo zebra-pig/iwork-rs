@@ -216,6 +216,45 @@ fn the_app_writes_one_file_back_over_a_package() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A locked document is locked in either shape. The detection is the presence
+/// of `.iwpv2`, and in the package form that is a dot-file at the root — which
+/// a directory walk that skipped dot-files would miss, and would then report a
+/// password-protected document as a corrupt one.
+#[test]
+fn an_encrypted_package_is_refused_in_the_package_form_too() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let mut all = Vec::new();
+    collect(&dir, &mut all);
+    let Some(locked) = all
+        .into_iter()
+        .find(|p| Package::read(p).is_ok_and(|package| package.contains(".iwpv2")))
+    else {
+        eprintln!("no password-protected fixture — skipping");
+        return;
+    };
+
+    let scratch = scratch("locked");
+    let as_package = scratch.join(locked.file_name().unwrap());
+    Package::read(&locked)
+        .unwrap()
+        .write_as(&as_package, Form::Directory)
+        .unwrap();
+
+    let package = Package::read(&as_package).unwrap();
+    assert!(
+        package.contains(".iwpv2"),
+        "the key material was not an entry"
+    );
+    assert!(
+        matches!(
+            Document::open(&as_package),
+            Err(iwork::Error::Encrypted { .. })
+        ),
+        "a locked package should be refused by name in either shape"
+    );
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
 // -- documents from templates ------------------------------------------------
 
 /// The template bundles the installed apps ship, newest-looking first. All 901
