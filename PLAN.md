@@ -275,20 +275,51 @@ Everything layered on top of the cells; depends only on Phase 1.
 The word-processing spine; Pages is the app this repo drives most
 confidently. Read-first, then the safest writes.
 
-- [ ] Document mode: word-processing vs page-layout (`isMultiPage`),
+- [x] Document mode: word-processing vs page-layout (`isMultiPage`),
       reported by `iwork inspect`; sections and section breaks, per-section
       page-numbering rules, backgrounds.
-- [ ] Headers/footers (three zones, match-previous, hide-on-first-page);
+      *(The flag is `TP.SettingsArchive.body`, not an `isMultiPage` — there is
+      no such field in the 15.3.1 schema. Confirmed three ways: the app's
+      read-only `document body`, and the fact that of the 640 bundled templates
+      the 388 with `body` false are **exactly** the 388 carrying a
+      `TP.PageTemplateArchive`. Section ranges are checked against the app
+      character for character.)*
+- [x] Headers/footers (three zones, match-previous, hide-on-first-page);
       paper size/orientation/margins/facing pages.
-- [ ] Footnotes/endnotes: mode, markers, restart rules, note bodies as their
+      *(Three headers and three footers per section template, in 3144 template
+      instances and 66 corpus ones, never any other count. The zone order
+      left/centre/right is **Inferred** — the evidence is an LTR/RTL mirror
+      pair. `orientation` is 0 even on landscape templates, so the page size is
+      what says which way up it is.)*
+- [x] Footnotes/endnotes: mode, markers, restart rules, note bodies as their
       own text storages (they must survive Phase 4's remapping).
-- [ ] TOC (style-inclusion mapping), bookmarks (the anchor side of
+      *(**Shrunk to a documented boundary.** The four settings are read and are
+      the defaults in every document reachable from here. The containment is
+      written up from the 15.3.1 schema and is **Unverified**: there is no
+      storage of kind 2 and no `table_footnote` entry in this corpus or in any
+      of the 901 bundled templates, no dictionary can author one, and no
+      user-authored document is available. The reader reports and never fails;
+      a test is the tripwire if that ever changes.)*
+- [x] TOC (style-inclusion mapping), bookmarks (the anchor side of
       link-to-bookmark), page templates/masters, columns.
-- [ ] Linked text boxes: the named thread joining boxes into one flow — a
+      *(TOC in four archives, with the finding that a document has **two**
+      settings objects that disagree on purpose. Page templates, and "masters"
+      is the 2013 word — 10143 is `TP.SectionTemplateArchive`. Columns are
+      per-paragraph, not per-section, and their widths are **fractions of the
+      text width**. **Bookmarks are the same boundary as footnotes**: not one
+      of the 640 Pages templates has a `TSWP.BookmarkFieldArchive`.)*
+- [x] Linked text boxes: the named thread joining boxes into one flow — a
       storage is not 1:1 with a drawable.
-- [ ] Write (app-verified, smallest useful set): edit header/footer text;
+      *(Numbered, not named: `user_interface_identifier` is a thread's only
+      identity.)*
+- [x] Write (app-verified, smallest useful set): edit header/footer text;
       edit a footnote's text.
-- [ ] FORMAT.md: §Pages structure.
+      *(Header and footer done, and verified the hard way — Pages has no header
+      property at all, so the edited document is handed back to Pages, **saved
+      by Pages**, and decoded again. **A footnote's text could not be edited
+      because no footnote exists to edit.** Section-break deletion was found to
+      be silently damaging and is now refused by name; see the log.)*
+- [x] FORMAT.md: §Pages structure.
 
 ## Phase 5 — Formulas and the calculation engine (read)
 
@@ -1166,6 +1197,228 @@ fixture, and what the app accepted.
   - `TSWP.ChangeArchive` (2060) has no zero value for its kind — insertion is 1
     and deletion is 2 — so a default-zero enum there is an invalid archive
     rather than the first variant.
+
+- 2026-08-18 — **Phase 4b complete (Pages document structure).** New module
+  `src/pages.rs`; `doc.structure() | sections() | header_footers() |
+  column_layouts()`; `iwork sections` and `iwork structure`, and `iwork inspect`
+  now says which of the two kinds of Pages document it has; four new `iwork
+  check` invariants; `Error::SectionBreak`; two new harness scripts
+  (`section-oracle.sh`, `resave.sh`); FORMAT.md §8; the `TP` registry block
+  rebuilt from six entries to twelve, four of which were wrong; five new
+  fixtures. `cargo fmt --check` and `cargo clippy --all-targets -D warnings`
+  clean; `cargo test --all-targets` green: 107 unit + 16 cell + 18 drawable +
+  15 fixture + **16 pages** + 34 style + 22 table + 14 text + 3 doc.
+  `IWORK_APP_CHECK=1` green over the whole suite, twenty fixtures.
+
+  **What the app was made to say, and what it would not.** Pages' dictionary
+  has *three* structural properties in it — `document body`, the `sections`
+  element, and `body text` of a section — and no header, footer, footnote,
+  column or contents property at all. There is no `make new section`, and
+  `delete section 2` answers **-10000**. So the phase divided in two: what the
+  app could confirm, which was confirmed exactly; and what nothing could
+  confirm, which is said out loud.
+
+  | Question | How it was settled |
+  |---|---|
+  | Where does a section start and stop? | `body text of section i`, compared **character for character** across four documents |
+  | Which mode is this document in? | `document body`, a read-only boolean, against `TP.SettingsArchive.body` |
+  | Are the three header zones left, centre, right? | **Not settled.** Inferred from an LTR/RTL mirror pair |
+  | What does merging two sections do? | **Not settled.** Pages refuses the edit four different ways |
+  | Did a written header survive? | Pages opened the document and **saved it**; the text came back out of the file Pages wrote |
+
+  **The section arithmetic, and it is exact.** A section's entry sits at a
+  paragraph start, on the character *after* the `U+0004`, so section *i* covers
+  `[start(i), start(i+1) − 1)` and the break belongs to neither side. Pages
+  reports the three sections of `pages-report` as 145, 923 and 432 characters;
+  the entries are at 0, 146 and 1070 in a 1502-unit storage. 146−0−1 = 145,
+  1070−146−1 = 923, 1502−1070 = 432. The test compares the *text*, not the
+  lengths, over `pages-report`, `pages-numbering`, `pages-book` and
+  `pages-layout`.
+
+  **Two independent signals for the document mode, and neither is
+  `isMultiPage`** — there is no such field in the 15.3.1 schema. It is
+  `TP.SettingsArchive.body`, false for a page-layout document. The second
+  signal came from counting: of the 640 bundled Pages templates, the **388
+  whose `body` is false are precisely the 388 that carry a
+  `TP.PageTemplateArchive`** — equal sets, no exception either way. That took
+  one scan and settles what a page template is for.
+
+  **A page-layout document has no sections to the app.** `pages-layout` carries
+  two `TP.SectionArchive`s with their six section templates between them and
+  thirty-six header and footer storages, and Pages answers `count of sections`
+  with 0. The `sections` element is word-processing only. The archives are still there and
+  are still what the headers hang off, so the decoder reports them — and the
+  oracle comparison stops at that point rather than pretending to disagree.
+
+  **The bug this phase found in the crate, and it was Phase 4's own note that
+  was wrong.** Phase 4 recorded that deleting a section break was already
+  refused. It was not. The refusal lives in `destroyed_anchors`, which walks the
+  *character*-anchored tables — and the same phase had established that a
+  section's entry is anchored like a **paragraph**, so field 17 was never looked
+  at. Deleting character 145 of `pages-report` went through quietly: one entry
+  dropped, one `TP.SectionArchive` with nothing pointing at it, and with it
+  three section templates, eighteen header and footer storages and a guide
+  storage. The new `iwork check` invariant is what caught it — a
+  section that does not begin at 0 begins after a `U+0004` — which is the phase's
+  best argument for writing invariants down.
+
+  **The section-merge decision: refuse, and the refusal is evidence-backed.**
+  Four routes were tried and all four say the same thing — Pages will not
+  perform this edit for anyone to watch:
+
+  - `delete section 2 of document 1` → **-10000**, "AppleEvent handler failed";
+  - there is no `make new section` in the dictionary;
+  - the menu item needs a key window, which a locked screen does not have (the
+    Phase 1b finding, unchanged);
+  - `set body text of section 2 to ""` leaves the break **exactly where it
+    was**, with a zero-length section behind it — so a section with no text is a
+    legal state, and it is not a merge. (`set body text of section 2 to
+    "Kurz."` likewise: entries moved 0, 146, 1070 → 0, 146, 152.)
+
+  Since nothing can say which of two merged sections keeps its page templates,
+  its eighteen header and footer storages, its guides and its background,
+  `Error::SectionBreak` names the break, the section and what is unknown.
+  `destroyed_sections` is a separate function from `destroyed_anchors` because
+  the *kind* of answer differs: deleting an image's `U+FFFC` has an observed
+  consequence and refusing is refusing to reproduce it; deleting a section break
+  has no observed consequence at all.
+
+  **Five fixtures, all from Apple's templates, chosen by scanning all 640.**
+
+  | Fixture | Template | What only it has |
+  |---|---|---|
+  | `pages-book` | `11B_Novel_Modern` | facing pages (18 of 640), six sections |
+  | `pages-toc` | `00C_Textbook_Portrait` | a table of contents (**2** of 640) |
+  | `pages-layout` | `08_Journal_Newsletter` | page-layout mode, a page template, a linked-text-box thread (19 of 640), the only header and footer text in the corpus |
+  | `pages-numbering` | `65_Sales_Bold_Report_PM` | page numbers restarting at 2, a section that hides its header on page one, a section background fill, a section hyperlink UUID |
+  | `pages-columns` | `02_ResearchPaper_JP` | multi-column body — **the only one of the 640** — with both an equal and a non-equal layout |
+
+  The last is Apple's bundle renamed, the second time this corpus has needed
+  that: Pages on this machine does not offer the Japanese templates, so
+  `every template whose id is "Application/02_ResearchPaper_JP/ISO"` comes back
+  empty. A `.template` is the same ZIP a `.pages` is and Pages opens the copy.
+
+  Corpus decode summary — `iwork structure`, no app involved:
+
+  | Fixture | Mode | Sections | Header/footer storages | …with text | Page templates | Threads | Contents |
+  |---|---|--:|--:|--:|--:|--:|--:|
+  | `pages-plain` | word processing | 1 | 18 | 0 | — | — | 1 |
+  | `pages-styled` | word processing | 1 | 18 | 0 | — | — | 1 |
+  | `pages-unicode` | word processing | 1 | 18 | 0 | — | — | 1 |
+  | `pages-lists` | word processing | 1 | 18 | 0 | — | — | 1 |
+  | `pages-report` | word processing | 3 | 54 | 0 | — | — | 1 |
+  | `pages-book` | word processing | 6 | 108 | 0 | — | — | 1 |
+  | `pages-columns` | word processing | 2 | 36 | 0 | — | — | 1 |
+  | `pages-numbering` | word processing | 2 | 36 | 1 | — | — | 1 |
+  | `pages-toc` | word processing | 3 | 54 | 0 | — | — | **2** |
+  | `pages-layout` | **page layout** | 2 | 36 | **12** | 1 | 1 | 1 |
+
+  396 header and footer storages across ten documents and **thirteen of them
+  have any text in them at all**, which is what an empty template's headers
+  look like and why a fixture with header text had to be hunted for.
+
+  **Findings worth keeping.**
+
+  - **Column widths and gaps are fractions of the text width, not points.**
+    The one non-equal layout reads `first 0.26090077`, `gap 0.035152942`,
+    `width 0.7039463` — summing to exactly 1.0 — and the equal two-column
+    neighbour's gap of 0.03527747 would be three hundredths of a point
+    otherwise. Columns are also **per paragraph, not per section**: they hang
+    off `table_layout_style` (field 12), and only the body storage has one.
+  - **A table of contents has two settings archives and they disagree on
+    purpose.** The document's own (`toc_styles`, scope 0) names the styles the
+    whole document is judged by; each placed list carries its own (scope 1). In
+    `pages-toc` that is two rules against six. Reading one is reading the wrong
+    one.
+  - **A thread is numbered, not named.** `TSWP.FlowInfoArchive`'s only identity
+    is `user_interface_identifier`.
+  - **`orientation` is 0 even on the landscape templates.** Pages swaps width
+    and height instead.
+  - **A header's text is often not text.** The date in the newsletter's header
+    is a `TSWP.DateTimeSmartFieldArchive` and the storage holds the string it
+    last rendered to, so rewriting the header removes the field and freezes the
+    date. A page number is a `U+FFFC` and goes the same way. Now a test.
+  - **Four registry entries were wrong and all four were the 2013 gap.** 10012
+    is the settings (not the theme, which is 10001); 10015 the z-order (not the
+    settings); 10016 the guide map (not a `TP.BodyStorageArchive`, a message no
+    version of the schema has); 10143 the **section template** (2013's "page
+    master", and this table's "page layout"). Nothing else in the `TP` block
+    misdecoded, because nothing else was being read.
+
+  **Two harness faults, both of the class the README warns about — again.**
+
+  `IWORK_APP_CHECK=1 cargo test` began failing on a *different* fixture each
+  run, always with "the app that owns it would not open it", always on a
+  document that opens perfectly on its own. Six test binaries now drive the
+  apps and the lock serialises them, but a busy app can still miss a 120-second
+  answer, and "no answer" was being reported as "refused". `app-check.sh` now
+  makes **two attempts**, killing the app between them: a document the app
+  genuinely refuses is refused twice, and a busy app is not busy from a cold
+  start.
+
+  Pulling that thread found the second, and it has been there since Phase 2.
+  **`osa_acquire` was not re-entrant**, and `app-check.sh --self-test` calls
+  `check` twice in one process — so the second call met a lock held by *its own
+  pid*, found the holder alive, and waited the full `IWORK_APP_LOCK_TIMEOUT` of
+  1800 seconds before stealing the lock from itself. Half an hour of a script
+  sleeping, and the answer afterwards correct, which is the worst way for a bug
+  to behave; it was invisible until this phase happened to run the self-test
+  and watch the clock. `osa_acquire` now returns at once if `OSA_LOCK` is
+  already set.
+
+  `--self-test` still refuses the corrupted copy, which is the check that the
+  check is looking.
+
+  **What has no source anywhere, stated plainly.**
+
+  - **Footnotes and endnotes.** No storage of `kind = 2` and no `table_footnote`
+    entry exists in this corpus or in any of the 901 bundled templates. Pages'
+    dictionary has no footnote command. The four settings fields are read and
+    are 0, 0, 0, 10 everywhere, so the *fields* are Confirmed and every
+    non-default value is Unverified; the containment (a `U+FFFC`, a
+    `TSWP.FootnoteReferenceAttachmentArchive`, its `contained_storage`) is
+    written down from the 15.3.1 schema and has never been decoded.
+    `no_storage_in_the_corpus_is_a_footnote_body` is the tripwire.
+  - **Bookmarks.** All 901 templates the three apps ship were swept for three
+    things at once — a storage of kind 2, a
+    `TSWP.FootnoteReferenceAttachmentArchive` and a
+    `TSWP.BookmarkFieldArchive`. **Zero, zero and zero.** Same rule, same
+    honesty.
+  - **`section_template_even_odd_pages_different` (19)** is 0 in all 1048
+    sections of the bundled templates, and `section_start_kind` (20) is 0 in all
+    of them too.
+  - **The zone order** left/centre/right is Inferred. All three zones of a strip
+    point at the same paragraph style, so alignment does not distinguish them;
+    the evidence is that `08_Journal_Newsletter` fills zone 2 and
+    `08_Newsletter_RTL`, the same design mirrored, fills zone 0.
+
+  What Phase 5 (formulas) should know:
+
+  - Nothing in this phase touches `TSCE`, but `pages-numbering` and
+    `pages-report` both carry a calculation engine, and the Pages table in
+    `pages-report` is the cross-app `TST` fixture Phase 1 used. Pages documents
+    are a second oracle-free source of formulas.
+
+  What Phase 7 (comments, metadata) should know:
+
+  - **`Document::structure()` is the pattern for an app-specific reader**: one
+    pass over `objects()` into a `BTreeMap<id, (type, Message)>`, then walk. It
+    costs a decode of the whole document and is fine at this scale.
+  - `TP.SettingsArchive` fields 12–17 are the change-tracking display switches
+    (`show_ct_markup`, `show_ct_deletions`, `ct_bubbles_visibility`,
+    `change_bars_visible`, `format_changes_visible`, `annotations_visible`) and
+    `TP.DocumentArchive` has `change_tracking_enabled` (40), `change_sessions`
+    (16) and `most_recent_change_session` (17). All present, none exercised.
+  - **`resave.sh` is the tool this phase built and Phase 7 will want.** For
+    anything no dictionary reports, having the app open the document and save it
+    is a real acceptance test: what comes back was written by the app from its
+    own model.
+
+  What Phase 8a (Keynote) should know:
+
+  - `resave.sh` takes any of the three documents, not just a `.pages`.
+  - The **two attempts** in `app-check.sh` matter more the more binaries drive
+    the apps; a Keynote phase adds another.
 
 ## Execution notes
 
