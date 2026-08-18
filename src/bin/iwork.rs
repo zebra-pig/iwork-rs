@@ -61,6 +61,18 @@ tables
   iwork set-cell  <file> <table> <row> <col> <value> <out>
                                            write one value into one cell
 
+charts
+
+  iwork charts    <file>                   every chart: type, placement, the
+                                           data it carries and the table
+                                           references it follows
+
+A chart holds its data twice. The grid printed as a small table is the chart's
+own private copy — the thing it draws, and all a Pages or Keynote chart has. A
+Numbers chart also has a mediator holding formulas back into tables, printed as
+`fed by …`; the grid is then a cache of what those last evaluated to. Nothing
+here writes to a chart.
+
 A <table> is an object id, as printed by `iwork tables`, or a table name. A
 <cell> is an A1 reference; <row> and <col> are the 0-based indices the API
 uses, so `B3` and `2 1` are the same cell.
@@ -159,6 +171,7 @@ fn main() -> ExitCode {
             apply_style(file, storage, start, end, style, out)
         }
         ["drawables", file] => drawables(file),
+        ["charts", file] => charts(file),
         ["media", file] => media(file),
         ["set-geometry", file, id, x, y, out] => set_geometry(file, id, x, y, None, out),
         ["set-geometry", file, id, x, y, w, h, out] => {
@@ -1590,6 +1603,151 @@ fn formulas(path: &str, wanted: Option<&str>) -> Result<(), Error> {
         );
     }
     Ok(())
+}
+
+/// Every chart, its type, its placement, its private data as a small table,
+/// and — in Numbers — the table references that feed it.
+///
+/// The two are printed together and labelled, because they are the phase's
+/// whole point: the grid is what the chart *draws*, the references are what it
+/// *follows*, and a Numbers chart whose table has changed since the last
+/// recalculation has a grid that disagrees with them.
+fn charts(path: &str) -> Result<(), Error> {
+    let doc = Document::open(path)?;
+    let charts = doc.charts();
+    if charts.is_empty() {
+        println!("no charts");
+        return Ok(());
+    }
+    for chart in &charts {
+        let mut what = chart.type_label();
+        if chart.is_interactive() {
+            what.push_str(" (interactive)");
+        }
+        println!(
+            "== {} — {} — {} — {:.1}×{:.1} at {:.1},{:.1} ==",
+            chart.identifier,
+            what,
+            chart.placement.as_str(),
+            chart.frame.width,
+            chart.frame.height,
+            chart.frame.x,
+            chart.frame.y
+        );
+        let mut notes = vec![
+            format!("{} ({})", chart.type_name(), chart.chart_type),
+            format!(
+                "series {}",
+                iwork::chart::series_direction_name(chart.series_direction)
+            ),
+        ];
+        // `scatter_format` is written on every chart and only means anything on
+        // the four that pair X against Y.
+        if matches!(chart.chart_type, 9 | 22 | 23 | 24) && chart.scatter_format != 0 {
+            notes.push(iwork::chart::scatter_format_name(chart.scatter_format).to_string());
+        }
+        if let Some(index) = chart.multidataset_index {
+            notes.push(format!("data set {index}"));
+        }
+        if chart.contains_default_data {
+            notes.push("placeholder data".to_string());
+        }
+        if chart.is_3d() {
+            notes.push("3D".to_string());
+        }
+        println!("   {}", notes.join(", "));
+
+        let series = chart.series();
+        let categories = chart.categories();
+        let width = series
+            .iter()
+            .filter_map(|s| s.name.as_ref().map(|n| n.chars().count()))
+            .chain(std::iter::once(6))
+            .max()
+            .unwrap_or(6);
+        let columns = series.iter().map(|s| s.values.len()).max().unwrap_or(0);
+        let mut header = format!("   {:<width$}", "", width = width);
+        for column in 0..columns {
+            header.push_str(&format!(
+                " {:>12}",
+                categories.get(column).map(String::as_str).unwrap_or("")
+            ));
+        }
+        println!("{header}");
+        for one in &series {
+            let mut line = format!(
+                "   {:<width$}",
+                one.name.as_deref().unwrap_or(""),
+                width = width
+            );
+            for value in &one.values {
+                line.push_str(&format!(" {:>12}", value.to_text()));
+            }
+            println!("{line}");
+        }
+
+        match &chart.references {
+            Some(references) => {
+                let printed = |list: &[iwork::chart::ChartReference]| {
+                    list.iter()
+                        .map(|r| r.to_text())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                println!(
+                    "   fed by {}",
+                    join_or(&[printed(&references.data)], "nothing")
+                );
+                if !references.row_labels.is_empty() {
+                    println!("   row labels {}", printed(&references.row_labels));
+                }
+                if !references.column_labels.is_empty() {
+                    println!("   column labels {}", printed(&references.column_labels));
+                }
+                println!(
+                    "   mediator {}, {} reference(s) through function 175{}",
+                    references.mediator,
+                    references.wrapped_in_175,
+                    if references.unwrapped > 0 {
+                        format!(", {} not wrapped", references.unwrapped)
+                    } else {
+                        String::new()
+                    }
+                );
+            }
+            None => println!("   private data only — no mediator, nothing to follow"),
+        }
+
+        let overrides = chart.series_private_styles.entries.len();
+        println!(
+            "   styles: {} theme series, {} of {} with a private override, {} of {} with a non-style",
+            chart.series_theme_styles.len(),
+            overrides,
+            chart.series_private_styles.count,
+            chart.series_non_styles.entries.len(),
+            chart.series_non_styles.count
+        );
+        if !chart.extensions.is_empty() {
+            println!(
+                "   extensions: {}",
+                chart
+                    .extensions
+                    .iter()
+                    .map(|(number, name)| format!("{name} ({number})"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+    }
+    Ok(())
+}
+
+fn join_or(parts: &[String], empty: &str) -> String {
+    if parts.is_empty() {
+        empty.to_string()
+    } else {
+        parts.join(", ")
+    }
 }
 
 fn find_table(path: &str, wanted: &str) -> Result<iwork::Table, Error> {
