@@ -654,7 +654,7 @@ fn cells(path: &str, wanted: &str, raw: bool) -> Result<(), Error> {
             let r = &cell.record;
             println!(
                 "       type {:<3} reserved {:02x}{:02x}{:02x}{:02x} extras {:04x} flags {:08x} \
-                 keys{}{}{}{}{}{}{}{}{}",
+                 keys{}{}{}{}{}{}{}{}{}{}{}{}",
                 r.cell_type,
                 r.reserved[0],
                 r.reserved[1],
@@ -666,8 +666,13 @@ fn cells(path: &str, wanted: &str, raw: bool) -> Result<(), Error> {
                 key(" rich", r.rich_id),
                 key(" cell-style", r.cell_style_id),
                 key(" text-style", r.text_style_id),
+                // The two an edit must carry rather than re-synthesise: a cell
+                // that loses them loses its highlighting and nothing says so.
+                key(" conditional-style", r.conditional_style_id),
+                key(" conditional-rule", r.conditional_rule_id),
                 key(" formula", r.formula_id),
                 key(" control", r.control_id),
+                key(" comment", r.comment_id),
                 key(" format-kind", r.format_kind),
                 key(" number-format", r.number_format_id),
                 key(

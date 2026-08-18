@@ -980,6 +980,19 @@ impl Document {
                  component {component} does not declare"
             ));
         }
+
+        // Tables check themselves: keys that resolve, refcounts that match the
+        // cells, cell counts that match the records. See `Table::audit` for why
+        // each of those is a rule.
+        for table in self.tables() {
+            for problem in &table.problems {
+                problems.push(format!(
+                    "table {} {}: {problem}",
+                    table.identifier, table.name
+                ));
+            }
+            problems.extend(table.audit());
+        }
         problems
     }
 

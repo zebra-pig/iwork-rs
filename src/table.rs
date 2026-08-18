@@ -668,6 +668,10 @@ pub struct ListEntry {
 #[derive(Debug, Clone, Default)]
 pub struct DataList {
     pub list_type: u32,
+    /// `nextListID` — a high-water mark, not a count. The app hands out the
+    /// smallest free key and only ever raises this, so a key it has given out
+    /// and taken back can be below it and absent.
+    pub next_key: u32,
     pub entries: BTreeMap<u32, ListEntry>,
 }
 
@@ -675,6 +679,7 @@ impl DataList {
     pub fn decode(archive: &Message) -> DataList {
         let mut list = DataList {
             list_type: archive.varint(1).unwrap_or(0) as u32,
+            next_key: archive.varint(2).unwrap_or(0) as u32,
             entries: BTreeMap::new(),
         };
         for value in archive.all(3) {
@@ -1911,6 +1916,8 @@ pub struct Table {
     /// Column hidden state.
     pub column_states: HiddenStates,
     cells: Vec<Cell>,
+    /// The interned lists this table's cells key into.
+    side: SideTables,
     /// Rows whose storage could not be read, with the reason — so that a
     /// partially decoded table says so instead of reporting empty cells.
     pub problems: Vec<String>,
@@ -1973,6 +1980,126 @@ impl Table {
             .find(|m| m.row == row && m.column == column)
     }
 
+    /// The merge a position falls inside, anchor included.
+    ///
+    /// Not the same question as [`Table::merge_at`], and the difference is the
+    /// one a writer has to get right: a merged-away cell has no record and no
+    /// mark of its own, so the only way to know that `E9` is not a cell is to
+    /// ask which rectangle covers it.
+    pub fn merge_covering(&self, row: usize, column: usize) -> Option<Merge> {
+        self.merges.iter().copied().find(|m| {
+            (m.row..m.row + m.rows).contains(&row)
+                && (m.column..m.column + m.columns).contains(&column)
+        })
+    }
+
+    /// The interned lists the cells key into.
+    pub fn side_tables(&self) -> &SideTables {
+        &self.side
+    }
+
+    /// Check the table against itself: keys that resolve, counts that add up.
+    ///
+    /// Everything here is an invariant Numbers 15.3.1 keeps and a careless
+    /// writer breaks, and every one of them was learned by watching the app do
+    /// it. They are cheap to state and expensive to discover the other way:
+    /// a document with a dangling string key opens, draws the cell blank, and
+    /// says nothing at all.
+    ///
+    /// * **Every key a cell holds names an entry that exists.** A key of 0
+    ///   means "none" and is never stored, so a key that is stored has to
+    ///   resolve.
+    /// * **A list entry's refcount is the number of cells pointing at it.**
+    ///   Watching the app move a value between cells shows it maintaining both
+    ///   lists this way, and removing the entry outright at zero — a released
+    ///   string and its key both disappeared, and the key was later handed out
+    ///   again to a different string.
+    /// * **A row's or column's `numberOfCells` is how many records it has.**
+    ///   The app keeps these in step to the unit: filling one empty cell moved
+    ///   both its row's and its column's count by one, and creating the
+    ///   column's entry where there had been none.
+    ///
+    /// Not checked: `TableModelArchive`'s five hidden-row and hidden-column
+    /// counts, which are zero in a document that hides nine rows and three
+    /// columns. They are dead fields and nothing should maintain them.
+    pub fn audit(&self) -> Vec<String> {
+        let mut problems = Vec::new();
+        let mut says = |what: String| {
+            problems.push(format!("table {} {}: {what}", self.identifier, self.name))
+        };
+
+        let mut used: BTreeMap<(&str, u32), u32> = BTreeMap::new();
+        let mut rows: BTreeMap<usize, u32> = BTreeMap::new();
+        let mut columns: BTreeMap<usize, u32> = BTreeMap::new();
+        for cell in &self.cells {
+            *rows.entry(cell.row).or_default() += 1;
+            *columns.entry(cell.column).or_default() += 1;
+            // Every slot, not the first one that answers: a cell keeps a key
+            // for each format it has ever been given, and the header of a
+            // currency column is a *text* cell carrying both.
+            let formats = [
+                FormatSlot::Number,
+                FormatSlot::Currency,
+                FormatSlot::Date,
+                FormatSlot::Duration,
+                FormatSlot::Text,
+                FormatSlot::Boolean,
+            ]
+            .map(|slot| ("format", &self.side.formats, cell.record.format_id_in(slot)));
+            for (name, list, key) in formats.into_iter().chain([
+                ("string", &self.side.strings, cell.record.string_id),
+                ("control", &self.side.controls, cell.record.control_id),
+                ("formula", &self.side.formulas, cell.record.formula_id),
+            ]) {
+                let Some(key) = key else { continue };
+                *used.entry((name, key)).or_default() += 1;
+                if !list.entries.contains_key(&key) {
+                    says(format!(
+                        "row {} column {} names {name} entry {key}, which the list does not have",
+                        cell.row, cell.column
+                    ));
+                }
+            }
+        }
+
+        for (name, list) in [
+            ("string", &self.side.strings),
+            ("format", &self.side.formats),
+        ] {
+            for entry in list.entries.values() {
+                let counted = used.get(&(name, entry.key)).copied().unwrap_or(0);
+                if counted != entry.refcount {
+                    says(format!(
+                        "{name} entry {} says {} reference(s) and {counted} cell(s) point at it",
+                        entry.key, entry.refcount
+                    ));
+                }
+                if entry.key >= list.next_key && list.next_key != 0 {
+                    says(format!(
+                        "{name} entry {} is at or above the list's next key {}",
+                        entry.key, list.next_key
+                    ));
+                }
+            }
+        }
+
+        for (what, extents, counted) in [
+            ("row", &self.row_extents, &rows),
+            ("column", &self.column_extents, &columns),
+        ] {
+            for (index, extent) in extents.iter().enumerate() {
+                let actual = counted.get(&index).copied().unwrap_or(0);
+                if extent.cell_count != actual {
+                    says(format!(
+                        "{what} {index} says it holds {} cell(s) and holds {actual}",
+                        extent.cell_count
+                    ));
+                }
+            }
+        }
+        problems
+    }
+
     /// The table as rows of text, for CSV and for eyeballing.
     pub fn to_rows(&self) -> Vec<Vec<String>> {
         (0..self.rows)
@@ -2020,11 +2147,17 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 // -- reading a document ------------------------------------------------------
 
 /// Everything hanging off one table's `DataStore`, resolved once.
-struct SideTables {
-    strings: DataList,
-    formats: DataList,
-    controls: DataList,
-    formulas: DataList,
+///
+/// The interning tables the cell records key into. Kept on the table because
+/// a cell's own bytes say nothing at all without them — and because the
+/// invariants that tie the two together ([`Table::audit`]) are the ones a
+/// writer is most likely to break.
+#[derive(Debug, Clone, Default)]
+pub struct SideTables {
+    pub strings: DataList,
+    pub formats: DataList,
+    pub controls: DataList,
+    pub formulas: DataList,
 }
 
 /// Read every table in a document.
@@ -2228,10 +2361,12 @@ fn read_table(
         row_states,
         column_states,
         cells: Vec::new(),
+        side: SideTables::default(),
         problems: Vec::new(),
     };
 
     read_cells(document, &store, &side, &mut table);
+    table.side = side;
     Some(table)
 }
 
