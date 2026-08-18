@@ -287,8 +287,8 @@ fn transitions_read_as_the_dictionary_names_them() {
 /// `keynote-transitions` is 44 blank slides, one per effect in the app's own
 /// enumeration, identical in every other respect — same layout, no text, same
 /// duration, delay and automatic flag — so anything that differs between two of
-/// them is the effect. Ten of the 44 bring a parameter; the other 34 bring
-/// none, and that is the finding as much as the ten are.
+/// them is the effect. Eleven of the 44 bring something; the other thirty-three
+/// bring none, and that is the finding as much as the eleven are.
 #[test]
 fn every_transition_parameter_belongs_to_its_effect() {
     let path = fixture!("keynote-transitions.key");

@@ -1093,7 +1093,7 @@ Fixed 12-byte header, then optional payloads.
 |---|---|
 | 0 | storage version. **5**, or this is not the layout below |
 | 1 | cell type, `TST.CellType` (below) |
-| 2–5 | zero in all 2515 records read here |
+| 2–5 | zero in every record read here |
 | 6 | which data format the user *chose* (below) |
 | 7 | undecoded. `0x08` on currency cells; `0x00` otherwise |
 | 8–11 | `u32` flag word, little-endian |
@@ -1134,7 +1134,7 @@ whose meaning is of no interest still advances the cursor by its width, and byte
 here, date is `0x08` there and `0x8000` here. A decoder that took its field
 positions from byte 6 would return two keys swapped with every length still
 adding up. Two things say the order above is the right one, and neither is a
-proto file: every one of 2515 records in the corpus ends exactly on its last
+proto file: every record in the corpus ends exactly on its last
 field (`every_cell_record_is_consumed_to_the_byte`), and the `0x1000` payload —
 1 number, 2 currency, 3 date, 4 duration, 5 text, 6 boolean — numbers the six
 format slots in exactly this sequence.
@@ -1530,8 +1530,8 @@ value: the cell and text style keys, a control definition, a comment key, byte 7
 until someone looks — the **conditional style and rule keys** at flag bits
 `0x80` and `0x100`, which are how a highlighted cell knows it is highlighted. A
 writer that rebuilt the record from the parts it understands would drop them and
-nothing would say so. The encoder here is the decoder's exact inverse: every one
-of the 2515 records in the corpus re-encodes to the bytes it came from.
+nothing would say so. The encoder here is the decoder's exact inverse: every
+record in the corpus re-encodes to the bytes it came from.
 
 **Value and format travel together.** A cell that keeps its type keeps its
 format key untouched. A cell that changes type gets the key another cell of the

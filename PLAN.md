@@ -2661,3 +2661,48 @@ fixture, and what the app accepted.
   Every fix carries the reviewer's own reproduction as a test. Full suite
   green with `IWORK_APP_CHECK=1` — including Pages opening an edit made beside
   a footnote and reading it back, with both notes still attached.
+
+- 2026-08-19 — **Six rounds of adversarial review, and what they cost.**
+  After the build-out the whole crate was read back against itself, one
+  subsystem per pass — the plist and package layer, the table reader and
+  writer, formulas, drawables and geometry, the Keynote writers, and the docs
+  themselves — each pass finding what the last had no reason to look at. Four
+  of the findings were critical, and each is now a test named after the shape
+  that caused it:
+  - **A refused cell write left the document half-applied.** `set_cell` mutated
+    the interned string and format lists on its way to a refusal it only
+    reached later, so a write that came back an error had already moved bytes.
+    The whole write is now *planned before a byte moves* — the refusal is
+    decided first, and a document a write declines is left byte for byte as it
+    was.
+  - **The crate could delete or write through a file it did not create** — a
+    save over a symlink, or a package entry escaping its directory, followed
+    the link or the path. It now refuses to write through anything it did not
+    make, and an entry name that would leave the package is refused.
+  - **A resized curve moved only its first control point.** Every baked point
+    of a path source has to scale with the frame; scaling one left the other
+    two where they were, so the shape opened deformed. All points move now, and
+    the result is diffed against the document Pages wrote for the same resize.
+  - **An image was replaced under cached renderings of the old pixels.** A
+    stored thumbnail, a traced outline or an aspect read from `naturalSize`
+    survived a byte swap the app would have refused, giving a document that
+    passes every check and draws the wrong thing. Replacement now refuses when
+    that state is present, and the identity mask is measured against the
+    picture's own geometry rather than the `originalSize` the app fills with
+    the mask window.
+  The rest fell into four classes. **Bounded arithmetic:** a tile id, a merge
+  extent, a formula's nesting depth, a plist length doubled or a wide integer —
+  each now yields a bounded error rather than an overflow or an abort, asserted
+  by splicing the hostile shape into a real stream. **Writers against their own
+  checker:** two Keynote and Pages writers emitted graphs their own `check`
+  would reject (a slide the deck does not declare, a zone addressed by the
+  wrong index), caught by making each writer prove the invariant it maintains.
+  **Reads that claimed more than they knew:** four drawable and chart readers
+  reported absence they had not established; each now resolves the object or
+  says nothing. **Doc truth:** counts that had rotted, an unbacked plist
+  round-trip figure, `tests/media.rs` cited for `tests/drawables.rs`, and the
+  seven-deck corpus — the docs were made to claim only what a named test pins.
+  The fuzzer was extended from the decoders to the *pretty-printers*, so a
+  panic in `iwork dump` or `drawables` on a mutated document is now a test
+  failure too. Full suite green in both profiles; nothing here changed a wire
+  format.

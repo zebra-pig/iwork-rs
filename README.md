@@ -325,7 +325,7 @@ anything.
 a boolean, a date or a duration into a cell that already exists, and Numbers
 opens the result and reports the new value. Three things make that safe rather
 than merely possible. The record is **edited, never rebuilt** — the encoder is
-the decoder's exact inverse on all 2515 records in the corpus, so a cell keeps
+the decoder's exact inverse on every record in the corpus, so a cell keeps
 its style keys, its control definition, its conditional-highlighting keys and
 the bytes nobody has decoded. The interned string and format lists are
 **refcounted both ways**: a string another cell already holds is shared, and one
@@ -460,7 +460,7 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | Cell values: text, number, boolean, date, duration, currency, rich text | ✅ | ✅ | — |
 | Data formats and control cells (checkbox, rating, slider, stepper, pop-up) | ✅ | ✅ | — |
 | Merged ranges | — (none) | ✅ | — |
-| Every cell record consumed to the byte (2515 of them) | ✅ | ✅ | — |
+| Every cell record consumed to the byte (every one in the corpus) | ✅ | ✅ | — |
 | **Every cell agrees with the app** (2943 compared) | — | ✅ | — |
 | Sort rules; filter sets with their rules and on/off switch | — | ✅ | — |
 | Hidden rows and columns, with *why* (user vs filter) | — | ✅ | — |
@@ -514,7 +514,7 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | Filter and conditional-highlighting conditions read as formulas | — | ✅ | — |
 | **Every formula matches the app's text, character for character** (273 of 273 outside pivots) | — | ✅ | — |
 | Charts: type, placement, rectangle, series direction, 33 of them | ✅ | ✅ | ✅ |
-| 23 of the 28 chart types, every 3-D family but the donut | — | ✅ | ✅ |
+| 22 of the 28 chart types, every 3-D family but the donut | — | ✅ | ✅ |
 | The chart model found at extension 10000 of every chart drawable | ✅ | ✅ | ✅ |
 | The private grid: row and column names, series, blank ≠ zero | ✅ | ✅ | ✅ |
 | **Every value of an 18-chart zoo is the number the app was told to plot** | — | — | ✅ |
@@ -523,7 +523,7 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | Interactive chart: the data set it is showing, in the model not the view state | — | ✅ | — |
 | Sparse series arrays sized by `count`, not by their entries | ✅ | ✅ | ✅ |
 | A chart too new for an old reader carries a down-level type patch | — | ✅ | — |
-| Every chart-domain archive re-encodes to its bytes (2090 of them) | ✅ | ✅ | ✅ |
+| Every chart-domain archive re-encodes to its bytes (every one in the corpus) | ✅ | ✅ | ✅ |
 | Both plist forms in the package read; a binary one survives a rewrite | ✅ | ✅ | ✅ |
 | Identity agrees in all three places it is written | ✅ | ✅ | ✅ |
 | Locale, creation locale, document language, template id, custom-format list | ✅ | ✅ | ✅ |
@@ -895,17 +895,22 @@ fuzzing story rather than half of it.
   written by this crate needs trying in the app before it is trusted —
   `scripts/app-check.sh` is how, and `IWORK_APP_CHECK=1 cargo test` runs it over
   every fixture, on a machine that has the apps.
-- **No comment and no reply exists to decode, anywhere.** All 26 readable
-  fixtures and all 901 templates the three apps ship carry exactly one
-  `TSK.AnnotationAuthorStorageArchive`, and in every one of those 927 it is
-  empty. No scripting dictionary has a comment command or a comment class, so
-  neither AppleScript nor template mining can produce one. Everything below the
-  author storage is therefore decoded from the 15.3.1 schema and marked
-  Unverified in `FORMAT.md`; the reader reports what it finds and never fails,
-  and two tripwire tests fail the day a fixture finally has one. **Tracked
-  changes are the exception:** `pages-tracked.pages`, made with Track Changes
-  on from the menu, carries a real `table_deletion`, so the change decoder has
-  its one example and an edit through it is refused (below).
+- **Comments come only from the menu, and replies not yet at all.** No
+  scripting dictionary has a comment command or a comment class, and no
+  template the three apps ship carries a comment: all 26 base-corpus fixtures
+  and all 901 templates hold an empty `TSK.AnnotationAuthorStorageArchive` and
+  nothing below it. `pages-comments.pages`, made by driving the Pages UI on an
+  unlocked screen, is the one document that finally has some — a real author
+  and two comments anchored through the highlight table at the characters the
+  recipe selected, which turned the anchor route from a schema reading into a
+  measured fact (and fixed one bug the schema alone could not show). What stays
+  decoded-from-the-schema and **Unverified in `FORMAT.md`**, with a tripwire
+  test for the day a fixture reaches it, is replies, any resolved state (no
+  descriptor anywhere contains `resolv`), cell comments, and the
+  overlapping-highlight table. **Tracked changes are the same story:**
+  `pages-tracked.pages`, made with Track Changes on from the menu, carries a
+  real `table_deletion`, so the change decoder has its one example and an edit
+  through it is refused (below).
 - **An edit through a storage with tracked changes is refused.** A tracked
   deletion keeps its characters — they are still in the text and Pages draws
   them struck through — so `table_deletion` is not the run table it looks like,

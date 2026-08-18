@@ -122,10 +122,11 @@ pub enum Error {
         index: u64,
     },
     /// The deleted range covered the character an object is anchored to: the
-    /// `U+FFFC` an image or a footnote mark stands in, the `U+0004` a section
-    /// begins after. Deleting it means deleting the object — Pages does exactly
-    /// that, removing the drawable, its mask, its z-order entry and its media
-    /// registration — and this crate will not, so it refuses.
+    /// `U+FFFC` an image stands in, the `U+000E` a footnote mark stands on, the
+    /// `U+0004` a section begins after. Deleting it means deleting the object —
+    /// Pages does exactly that, removing the drawable, its mask, its z-order
+    /// entry and its media registration — and this crate will not, so it
+    /// refuses.
     AnchoredObject {
         storage: u64,
         index: u64,

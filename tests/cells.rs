@@ -1,6 +1,6 @@
 //! Tables, written — the byte level, and then the app.
 //!
-//! Phase 1 proved this crate can *read* a cell record: every one of 2515 in the
+//! Phase 1 proved this crate can *read* a cell record: every one in the
 //! corpus ends exactly on its last field. Writing needs a stronger claim, and
 //! it is the one this file makes first: **the encoder is the decoder's exact
 //! inverse**, on every record the three apps have written here, not merely on

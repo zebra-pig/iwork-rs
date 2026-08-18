@@ -423,7 +423,7 @@ fn every_chart_archive_re_encodes_to_its_bytes() {
 }
 
 /// Every chart's type is a value the 15.3.1 `ChartType` enumeration has, and
-/// the corpus covers twenty-three of the twenty-eight.
+/// the corpus covers twenty-two of the twenty-eight.
 #[test]
 fn every_chart_type_in_the_corpus_is_a_named_one() {
     let mut seen: BTreeSet<u32> = BTreeSet::new();
