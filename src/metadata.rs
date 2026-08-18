@@ -289,20 +289,7 @@ pub fn metadata(document: &crate::Document) -> Result<Metadata, Error> {
     let Some(field) = super_field(document.kind()) else {
         return Ok(out);
     };
-    // The root archive is the app's document archive: type 10000 in Pages, 1 in
-    // Numbers and Keynote. `Document::archive` is keyed on identifier, and the
-    // root is the object the package metadata calls the document.
-    let Some(root) = document
-        .objects()
-        .find(|(_, object)| {
-            let message_type = object.message_type();
-            match document.kind() {
-                Kind::Pages => message_type == crate::pages::TYPE_DOCUMENT,
-                _ => message_type == 1,
-            }
-        })
-        .and_then(|(_, object)| Message::decode(object.payload()).ok())
-    else {
+    let Some((_, root)) = root_archive(document) else {
         return Ok(out);
     };
 
@@ -320,6 +307,62 @@ pub fn metadata(document: &crate::Document) -> Result<Metadata, Error> {
         out.annotation_author_storage = reference(&tsk, tsk_field::ANNOTATION_AUTHOR_STORAGE);
     }
     Ok(out)
+}
+
+/// The app's root document archive: its identifier and its decoded message.
+///
+/// Type 10000 in Pages, 1 in Numbers and Keynote. Everything a document says
+/// about *itself* rather than about its contents hangs off this one object.
+pub fn root_archive(document: &crate::Document) -> Option<(u64, Message)> {
+    document
+        .objects()
+        .find(|(_, object)| {
+            let message_type = object.message_type();
+            match document.kind() {
+                Kind::Pages => message_type == crate::pages::TYPE_DOCUMENT,
+                _ => message_type == 1,
+            }
+        })
+        .and_then(|(_, object)| {
+            Message::decode(object.payload())
+                .ok()
+                .map(|message| (object.identifier, message))
+        })
+}
+
+/// Write `TSA.DocumentArchive.template_identifier` — which template a document
+/// was made from.
+///
+/// The apps set it and this crate otherwise never touches it: `pages-lists`
+/// says `Application/04_Real_Estate_Flyer/ISO`, `numbers-categories` says
+/// `Application/21_BasicCategories/Traditional`, and both are the path of the
+/// bundle inside the app, without its extension. A template bundle itself has
+/// no `template_identifier` at all, so a document stamped out of one without
+/// this would be the only document in the corpus that does not know where it
+/// came from.
+pub fn set_template_identifier(
+    document: &mut crate::Document,
+    identifier: &str,
+) -> Result<(), Error> {
+    let Some(field) = super_field(document.kind()) else {
+        return Err(Error::Format(
+            "the document's app is unknown, so there is no TSA.DocumentArchive to write to".into(),
+        ));
+    };
+    let Some((root_id, mut root)) = root_archive(document) else {
+        return Err(Error::Format("no root document archive".into()));
+    };
+    let Some(mut tsa) = nested(&root, field) else {
+        return Err(Error::Format(format!(
+            "the root archive has no TSA.DocumentArchive at field {field}"
+        )));
+    };
+    tsa.set_in_order(
+        tsa_field::TEMPLATE_IDENTIFIER,
+        crate::pb::Value::Bytes(identifier.as_bytes().to_vec()),
+    );
+    root.set_in_order(field, crate::pb::Value::Bytes(tsa.encode()));
+    document.set_archive_of(root_id, &root)
 }
 
 fn nested(message: &Message, field: u32) -> Option<Message> {
@@ -351,9 +394,34 @@ pub struct NewIdentity {
     pub private_uuid: String,
     pub version_uuid: String,
     pub revision: String,
-    /// Unchanged from the original, and the point: this is what says the two
-    /// files are copies of one another.
+    /// Unchanged from the original for a copy, and the point: this is what says
+    /// the two files are copies of one another. For a document made from a
+    /// template it is the *new* `documentUUID`, because that is what the app
+    /// writes — see [`Lineage`].
     pub stable_document_uuid: Option<String>,
+}
+
+/// What a new identity does with `stableDocumentUUID`, which is the whole
+/// difference between the two things this crate can make out of an existing
+/// package.
+///
+/// Measured, on three Pages fixtures the app built from templates it ships.
+/// `00C_Textbook_Portrait/ISO` has `stableDocumentUUID` `A0C50246-…` and
+/// `documentUUID` `65D82B29-…` — a template with a lineage of its own — and
+/// `pages-toc.pages`, which Pages created from exactly that template, has
+/// `stableDocumentUUID` **equal to its own new `documentUUID`**. So a document
+/// made from a template is not a copy of the template: the app gives it a
+/// lineage that starts with itself, and the template's is not in the file at
+/// all. `pages-lists` and `numbers-categories` agree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lineage {
+    /// Keep `stableDocumentUUID`: this file is a copy of the one it came from.
+    /// What Save As does.
+    Kept,
+    /// Start a new one, equal to the new `documentUUID`: this file is a new
+    /// document that happens to have been stamped out of another. What making a
+    /// document from a template does.
+    Fresh,
 }
 
 /// Rewrite the identity of a package in place: `Metadata/Properties.plist` and
@@ -363,6 +431,17 @@ pub struct NewIdentity {
 /// every object stream byte for byte as it was — which matters, because the
 /// object graph of a copy is the object graph of the original.
 pub fn assign_new_identity(package: &mut crate::Package) -> Result<NewIdentity, Error> {
+    assign_identity(package, Lineage::Kept)
+}
+
+/// The same rewrite, with `stableDocumentUUID` chosen rather than kept.
+///
+/// [`Lineage::Fresh`] is what a document made from a template gets, and the
+/// only caller of it is [`crate::Document::from_template`].
+pub fn assign_identity(
+    package: &mut crate::Package,
+    lineage: Lineage,
+) -> Result<NewIdentity, Error> {
     let Some(mut properties) = Properties::read(package)? else {
         return Err(Error::Format(format!(
             "no {PROPERTIES}: this package has no identity to replace"
@@ -376,7 +455,10 @@ pub fn assign_new_identity(package: &mut crate::Package) -> Result<NewIdentity, 
         // The generation the original carried, kept: every document in this
         // corpus is at 0, and nothing here has watched Pages raise it.
         revision: format!("{}::{version_uuid}", generation(&properties)),
-        stable_document_uuid: properties.stable_document_uuid.clone(),
+        stable_document_uuid: match lineage {
+            Lineage::Kept => properties.stable_document_uuid.clone(),
+            Lineage::Fresh => Some(document_uuid.clone()),
+        },
         document_uuid: document_uuid.clone(),
         version_uuid: version_uuid.clone(),
     };
@@ -395,8 +477,15 @@ pub fn assign_new_identity(package: &mut crate::Package) -> Result<NewIdentity, 
     );
     raw.set(key::VERSION_UUID, Plist::String(version_uuid));
     raw.set(key::REVISION, Plist::String(identity.revision.clone()));
-    // `stableDocumentUUID` is deliberately not touched. A document that has
-    // none — no such document exists here — gets none.
+    match lineage {
+        // `stableDocumentUUID` is deliberately not touched. A document that has
+        // none — no such document exists here — gets none.
+        Lineage::Kept => {}
+        Lineage::Fresh => raw.set(
+            key::STABLE_DOCUMENT_UUID,
+            Plist::String(document_uuid.clone()),
+        ),
+    }
 
     package.set(PROPERTIES, crate::plist::write(raw));
     package.set(DOCUMENT_IDENTIFIER, document_uuid.into_bytes());

@@ -35,11 +35,20 @@ metadata, identity and the review layer
                                            their anchors, tracked changes
   iwork duplicate <file> <out>             save a copy with a *new* document
                                            identity, so the two do not collide
+  iwork new       <template> <out>         make a document from a template
+                                           bundle (.template/.nmbtemplate/.kth)
 
 `iwork duplicate` gives the copy fresh documentUUID, shareUUID, privateUUID and
 versionUUID values and a revision to match — what Pages' own Save As was
 measured doing — and keeps stableDocumentUUID, which is what says the copy came
 from this document. A plain save keeps every one of them.
+
+`iwork new` does the same and takes stableDocumentUUID with it, because a
+document made from a template is a new document rather than a copy of the
+template — measured on documents the apps themselves made from templates they
+ship. The templates are in
+`/Applications/<App>.app/Contents/SharedSupport/Templates`, and a document made
+from one there records which one it came from.
 
 Nothing in this repository's corpus has a comment or a tracked change and no
 app's scripting dictionary will make one, so `iwork annotations` reports the
@@ -237,6 +246,7 @@ fn main() -> ExitCode {
         ["metadata", file] => metadata(file),
         ["annotations", file] => annotations(file),
         ["duplicate", file, out] => duplicate(file, out),
+        ["new", template, out] => new_document(template, out),
         ["sections", file] => sections(file),
         ["structure", file] => structure(file),
         ["slides", file] => slides(file),
@@ -578,6 +588,28 @@ fn annotations(path: &str) -> Result<(), Error> {
                 registry::describe_in(doc.kind(), *message_type)
             );
         }
+    }
+    Ok(())
+}
+
+fn new_document(template: &str, out: &str) -> Result<(), Error> {
+    let doc = Document::from_template(template)?;
+    doc.save(out)?;
+    let metadata = doc.metadata()?;
+    println!("wrote {out} — a {} document", doc.kind().as_str());
+    if let Some(properties) = &metadata.properties {
+        println!(
+            "  documentUUID       {}",
+            properties.document_uuid.as_deref().unwrap_or("—")
+        );
+        println!(
+            "  stableDocumentUUID {} (its own — a document from a template is not a copy of it)",
+            properties.stable_document_uuid.as_deref().unwrap_or("—")
+        );
+    }
+    match &metadata.template_identifier {
+        Some(identifier) => println!("  template           {identifier}"),
+        None => println!("  template           — (not one of the app's own, so nothing claimed)"),
     }
     Ok(())
 }

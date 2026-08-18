@@ -31,10 +31,25 @@ impl Kind {
             .map(str::to_ascii_lowercase)
             .as_deref()
         {
-            Some("pages") => Kind::Pages,
-            Some("numbers") => Kind::Numbers,
-            Some("key") => Kind::Keynote,
+            // A template is the same package as a document, and the extension
+            // is the only thing that says which app owns it — so the three
+            // template extensions are read as their app's documents. A
+            // `.template` renamed `.pages` opens in Pages; two fixtures in this
+            // corpus are exactly that.
+            Some("pages") | Some("template") => Kind::Pages,
+            Some("numbers") | Some("nmbtemplate") => Kind::Numbers,
+            Some("key") | Some("kth") => Kind::Keynote,
             _ => Kind::Unknown,
+        }
+    }
+
+    /// The document extension for this app — what a template of it saves as.
+    pub fn extension(self) -> Option<&'static str> {
+        match self {
+            Kind::Pages => Some("pages"),
+            Kind::Numbers => Some("numbers"),
+            Kind::Keynote => Some("key"),
+            Kind::Unknown => None,
         }
     }
 
@@ -284,6 +299,53 @@ impl Document {
         let by_extension = Kind::from_extension(path);
         if by_extension != Kind::Unknown {
             document.kind = by_extension;
+        }
+        Ok(document)
+    }
+
+    /// Make a new document out of a template bundle — `.template`,
+    /// `.nmbtemplate` or `.kth`.
+    ///
+    /// This is the copy-don't-synthesise answer to "create a document". A
+    /// template *is* a document package: the same entries, the same object
+    /// graph, opened by the same code. What it is not is a *new* document, and
+    /// the three things that differ were measured against documents Pages,
+    /// Numbers and Keynote made from templates they ship:
+    ///
+    /// 1. **A fresh identity, lineage included.** `documentUUID`, `shareUUID`,
+    ///    `privateUUID`, `versionUUID`, `revision` and
+    ///    `Metadata/DocumentIdentifier` are new — and so is
+    ///    `stableDocumentUUID`, which is where this differs from
+    ///    [`Document::save_as_new`]. A document from a template is not a copy
+    ///    of the template; the app gives it a lineage beginning with itself
+    ///    ([`crate::metadata::Lineage`]).
+    /// 2. **The template it came from, recorded.**
+    ///    `TSA.DocumentArchive.template_identifier` is set when the path says
+    ///    which template this is — a bundle inside an app's
+    ///    `SharedSupport/Templates` — and left alone when it does not, because
+    ///    the identifier of a template somewhere else is not something this
+    ///    crate can know.
+    /// 3. **Nothing else.** No view state to clear: not one of the 901
+    ///    templates the three apps ship has an `Index/ViewState.iwa`, a
+    ///    `Metadata/BuildVersionHistory.plist` or a preview. The app writes
+    ///    those the first time it saves, and a document without them opens —
+    ///    which the corpus already proves, two of its fixtures being template
+    ///    bundles under a document's name.
+    ///
+    /// The result is a document in memory: [`Document::save`] writes it
+    /// wherever it should live, and saving it twice from two calls gives two
+    /// documents with two identities.
+    pub fn from_template(path: impl AsRef<std::path::Path>) -> Result<Document, Error> {
+        let path = path.as_ref();
+        let mut package = Package::read(path)?;
+        crate::metadata::assign_identity(&mut package, crate::metadata::Lineage::Fresh)?;
+        let mut document = Document::from_package(package)?;
+        let by_extension = Kind::from_extension(path);
+        if by_extension != Kind::Unknown {
+            document.kind = by_extension;
+        }
+        if let Some(identifier) = template_identifier(path) {
+            crate::metadata::set_template_identifier(&mut document, &identifier)?;
         }
         Ok(document)
     }
@@ -3981,6 +4043,41 @@ fn slice(text: &str, range: Range<u64>) -> String {
     let from = crate::text::utf16_offset(text, range.start).unwrap_or(text.len());
     let to = crate::text::utf16_offset(text, range.end).unwrap_or(text.len());
     text.get(from..to).unwrap_or_default().to_string()
+}
+
+/// What the apps call a template they ship, derived from where it lives.
+///
+/// `.../Pages.app/Contents/SharedSupport/Templates/04_Real_Estate_Flyer/ISO.template`
+/// is `Application/04_Real_Estate_Flyer/ISO`, which is the identifier
+/// `pages-lists.pages` — a document Pages made from that very bundle — carries,
+/// and the id AppleScript addresses templates by. Anything outside an app's own
+/// `Templates` directory returns `None`: a template in the user's library has an
+/// identifier too, and it is not this, so nothing is claimed about it.
+fn template_identifier(path: &std::path::Path) -> Option<String> {
+    let components: Vec<String> = path
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    let templates = components.iter().position(|c| c == "Templates")?;
+    if templates < 3 {
+        return None;
+    }
+    let inside_an_app = components[..templates]
+        .iter()
+        .rev()
+        .take(3)
+        .any(|c| c.ends_with(".app"));
+    let shared = components[templates - 1] == "SharedSupport";
+    if !inside_an_app || !shared {
+        return None;
+    }
+    let rest = &components[templates + 1..];
+    let (last, leading) = rest.split_last()?;
+    let stem = last.rsplit_once('.').map(|(s, _)| s).unwrap_or(last);
+    let mut parts = vec!["Application".to_string()];
+    parts.extend(leading.iter().cloned());
+    parts.push(stem.to_string());
+    Some(parts.join("/"))
 }
 
 /// Identify the app from the object graph alone.
