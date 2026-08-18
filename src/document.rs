@@ -2657,9 +2657,12 @@ impl Document {
             _ => {}
         }
 
+        // A stream this session added — a copied Keynote slide is one — is in
+        // `streams` and not yet in the package, and is not missing. Asking the
+        // package alone reported every duplicate as broken until it was saved.
         for component in self.components() {
             let name = component.stream_name();
-            if !self.package.contains(&name) {
+            if !self.package.contains(&name) && !self.streams.contains_key(&name) {
                 problems.push(format!(
                     "component {} points at missing {name}",
                     component.identifier
