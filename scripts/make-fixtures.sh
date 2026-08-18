@@ -2,7 +2,7 @@
 #
 # make-fixtures.sh — build the test corpus with Pages, Numbers and Keynote.
 #
-#   scripts/make-fixtures.sh [--force] [--dir DIR] [NAME...]
+#   scripts/make-fixtures.sh [--force] [--ui] [--dir DIR] [NAME...]
 #
 # No iWork documents are committed to this repository — they are other people's
 # files. This script is the substitute: given the three apps, it writes a corpus
@@ -42,12 +42,14 @@ repo=$(cd "$here/.." && pwd)
 . "$here/lib/osa.sh"
 
 force=0
+ui=0
 dir=$repo/tests/fixtures/generated
 wanted=()
 
 while [ $# -gt 0 ]; do
 	case $1 in
 	--force) force=1 ;;
+	--ui) ui=1 ;;
 	--dir)
 		shift
 		dir=$1
@@ -407,6 +409,51 @@ build keynote-shapes key 300 "$wide" "$square"
 # Nineteen slides: seventeen chart types (all eight 3-D ones among them), one
 # grouped by column instead of by row, and one with a blank cell.
 build keynote-charts key 600
+
+# -- fixtures that need the UI ------------------------------------------------
+#
+# Footnotes, comments, tracked changes, bookmarks, builds and hand-hidden rows
+# exist in no scripting dictionary and no bundled template. They are made
+# through the menus and inspectors, which only works while the screen is
+# unlocked: a locked screen exposes zero AX windows and every menu item
+# validates as disabled. Opt in with --ui; the probe below opens a throwaway
+# document and asks System Events whether its window exists, then skips
+# cleanly rather than fail when it does not. The `*-ui.applescript` builders
+# assume the English menu names this machine shows — on another locale, read
+# the menus first and adjust.
+if [ "$ui" = 1 ]; then
+	unlocked=$(
+		osascript <<-'EOF' 2>/dev/null
+			tell application id "com.apple.Pages"
+				activate
+				set d to make new document
+			end tell
+			delay 1.5
+			tell application "System Events"
+				set n to count windows of (first process whose bundle identifier is "com.apple.Pages")
+			end tell
+			tell application id "com.apple.Pages" to close d saving no
+			n
+		EOF
+	)
+	if [ "${unlocked:-0}" = 0 ]; then
+		printf '\n  --ui: the screen is locked (no AX windows) — UI fixtures skipped\n'
+	else
+		script_override=$here/applescript/pages-footnotes-ui.applescript
+		build pages-footnotes pages 300
+		script_override=$here/applescript/pages-comments-ui.applescript
+		build pages-comments pages 300
+		script_override=$here/applescript/pages-tracked-ui.applescript
+		build pages-tracked pages 300
+		script_override=$here/applescript/pages-bookmarks-ui.applescript
+		build pages-bookmarks pages 300
+		script_override=$here/applescript/keynote-builds-ui.applescript
+		build keynote-builds key 420
+		script_override=$here/applescript/numbers-hidden-ui.applescript
+		build numbers-hidden numbers 300
+		unset script_override
+	fi
+fi
 
 printf '\n%d built, %d left alone, %d failed\n' "$built" "$skipped" "$failed"
 [ "$failed" = 0 ]
