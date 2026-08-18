@@ -1,6 +1,6 @@
 # Shared plumbing for driving Pages, Numbers and Keynote from the shell.
 #
-# Meant to be sourced, not run. Three problems it exists to solve:
+# Meant to be sourced, not run. Four problems it exists to solve:
 #
 #   A timeout. `osascript` has none, and an app that puts up a modal dialog
 #   waits for a click that is never coming — which is exactly what a document
@@ -17,6 +17,47 @@
 #   A way back out. A timed-out call has left a document open and possibly a
 #   dialog with it, and the next call would inherit both. osa_reset closes what
 #   it can and kills the app when it cannot.
+#
+#   One caller at a time. There is one Numbers, and every script here begins by
+#   closing whatever it has open. `cargo test` runs its test binaries in
+#   parallel, and three of them drive the apps — so without a lock one test
+#   closes the document another has just opened, and the failure reads as "the
+#   app would not open this fixture" on a document that is fine. osa_acquire is
+#   the turnstile; every entry point takes it before osa_warm.
+
+# Wait for exclusive use of the apps, and give it back on the way out.
+#
+# `mkdir` is the atomic primitive that exists on every system, and the pid
+# inside the lock is what tells an abandoned lock from a busy one: a run killed
+# at its timeout does not get to clean up, and the next caller must not wait an
+# hour for a process that is gone.
+osa_acquire() {
+	local dir=${TMPDIR:-/tmp}/iwork-osa.lock waited=0 holder
+	while ! mkdir "$dir" 2>/dev/null; do
+		holder=$(cat "$dir/pid" 2>/dev/null)
+		if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
+			rm -rf "$dir"
+			continue
+		fi
+		if [ "$waited" -ge "${IWORK_APP_LOCK_TIMEOUT:-1800}" ]; then
+			printf 'osa: taking the app lock from %s after %ss\n' "${holder:-?}" "$waited" >&2
+			rm -rf "$dir"
+			continue
+		fi
+		sleep 1
+		waited=$((waited + 1))
+	done
+	printf '%s' "$$" >"$dir/pid"
+	OSA_LOCK=$dir
+	trap 'osa_release' EXIT INT TERM
+}
+
+osa_release() {
+	if [ -n "${OSA_LOCK:-}" ]; then
+		rm -rf "$OSA_LOCK"
+		OSA_LOCK=
+	fi
+}
 
 # Bundle identifier for a document extension.
 osa_bundle() {

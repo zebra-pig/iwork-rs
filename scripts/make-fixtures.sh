@@ -183,6 +183,11 @@ printf 'building fixtures in %s\n' "$dir"
 
 script_override=
 
+# The apps are a single resource; take them for the whole build. The trap
+# osa_acquire installs would replace the one above, so this one does both.
+osa_acquire
+trap 'osa_release; rm -rf "$assets"' EXIT INT TERM
+
 osa_warm pages
 build pages-plain pages 120
 build pages-styled pages 120

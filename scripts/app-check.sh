@@ -75,6 +75,12 @@ check() {
 	key) script=$here/applescript/check-keynote.applescript ;;
 	esac
 
+	# Wait for the apps to be ours. `cargo test` runs its test binaries in
+	# parallel and three of them come through here, so without the lock one
+	# run's `osa_warm` closes another run's document — and "REFUSED" is
+	# entirely the wrong thing to say about that.
+	osa_acquire
+
 	# Start the app and clear anything it is holding first. An app that is
 	# still opening, or still showing the document from the last check, takes
 	# long enough over the next `open` to trip the timeout — and "REFUSED" is

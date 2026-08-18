@@ -36,6 +36,10 @@ if [ ! -e "$document" ]; then
 fi
 document=$(cd "$(dirname "$document")" && pwd)/$(basename "$document")
 
+# One caller at a time: `cargo test` drives the apps from three test binaries
+# at once, and every one of them starts by closing what Numbers has open.
+osa_acquire
+
 osa_warm numbers || exit 1
 if ! osa_run "$timeout" "$here/applescript/table-oracle.applescript" "$document"; then
 	status=$?
