@@ -255,6 +255,84 @@ fn an_encrypted_package_is_refused_in_the_package_form_too() {
     let _ = std::fs::remove_dir_all(&scratch);
 }
 
+// -- previews ----------------------------------------------------------------
+
+/// The rule, stated as a test: an edit leaves the previews exactly where they
+/// were, stale and all, and a document that had none still has none.
+///
+/// The argument is in `FORMAT.md` §1. The short of it: nothing in the document
+/// refers to them, the app redraws them the next time *it* saves, and removing
+/// them would cost the byte-identity a no-op save promises.
+#[test]
+fn an_edit_leaves_the_previews_alone() {
+    let dir = scratch("previews");
+    for path in corpus() {
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let mut doc = Document::open(&path).unwrap();
+        let before: Vec<String> = doc.previews().iter().map(|n| n.to_string()).collect();
+
+        // Any edit at all: the first text storage, rewritten with its own text
+        // plus a word, which is enough to rewrite a stream.
+        if let Some(storage) = doc.text_storages().into_iter().find(|s| !s.text.is_empty()) {
+            let edited = format!("{} and more", storage.text);
+            if doc.set_text(storage.identifier, &edited).is_err() {
+                continue;
+            }
+        }
+        let out = dir.join(&name);
+        doc.save(&out).unwrap();
+
+        let after = Document::open(&out).unwrap();
+        let names: Vec<String> = after.previews().iter().map(|n| n.to_string()).collect();
+        assert_eq!(names, before, "{name}: an edit changed the preview entries");
+        for preview in &before {
+            assert_eq!(
+                after.package().get(preview),
+                Package::read(&path).unwrap().get(preview),
+                "{name}: {preview} was rewritten"
+            );
+        }
+        let _ = std::fs::remove_file(&out);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// And the other half of the choice: a document with the previews taken out is
+/// still a document. Every one of Apple's 901 template bundles is one.
+#[test]
+fn a_document_without_previews_is_still_a_document() {
+    let dir = scratch("stripped");
+    let checking = app_checking();
+    let mut checked = Vec::new();
+    for path in corpus() {
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let mut doc = Document::open(&path).unwrap();
+        let had = doc.previews().len();
+        assert_eq!(doc.strip_previews(), had, "{name}");
+        assert!(doc.previews().is_empty(), "{name}");
+        // Nothing refers to a preview, so nothing can be left dangling by
+        // taking one away.
+        assert!(doc.problems().is_empty(), "{name}: {:?}", doc.problems());
+
+        let out = dir.join(&name);
+        doc.save(&out).unwrap();
+        let reread = Document::open(&out).unwrap();
+        assert!(reread.previews().is_empty(), "{name}");
+        assert_eq!(reread.objects().count(), doc.objects().count(), "{name}");
+
+        let kind = Kind::from_extension(&path);
+        if checking && !checked.contains(&kind) {
+            checked.push(kind);
+            assert!(
+                app_check(&out),
+                "{name}: the app would not open it without its previews"
+            );
+        }
+        let _ = std::fs::remove_file(&out);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // -- documents from templates ------------------------------------------------
 
 /// The template bundles the installed apps ship, newest-looking first. All 901
