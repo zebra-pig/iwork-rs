@@ -1433,6 +1433,26 @@ impl Document {
         crate::drawable::drawables(self)
     }
 
+    /// Every chart in the document, with its type, its placement, its private
+    /// copy of its data and — in Numbers — the table references that feed it.
+    ///
+    /// See [`crate::chart`] for why those are two different things.
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), iwork::Error> {
+    /// # let doc = iwork::Document::open("Report.numbers")?;
+    /// for chart in doc.charts() {
+    ///     println!("{} on {}", chart.type_label(), chart.placement.as_str());
+    ///     for series in chart.series() {
+    ///         println!("  {:?}", series.name);
+    ///     }
+    /// }
+    /// # Ok(()) }
+    /// ```
+    pub fn charts(&self) -> Vec<crate::chart::Chart> {
+        crate::chart::charts(self)
+    }
+
     /// One drawable by object identifier.
     pub fn drawable(&self, identifier: u64) -> Option<crate::drawable::Drawable> {
         self.drawables()
@@ -2722,6 +2742,175 @@ impl Document {
                 ));
             }
             problems.extend(table.audit());
+        }
+
+        // Charts check themselves too, and the rules are the ones a chart-aware
+        // writer could break silently. See `chart_problems`.
+        problems.extend(self.chart_problems());
+        problems
+    }
+
+    /// Everything about a chart that looks wrong.
+    ///
+    /// Four rules, kept by every chart in the corpus and by every chart in the
+    /// 69 bundled templates that have one, and each of them breakable by an
+    /// edit that changes a chart's data without changing everything else:
+    ///
+    /// * **The grid is rectangular and its names fit it.** One row name per
+    ///   row, one column name per column. A chart whose names and grid disagree
+    ///   draws a series with no label, or labels a series that is not there.
+    /// * **A sparse array's indices are inside its count.** `count` is the
+    ///   logical number of series and the entries are the overrides; an index
+    ///   at or past the count points at a series that does not exist.
+    /// * **A style a chart names exists**, and is of the type the slot is for —
+    ///   a chart style is a 5022, a series style a 5028.
+    /// * **A mediator's back-reference points at the chart that names it.** The
+    ///   binding is written both ways, and a chart whose mediator names another
+    ///   chart follows the wrong table.
+    fn chart_problems(&self) -> Vec<String> {
+        let mut problems = Vec::new();
+        let types: BTreeMap<u64, u32> = self
+            .objects()
+            .map(|(_, object)| (object.identifier, object.message_type()))
+            .collect();
+
+        for chart in self.charts() {
+            let grid = &chart.grid;
+            let width = grid.column_count();
+            if grid.rows.iter().any(|row| row.len() != width) {
+                problems.push(format!(
+                    "chart {}: the grid is not rectangular",
+                    chart.identifier
+                ));
+            }
+            if grid.row_names.len() != grid.rows.len() {
+                problems.push(format!(
+                    "chart {}: {} row names for {} rows",
+                    chart.identifier,
+                    grid.row_names.len(),
+                    grid.rows.len()
+                ));
+            }
+            if grid.column_names.len() != width {
+                problems.push(format!(
+                    "chart {}: {} column names for {width} columns",
+                    chart.identifier,
+                    grid.column_names.len()
+                ));
+            }
+
+            for (which, array) in [
+                ("private series styles", &chart.series_private_styles),
+                ("series non-styles", &chart.series_non_styles),
+            ] {
+                for (index, _) in &array.entries {
+                    if *index >= array.count {
+                        problems.push(format!(
+                            "chart {}: {which} has an entry at {index} in an array of {}",
+                            chart.identifier, array.count
+                        ));
+                    }
+                }
+            }
+
+            let mut expect = |slot: &str, target: Option<u64>, kind: u32| {
+                let Some(target) = target else { return };
+                match types.get(&target) {
+                    None => problems.push(format!(
+                        "chart {}: {slot} points at missing object {target}",
+                        chart.identifier
+                    )),
+                    Some(found) if *found != kind => problems.push(format!(
+                        "chart {}: {slot} points at object {target} of type {found}, not {kind}",
+                        chart.identifier
+                    )),
+                    Some(_) => {}
+                }
+            };
+            expect(
+                "chart style",
+                chart.chart_style,
+                crate::chart::TYPE_CHART_STYLE,
+            );
+            expect(
+                "chart non-style",
+                chart.chart_non_style,
+                crate::chart::TYPE_CHART_NON_STYLE,
+            );
+            expect(
+                "legend style",
+                chart.legend_style,
+                crate::chart::TYPE_LEGEND_STYLE,
+            );
+            expect(
+                "legend non-style",
+                chart.legend_non_style,
+                crate::chart::TYPE_LEGEND_NON_STYLE,
+            );
+            for target in &chart.series_theme_styles {
+                expect(
+                    "series theme style",
+                    Some(*target),
+                    crate::chart::TYPE_SERIES_STYLE,
+                );
+            }
+            for (_, target) in &chart.series_private_styles.entries {
+                expect(
+                    "private series style",
+                    Some(*target),
+                    crate::chart::TYPE_SERIES_STYLE,
+                );
+            }
+            for (_, target) in &chart.series_non_styles.entries {
+                expect(
+                    "series non-style",
+                    Some(*target),
+                    crate::chart::TYPE_SERIES_NON_STYLE,
+                );
+            }
+            for target in chart
+                .value_axis_styles
+                .iter()
+                .chain(chart.category_axis_styles.iter())
+            {
+                expect("axis style", Some(*target), crate::chart::TYPE_AXIS_STYLE);
+            }
+            for target in chart
+                .value_axis_non_styles
+                .iter()
+                .chain(chart.category_axis_non_styles.iter())
+            {
+                expect(
+                    "axis non-style",
+                    Some(*target),
+                    crate::chart::TYPE_AXIS_NON_STYLE,
+                );
+            }
+
+            // The mediator names the chart back, at field 1 of the base
+            // `TSCH.ChartMediatorArchive`.
+            if let Some(mediator) = chart.mediator {
+                let back = self
+                    .objects()
+                    .find(|(_, object)| object.identifier == mediator)
+                    .and_then(|(_, object)| Message::decode(object.payload()).ok())
+                    .and_then(|archive| {
+                        let base = match archive.bytes(1).and_then(crate::pb::decode_nested) {
+                            Some(base) => base,
+                            None => archive,
+                        };
+                        base.bytes(1)
+                            .and_then(crate::pb::decode_nested)
+                            .and_then(|r| r.varint(1))
+                    });
+                match back {
+                    Some(target) if target != chart.identifier => problems.push(format!(
+                        "chart {}: its mediator {mediator} names chart {target}",
+                        chart.identifier
+                    )),
+                    _ => {}
+                }
+            }
         }
         problems
     }
