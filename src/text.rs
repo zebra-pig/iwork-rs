@@ -234,6 +234,21 @@ pub const TABLES: &[Table] = &[
 /// [`unknown_table`] should say so rather than wave it through.
 pub const PLAIN_FIELDS: &[u32] = &[1, 2, 3, 4, 10];
 
+/// Field numbers of the tables other modules reach for by name.
+///
+/// The whole inventory is [`TABLES`]; these are the ones with a caller outside
+/// this module, and a named constant reads better than a number at the call
+/// site.
+pub const PARAGRAPH_STYLE_TABLE: u32 = 5;
+/// `table_layout_style` — column layouts, one entry per paragraph range.
+pub const LAYOUT_TABLE: u32 = 12;
+/// `table_bookmark`.
+pub const BOOKMARK_TABLE: u32 = 15;
+/// `table_footnote`.
+pub const FOOTNOTE_TABLE: u32 = 16;
+/// `table_section`.
+pub const SECTION_TABLE: u32 = 17;
+
 /// The table at a storage field, if that field is one.
 pub fn table(field: u32) -> Option<&'static Table> {
     TABLES.iter().find(|t| t.field == field)

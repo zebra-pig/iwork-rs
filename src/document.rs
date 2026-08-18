@@ -2467,6 +2467,37 @@ impl Document {
         Ok(text::read(&self.storage_archive(storage)?))
     }
 
+    /// The Pages document spine: mode, paper, sections, headers and footers,
+    /// page templates, threads, contents lists, footnotes and bookmarks.
+    ///
+    /// `None` for a document with no `TP.DocumentArchive`, which is every
+    /// Numbers and Keynote document.
+    pub fn structure(&self) -> Option<crate::pages::Structure> {
+        crate::pages::structure(self)
+    }
+
+    /// Sections of a Pages document, with the range of body text each covers.
+    pub fn sections(&self) -> Vec<crate::pages::Section> {
+        self.structure().map(|s| s.sections).unwrap_or_default()
+    }
+
+    /// Every header and footer storage, named by section, template page and
+    /// zone.
+    ///
+    /// The storage identifier each one carries is what [`Document::set_text`]
+    /// takes: a header is a `TSWP.StorageArchive` like any other, and editing
+    /// one goes through the same remapping as editing the body.
+    pub fn header_footers(&self) -> Vec<crate::pages::HeaderFooter> {
+        self.structure()
+            .map(|s| s.header_footers)
+            .unwrap_or_default()
+    }
+
+    /// Column layouts in force over one storage's paragraphs.
+    pub fn column_layouts(&self, storage: u64) -> Vec<crate::pages::ColumnLayout> {
+        crate::pages::column_layouts(self, storage)
+    }
+
     /// Everything about the object graph that looks wrong.
     ///
     /// Written to be run against an *unedited* document first: whatever it says
@@ -2995,6 +3026,15 @@ impl Document {
                 .position(|object| object.identifier == identifier)
                 .map(|index| (name.clone(), index))
         })
+    }
+
+    /// Decode any object's first message, at the wire level.
+    ///
+    /// The escape hatch for a caller that knows a message this crate does not
+    /// model: the fields come back as they were written, in the order they were
+    /// written, and an unrecognised one is a field like any other.
+    pub fn archive(&self, identifier: u64) -> Result<Message, Error> {
+        self.archive_of(identifier)
     }
 
     /// Decode any object's first message.

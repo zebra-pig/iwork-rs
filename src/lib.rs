@@ -49,6 +49,7 @@ pub mod drawable;
 pub mod iwa;
 pub mod media;
 pub mod package;
+pub mod pages;
 pub mod pb;
 pub mod registry;
 pub mod style;
