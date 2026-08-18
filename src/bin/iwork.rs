@@ -916,20 +916,53 @@ fn slides(path: &str) -> Result<(), Error> {
         playback.push("plays on open".into());
     }
     if show.idle_timer_active {
-        playback.push(format!("restarts after {}s idle", show.idle_timer_delay));
+        // Seconds on the wire; the app's `maximum idle duration` is minutes.
+        playback.push(format!(
+            "restarts after {}s idle ({} min)",
+            show.idle_timer_delay,
+            show.idle_minutes()
+        ));
+    }
+    if show.mode == 1 {
+        playback.push(format!(
+            "self-playing: {}s between slides, {}s between builds",
+            show.autoplay_transition_delay, show.autoplay_build_delay
+        ));
     }
     println!("  {}", playback.join(", "));
     if let Some(track) = &show.soundtrack {
         println!(
             "  soundtrack id={} {} track(s), volume {}, {}",
             track.identifier,
-            track.tracks,
+            track.tracks(),
             track.volume,
             track.mode_name()
         );
+        for (index, media) in track.media.iter().enumerate() {
+            println!("    track {} media {}", index + 1, media);
+        }
     }
-    if let Some(recording) = show.recording {
-        println!("  recorded presentation id={recording} — read only, never authored");
+    if let Some(recording) = &show.recording {
+        println!(
+            "  recorded presentation id={} {}s, {} event track(s){} \
+             — read only, never authored",
+            recording.identifier,
+            recording.duration,
+            recording.event_tracks.len(),
+            match recording.movie_track {
+                Some(id) => format!(", movie track {id}"),
+                None => String::new(),
+            }
+        );
+    }
+    for source in &show.live_video_sources {
+        println!(
+            "  live video source id={} \"{}\"{}{} — read only, never authored",
+            source.identifier,
+            source.name,
+            if source.is_default { ", default" } else { "" },
+            if source.listed { "" } else { ", unlisted" }
+        );
     }
 
     for slide in &show.slides {
@@ -961,22 +994,69 @@ fn slides(path: &str) -> Result<(), Error> {
             );
         }
         if !slide.transition.is_none() {
+            let transition = &slide.transition;
             println!(
                 "  transition         {} {}s, {}",
-                slide.transition.effect,
-                slide.transition.duration,
-                if slide.transition.automatic {
-                    format!("automatic after {}s", slide.transition.delay)
+                transition.effect,
+                transition.duration,
+                if transition.automatic {
+                    format!("automatic after {}s", transition.delay)
                 } else {
                     "on click".to_string()
                 }
             );
+            // The parameters that belong to the effect rather than the timing.
+            // Only what is on the wire is printed: Keynote writes the ones the
+            // chosen effect has and no others.
+            let mut detail = Vec::new();
+            if transition.direction != 0 {
+                detail.push(format!("direction {}", transition.direction_name()));
+            }
+            if let Some(color) = transition.color {
+                detail.push(format!("through {color}"));
+            }
+            if transition.rtl {
+                detail.push("right-to-left writing".into());
+            }
+            detail.extend(transition.parameters.describe());
+            if !detail.is_empty() {
+                println!("                     {}", detail.join(", "));
+            }
+            if !transition.unknown_parameters.is_empty() {
+                println!(
+                    "                     unknown parameter field(s) {:?} — \
+                     the 15.3.1 schema does not name them",
+                    transition.unknown_parameters
+                );
+            }
         }
-        if slide.builds > 0 || slide.build_chunks > 0 {
+        if !slide.builds.is_empty() || !slide.build_chunks.is_empty() {
             println!(
-                "  builds             {} build(s), {} chunk(s)",
-                slide.builds, slide.build_chunks
+                "  builds             {} build(s), {} chunk(s) \
+                 — decoded from the 15.3.1 schema, never measured",
+                slide.builds.len(),
+                slide.build_chunks.len()
             );
+            for build in &slide.builds {
+                println!(
+                    "    build {} {} on drawable {}{}",
+                    build.identifier,
+                    if build.animation.effect.is_empty() {
+                        "(no effect)"
+                    } else {
+                        &build.animation.effect
+                    },
+                    match build.drawable {
+                        Some(id) => id.to_string(),
+                        None => "?".to_string(),
+                    },
+                    if build.delivery.is_empty() {
+                        String::new()
+                    } else {
+                        format!(", delivery {}", build.delivery)
+                    }
+                );
+            }
         }
         println!(
             "  drawables          {} owned, {} in z-order",

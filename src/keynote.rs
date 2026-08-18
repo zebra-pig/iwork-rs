@@ -206,20 +206,107 @@ pub mod placeholder_field {
     pub const KIND: u32 = 2;
 }
 
-/// The chain from a slide to the four numbers a transition is made of:
-/// `KN.TransitionArchive.attributes (2)` →
-/// `KN.TransitionAttributesArchive.animationAttributes (8)` →
-/// `KN.AnimationAttributesArchive`.
+/// The chain from a slide to what a transition is made of:
+/// `KN.TransitionArchive.attributes (2)` → `KN.TransitionAttributesArchive`,
+/// whose field 8 is the `KN.AnimationAttributesArchive` shared with builds and
+/// whose fields 9–20 are the per-effect `custom_*` block.
 pub mod transition_field {
     pub const ATTRIBUTES: u32 = 2;
+
+    // -- KN.TransitionAttributesArchive -------------------------------------
     pub const ANIMATION_ATTRIBUTES: u32 = 8;
+    pub const CUSTOM_TWIST: u32 = 9;
+    pub const CUSTOM_MOSAIC_SIZE: u32 = 10;
+    pub const CUSTOM_MOSAIC_TYPE: u32 = 11;
+    pub const CUSTOM_BOUNCE: u32 = 12;
+    pub const CUSTOM_MAGIC_MOVE_FADE_UNMATCHED: u32 = 13;
+    pub const CUSTOM_TIMING_CURVE: u32 = 15;
+    pub const CUSTOM_TEXT_DELIVERY: u32 = 16;
+    pub const CUSTOM_MOTION_BLUR: u32 = 17;
+    pub const CUSTOM_TRAVEL_DISTANCE: u32 = 18;
+    pub const CUSTOM_ANGLE: u32 = 19;
+    pub const CUSTOM_BLUR_AMOUNT: u32 = 20;
+
+    // -- KN.AnimationAttributesArchive --------------------------------------
     pub const ANIMATION_TYPE: u32 = 1;
     pub const EFFECT: u32 = 2;
     pub const DURATION: u32 = 3;
     pub const DIRECTION: u32 = 4;
     pub const DELAY: u32 = 5;
     pub const AUTOMATIC: u32 = 6;
+    pub const COLOR: u32 = 7;
     pub const SEED: u32 = 11;
+    pub const CUSTOM_DETAIL: u32 = 12;
+    pub const RTL: u32 = 16;
+
+    /// Every field of `KN.TransitionAttributesArchive` the 15.3.1 schema names:
+    /// 1–7 are the deprecated `database_*` copies of the animation attributes,
+    /// 8 is the animation attributes themselves, and the rest is the `custom_*`
+    /// block. **14 is a hole** — the schema skips it — which is why a decoder
+    /// that reports what it did not recognise has something to say about it.
+    pub const NAMED: [u32; 19] = [
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 16, 17, 18, 19, 20,
+    ];
+}
+
+/// Field numbers of `KN.BuildArchive` (8) and its attributes.
+///
+/// **Unverified in this corpus.** No document here and none of the 182 bundled
+/// themes carries a build, and nothing in Keynote's dictionary makes one, so
+/// every name below comes from the 15.3.1 schema and none of it has been
+/// exercised. It is decoded anyway so that a deck from outside is *reported*
+/// rather than silently counted as nothing — and so that
+/// [`tests`](crate::keynote) fails the day one turns up.
+pub mod build_field {
+    pub const DRAWABLE: u32 = 1;
+    /// `required string delivery` — carried verbatim, because nothing here
+    /// knows what its values look like.
+    pub const DELIVERY: u32 = 2;
+    pub const ATTRIBUTES: u32 = 4;
+    pub const CHUNK_ID_SEED: u32 = 5;
+
+    // -- KN.BuildAttributesArchive ------------------------------------------
+    pub const EVENT_TRIGGER: u32 = 4;
+    pub const ANIMATION_ATTRIBUTES: u32 = 18;
+    pub const START_OFFSET: u32 = 27;
+    pub const END_OFFSET: u32 = 28;
+    pub const CUSTOM_TEXT_DELIVERY: u32 = 20;
+    pub const CUSTOM_DELIVERY_OPTION: u32 = 21;
+    pub const ACTION_MOTION_PATH: u32 = 22;
+
+    // -- KN.BuildChunkArchive (153) -----------------------------------------
+    pub const CHUNK_BUILD: u32 = 1;
+    pub const CHUNK_DELAY: u32 = 3;
+    pub const CHUNK_DURATION: u32 = 4;
+    pub const CHUNK_AUTOMATIC: u32 = 5;
+    pub const CHUNK_REFERENT: u32 = 6;
+}
+
+/// Field numbers of `KN.Soundtrack` (21).
+pub mod soundtrack_field {
+    pub const VOLUME: u32 = 1;
+    pub const MODE: u32 = 2;
+    /// `repeated TSP.DataReference movie_media` — **an ordered track list**,
+    /// each entry a bare `{1: data identifier}` into the media registry.
+    pub const MOVIE_MEDIA: u32 = 3;
+}
+
+/// Field numbers of `KN.RecordingArchive` (16) — read and passed through,
+/// never authored (ground rule 8).
+pub mod recording_field {
+    pub const EVENT_TRACKS: u32 = 1;
+    pub const MOVIE_TRACK: u32 = 2;
+    pub const DURATION: u32 = 3;
+    pub const MODIFICATION_DATE: u32 = 5;
+}
+
+/// Field numbers of `KN.LiveVideoSource` (184) and its collection (185).
+pub mod live_video_field {
+    pub const NAME: u32 = 1;
+    pub const POSTER_IMAGE: u32 = 4;
+    pub const IS_DEFAULT: u32 = 8;
+    pub const COLLECTION_SOURCES: u32 = 1;
+    pub const COLLECTION_DEFAULT: u32 = 2;
 }
 
 /// What a `KN.PlaceholderArchive` stands in for.
@@ -312,8 +399,265 @@ pub struct SlideText {
     pub text: String,
 }
 
-/// A slide's transition, as far as an *inventory* goes. The direction and the
-/// two dozen `custom_*` parameters are phase 8b's.
+/// Every transition effect Keynote 15.3.1 has, as `(the app's name, the
+/// identifier on the wire)`.
+///
+/// The names are the `transition effects` enumeration of the scripting
+/// dictionary and the identifiers are the `cocoa string-value` beside each one;
+/// the pairing is the app's own. It is not taken on trust either:
+/// `keynote-transitions` sets all 44 from a script, and
+/// `tests/keynote.rs` makes Keynote read every one of them back and compares
+/// the name it gives with the identifier this table maps it to.
+///
+/// The order is the dictionary's, which is the order the app's Animate
+/// inspector lists them in: the four text-and-object effects first, then the
+/// object effects, then the slide effects.
+pub const EFFECTS: [(&str, &str); 44] = [
+    ("no transition effect", "none"),
+    ("magic move", "apple:magic-move-implied-motion-path"),
+    ("shimmer", "apple:ca-text-shimmer"),
+    ("sparkle", "apple:ca-text-sparkle"),
+    ("swing", "apple:ca-swing"),
+    ("object cube", "apple:ca-cube"),
+    ("object flip", "apple:ca-dissolve-and-flip"),
+    ("object pop", "apple:ca-pop"),
+    ("object push", "apple:ca-push"),
+    ("object revolve", "apple:ca-revolve"),
+    ("object zoom", "apple:ca-zoom"),
+    ("perspective", "apple:ca-isometric"),
+    ("clothesline", "apple:ClotheslinePush"),
+    ("confetti", "com.apple.iWork.Keynote.KLNConfetti"),
+    ("dissolve", "apple:dissolve"),
+    ("drop", "apple:bounce"),
+    ("droplet", "apple:droplet"),
+    (
+        "fade through color",
+        "com.apple.iWork.Keynote.BLTFadeThruColor",
+    ),
+    ("grid", "apple:apple-grid"),
+    ("iris", "apple:wipe-iris"),
+    ("move in", "apple:slide"),
+    ("push", "apple:push"),
+    ("reveal", "apple:reveal"),
+    ("switch", "apple:FlipThrough"),
+    ("wipe", "apple:wipe"),
+    ("blinds", "com.apple.iWork.Keynote.BLTBlinds"),
+    ("color planes", "com.apple.iWork.Keynote.KLNColorPlanes"),
+    ("cube", "apple:3D-cube"),
+    ("doorway", "apple:doorway"),
+    ("fall", "apple:fall"),
+    ("flip", "apple:revolve"),
+    ("flop", "com.apple.iWork.Keynote.BUKFlop"),
+    ("mosaic", "com.apple.iWork.Keynote.BLTMosaicFlip"),
+    ("page flip", "apple:pageflip"),
+    ("pivot", "apple:pivot"),
+    ("reflection", "com.apple.iWork.Keynote.BLTReflection"),
+    ("revolving door", "com.apple.iWork.Keynote.BLTRevolvingDoor"),
+    ("scale", "apple:scale"),
+    ("swap", "com.apple.iWork.Keynote.KLNSwap"),
+    ("swoosh", "com.apple.iWork.Keynote.BLTSwoosh"),
+    ("twirl", "apple:twirl"),
+    ("twist", "com.apple.iWork.Keynote.BUKTwist"),
+    ("fade and move", "apple:fade-and-move"),
+    ("radial wipe", "apple:radial wipe"),
+];
+
+/// What the app calls this effect identifier, if it is one the app has.
+///
+/// **`apple:revolve` is "flip" and `apple:ca-revolve` is "object revolve"** —
+/// three of the identifiers differ from their names by nothing a reader could
+/// guess, which is why the table is the app's and not a transformation.
+pub fn effect_name(identifier: &str) -> Option<&'static str> {
+    EFFECTS
+        .iter()
+        .find(|(_, wire)| *wire == identifier)
+        .map(|(name, _)| *name)
+}
+
+/// Which way a transition travels — `AnimationAttributesArchive.direction` (4).
+///
+/// **Keynote's own writer never emits this field.** Every one of the 44 effects
+/// set through `transition properties` leaves it absent, which is 0: "whatever
+/// this effect does by default". The values below were got the only way this
+/// corpus can get them — by handing Keynote a PowerPoint file with a direction
+/// on it and reading back what the importer wrote (see FORMAT.md §13). Two
+/// families, orthogonal and diagonal, and they are consistent across `apple:push`,
+/// `apple:wipe`, `apple:slide` and `com.apple.iWork.Keynote.BLTBlinds`.
+pub fn direction_name(direction: u64) -> &'static str {
+    match direction {
+        0 => "the effect's own default",
+        11 => "left to right",
+        12 => "right to left",
+        13 => "top to bottom",
+        14 => "bottom to top",
+        21 => "top left to bottom right",
+        22 => "top right to bottom left",
+        23 => "bottom left to top right",
+        24 => "bottom right to top left",
+        _ => "unknown",
+    }
+}
+
+/// `TransitionCustomAttributesTimingCurveType` — the "Acceleration" popup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimingCurve {
+    Linear,
+    EaseIn,
+    EaseOut,
+    EaseInEaseOut,
+    Custom,
+    Unknown(u64),
+}
+
+impl TimingCurve {
+    pub fn of(value: u64) -> TimingCurve {
+        match value {
+            1 => TimingCurve::Linear,
+            2 => TimingCurve::EaseIn,
+            3 => TimingCurve::EaseOut,
+            4 => TimingCurve::EaseInEaseOut,
+            5 => TimingCurve::Custom,
+            other => TimingCurve::Unknown(other),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TimingCurve::Linear => "linear",
+            TimingCurve::EaseIn => "ease in",
+            TimingCurve::EaseOut => "ease out",
+            TimingCurve::EaseInEaseOut => "ease in, ease out",
+            TimingCurve::Custom => "custom",
+            TimingCurve::Unknown(_) => "unknown",
+        }
+    }
+}
+
+/// `TransitionCustomAttributesTextDeliveryType` — Magic Move's text
+/// granularity, the app's "Text: Blend / Word / Character" popup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextDelivery {
+    /// Blend the whole block. The default Keynote writes for Magic Move.
+    ByObject,
+    ByWord,
+    ByCharacter,
+    ByLine,
+    Unknown(u64),
+}
+
+impl TextDelivery {
+    pub fn of(value: u64) -> TextDelivery {
+        match value {
+            1 => TextDelivery::ByObject,
+            2 => TextDelivery::ByWord,
+            3 => TextDelivery::ByCharacter,
+            4 => TextDelivery::ByLine,
+            other => TextDelivery::Unknown(other),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TextDelivery::ByObject => "by object",
+            TextDelivery::ByWord => "by word",
+            TextDelivery::ByCharacter => "by character",
+            TextDelivery::ByLine => "by line",
+            TextDelivery::Unknown(_) => "unknown",
+        }
+    }
+}
+
+/// The `custom_*` block of `KN.TransitionAttributesArchive` — the parameters
+/// that belong to the *effect* rather than to the timing.
+///
+/// Every one is an `Option` because **Keynote writes only the parameters the
+/// chosen effect has**, and it writes them whatever their value: `apple:scale`
+/// and `apple:ca-revolve` both carry `custom_bounce` = false, which an absent-
+/// means-false decoder would have reported as "no such parameter". Measured by
+/// setting all 44 effects on 44 otherwise identical slides — `keynote-transitions`
+/// — and diffing; the two control slides prove the block does not move when the
+/// duration, the delay or the automatic flag do.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct TransitionParameters {
+    /// `custom_twist` (9) — degrees. 3.3 on `BUKTwist`.
+    pub twist: Option<f32>,
+    /// `custom_mosaic_size` (10) and `custom_mosaic_type` (11). Named from the
+    /// schema; `BLTMosaicFlip` was set from a script and wrote neither.
+    pub mosaic_size: Option<u64>,
+    pub mosaic_type: Option<u64>,
+    /// `custom_bounce` (12) — the "Bounce" checkbox of the object effects.
+    pub bounce: Option<bool>,
+    /// `custom_magic_move_fade_unmatched_objects` (13) — Magic Move's "Fade
+    /// Unmatched Objects", true by default.
+    pub magic_move_fade_unmatched: Option<bool>,
+    /// `custom_timing_curve` (15) — Magic Move's Acceleration.
+    pub timing_curve: Option<TimingCurve>,
+    /// `custom_text_delivery_type` (16) — Magic Move's text granularity.
+    pub text_delivery: Option<TextDelivery>,
+    /// `custom_motion_blur` (17). Named from the schema; unwritten by any of
+    /// the 44 effects.
+    pub motion_blur: Option<bool>,
+    /// `custom_travel_distance` (18) — 1.0 on `apple:fade-and-move`.
+    pub travel_distance: Option<f32>,
+    /// `custom_angle` (19) — degrees; 90 on `apple:radial wipe`.
+    pub angle: Option<f32>,
+    /// `custom_blur_amount` (20) — 0.5 on `apple:radial wipe`.
+    pub blur_amount: Option<f32>,
+}
+
+impl TransitionParameters {
+    /// Did the effect bring any parameters of its own?
+    pub fn is_empty(&self) -> bool {
+        *self == TransitionParameters::default()
+    }
+
+    /// One line per parameter that is present, for a listing.
+    pub fn describe(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(v) = self.twist {
+            out.push(format!("twist {v}°"));
+        }
+        if let Some(v) = self.mosaic_size {
+            out.push(format!("mosaic size {v}"));
+        }
+        if let Some(v) = self.mosaic_type {
+            out.push(format!("mosaic type {v}"));
+        }
+        if let Some(v) = self.bounce {
+            out.push(format!("bounce {v}"));
+        }
+        if let Some(v) = self.magic_move_fade_unmatched {
+            out.push(format!("fade unmatched {v}"));
+        }
+        if let Some(v) = self.timing_curve {
+            out.push(format!("acceleration {}", v.as_str()));
+        }
+        if let Some(v) = self.text_delivery {
+            out.push(format!("text {}", v.as_str()));
+        }
+        if let Some(v) = self.motion_blur {
+            out.push(format!("motion blur {v}"));
+        }
+        if let Some(v) = self.travel_distance {
+            out.push(format!("travel {v}"));
+        }
+        if let Some(v) = self.angle {
+            out.push(format!("angle {v}°"));
+        }
+        if let Some(v) = self.blur_amount {
+            out.push(format!("blur {v}"));
+        }
+        out
+    }
+}
+
+/// A slide's transition, in full: the animation attributes shared with builds
+/// and the `custom_*` block that belongs to the effect.
+///
+/// **A transition belongs to the slide it leaves.** Keynote plays a slide's
+/// transition on the way *out* of it; PowerPoint's belongs to the slide being
+/// entered, and Keynote's own importer shifts the whole deck by one to say so —
+/// which is how the direction values in [`direction_name`] were measured.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Transition {
     /// `AnimationAttributesArchive.effect` — `"none"`, or the identifier the
@@ -326,16 +670,34 @@ pub struct Transition {
     pub delay: f64,
     /// Advance without a click.
     pub automatic: bool,
+    /// Which way it travels; 0 is the effect's own default, and 0 is what the
+    /// app writes. [`direction_name`] names the values.
     pub direction: u64,
     /// `random_number_seed` — different on every slide, and copied verbatim by
     /// the app's own duplicate.
     pub seed: u64,
+    /// `color` (7) — the colour `com.apple.iWork.Keynote.BLTFadeThruColor`
+    /// fades through, and the only effect of the 44 that writes one.
+    pub color: Option<crate::drawable::Color>,
+    /// `writing_direction_is_rtl` (16), 0 everywhere here.
+    pub rtl: bool,
+    /// The per-effect parameters.
+    pub parameters: TransitionParameters,
+    /// Field numbers of `KN.TransitionAttributesArchive` the 15.3.1 schema does
+    /// not name — **the tripwire**. Empty over every deck and every bundled
+    /// theme; a non-empty one means this table has gone out of date.
+    pub unknown_parameters: Vec<u32>,
 }
 
 impl Transition {
     /// Does the slide have a transition at all? `"none"` is the empty one.
     pub fn is_none(&self) -> bool {
         self.effect.is_empty() || self.effect == "none"
+    }
+
+    /// Which way it travels, in words.
+    pub fn direction_name(&self) -> &'static str {
+        direction_name(self.direction)
     }
 }
 
@@ -349,8 +711,89 @@ impl Default for Transition {
             automatic: false,
             direction: 0,
             seed: 0,
+            color: None,
+            rtl: false,
+            parameters: TransitionParameters::default(),
+            unknown_parameters: Vec::new(),
         }
     }
+}
+
+/// One `KN.BuildArchive` (8) — one animation of one drawable.
+///
+/// **Unverified, and honestly so.** There is no build in any of the six decks
+/// of this corpus nor in any of the 182 bundled themes, Keynote's scripting
+/// dictionary has no build vocabulary at all, and a theme carries masters
+/// rather than animations — so nothing available can make one to be watched.
+/// Every field below is named from the 15.3.1 schema. What this type is for is
+/// that a deck from *outside* is reported rather than counted as nothing:
+/// `iwork slides` says how many builds a slide carries and what they say, and
+/// `tests/keynote.rs` fails the day a fixture grows one, which is the signal to
+/// come back and measure it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Build {
+    pub identifier: u64,
+    /// `drawable` (1) — what is animated.
+    pub drawable: Option<u64>,
+    /// `delivery` (2), a required string. Carried verbatim: nothing here knows
+    /// what its values look like.
+    pub delivery: String,
+    /// `attributes.eventTrigger` (4.4) — On Click / With Build / After Build.
+    pub event_trigger: Option<u64>,
+    /// `attributes.animationAttributes` (4.18) — the same
+    /// `KN.AnimationAttributesArchive` a transition carries, so the effect name,
+    /// duration, delay, direction and automatic flag read the same way.
+    pub animation: Transition,
+    /// `attributes.custom_textDelivery` (4.20) and `custom_deliveryOption`
+    /// (4.21) — by-word/by-bullet text builds and their order.
+    pub text_delivery: Option<u64>,
+    pub delivery_option: Option<u64>,
+    /// `attributes.action_motionPathSource` (4.22) — an action build's path.
+    pub has_motion_path: bool,
+    /// `attributes` field numbers the 15.3.1 schema does not name.
+    pub unknown_attributes: Vec<u32>,
+}
+
+/// One `KN.BuildChunkArchive` (153) — one stage of a build. Unverified for the
+/// same reason [`Build`] is.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BuildChunk {
+    pub identifier: u64,
+    pub build: Option<u64>,
+    pub delay: f64,
+    pub duration: f64,
+    pub automatic: bool,
+    pub referent: bool,
+}
+
+/// `KN.RecordingArchive` (16) — a recorded presentation.
+///
+/// **Read and passed through, never authored** (ground rule 8). Nothing in this
+/// corpus has one: Play ▸ Record Slideshow is menu-only and the dictionary has
+/// no term for it, so this is identify-and-report. `KN.ShowArchive.recording`
+/// (7) is where it hangs; its event tracks are `KN.RecordingEventTrackArchive`
+/// (17) and its movie track a `KN.RecordingMovieTrackArchive` (18).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Recording {
+    pub identifier: u64,
+    pub event_tracks: Vec<u64>,
+    pub movie_track: Option<u64>,
+    pub duration: f64,
+}
+
+/// One `KN.LiveVideoSource` (184) — a camera the theme knows about.
+///
+/// Every deck here carries exactly one, `"Default Camera"`, named as the
+/// collection's `default_source` and listed in no `sources`. Ground rule 8's
+/// other never-author case: a live-video feed is a device, not a document.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LiveVideoSource {
+    pub identifier: u64,
+    pub name: String,
+    pub is_default: bool,
+    /// Whether it is a member of the collection's `sources` (1) rather than
+    /// only its `default_source` (2).
+    pub listed: bool,
 }
 
 /// One slide of the deck.
@@ -392,10 +835,11 @@ pub struct Slide {
     /// `drawables_z_order` (42), back to front.
     pub z_order: Vec<u64>,
     pub transition: Transition,
-    /// How many `KN.BuildArchive` the slide lists (2).
-    pub builds: usize,
-    /// How many `KN.BuildChunkArchive` it lists (43).
-    pub build_chunks: usize,
+    /// The `KN.BuildArchive`s the slide lists (2). Empty in every document this
+    /// crate has ever been shown — see [`Build`].
+    pub builds: Vec<Build>,
+    /// The `KN.BuildChunkArchive`s it lists (43), in order.
+    pub build_chunks: Vec<BuildChunk>,
     pub style: Option<u64>,
     /// Every text storage on the slide, with its role.
     pub texts: Vec<SlideText>,
@@ -444,15 +888,28 @@ pub struct Layout {
     pub transition: Transition,
 }
 
-/// `KN.Soundtrack`, as far as an inventory goes.
+/// `KN.Soundtrack` (21) — the deck's own audio, the app's Document ▸ Audio.
+///
+/// One per deck, in `Index/Document.iwa`, in every deck this crate has seen —
+/// **and empty in all of them**: volume 1, mode "play once", no tracks, eleven
+/// bytes on the wire. Nothing can fill one in. There is no soundtrack term
+/// anywhere in Keynote's sdef; `audio clip` is an element of a *slide*, and
+/// `make new audio clip` is accepted and then does nothing at all — the app
+/// answers no error, the slide's `audio clips` still count zero, and the saved
+/// package holds no new `Data/` entry.
+///
+/// So the *shape* of a filled one is decoded and unexercised: `movie_media` (3)
+/// is a repeated `TSP.DataReference`, each a bare `{1: data identifier}` into
+/// the same registry `iwork media` lists, **in play order**.
 #[derive(Debug, Clone)]
 pub struct Soundtrack {
     pub identifier: u64,
     pub volume: f64,
     /// 0 play once, 1 loop, 2 do not play.
     pub mode: u64,
-    /// How many media entries it names.
-    pub tracks: usize,
+    /// The track list, in order: media identifiers into the document's
+    /// `TSP.DataInfo` table.
+    pub media: Vec<u64>,
 }
 
 impl Soundtrack {
@@ -463,6 +920,11 @@ impl Soundtrack {
             2 => "do not play",
             _ => "unknown",
         }
+    }
+
+    /// How many tracks it names.
+    pub fn tracks(&self) -> usize {
+        self.media.len()
     }
 }
 
@@ -484,19 +946,36 @@ pub struct Show {
     /// the per-slide flag instead. See [`Slide::number_visible`] and
     /// [`Show::numbers_shown_on`].
     pub slide_numbers_visible: bool,
+    /// `loop_presentation` (8) — the app's `auto loop`. **Measured**: false in
+    /// five decks and true in `keynote-playback`, which is the only thing about
+    /// it that differs from them.
     pub loop_presentation: bool,
-    /// 0 normal, 1 auto-play, 2 hyperlinks only.
+    /// `mode` (9): 0 normal, 1 auto-play (self-playing), 2 hyperlinks only.
+    /// Written explicitly, at 0, by every deck here. **Schema-only** — the
+    /// presentation type has no scripting term, so nothing can move it.
     pub mode: u64,
+    /// `autoplay_transition_delay` (10), default 5 s, and
+    /// `autoplay_build_delay` (11), default 2 s: the two waits a self-playing
+    /// show uses. Written explicitly at their defaults by every deck here and
+    /// **schema-only** for the same reason `mode` is.
     pub autoplay_transition_delay: f64,
     pub autoplay_build_delay: f64,
+    /// `idle_timer_active` (15) — the app's `auto restart`. **Measured.**
     pub idle_timer_active: bool,
+    /// `idle_timer_delay` (16) — **in seconds**, default 900. The dictionary's
+    /// `maximum idle duration` is in *minutes*: setting it to 137 wrote 8220.
     pub idle_timer_delay: f64,
+    /// `automatically_plays_upon_open` (18) — the app's `auto play`, despite
+    /// the name; the *self-playing* mode is field 9. **Measured.**
     pub plays_on_open: bool,
     pub stylesheet: Option<u64>,
     pub soundtrack: Option<Soundtrack>,
     /// A `KN.RecordingArchive`, when the deck carries a recorded presentation.
     /// Read and passed through; never authored.
-    pub recording: Option<u64>,
+    pub recording: Option<Recording>,
+    /// The theme's live-video sources — one `"Default Camera"` in every deck
+    /// here. Identify-and-report, like the recording.
+    pub live_video_sources: Vec<LiveVideoSource>,
     pub slides: Vec<Slide>,
     pub layouts: Vec<Layout>,
 }
@@ -523,6 +1002,19 @@ impl Show {
         self.slides
             .iter()
             .find(|s| s.identifier == identifier || s.node == identifier)
+    }
+
+    /// `maximum idle duration` as the app reports it — **minutes**, where
+    /// [`Show::idle_timer_delay`] is the seconds on the wire.
+    pub fn idle_minutes(&self) -> f64 {
+        self.idle_timer_delay / 60.0
+    }
+
+    /// How many builds the whole deck carries. Zero everywhere so far; a
+    /// non-zero one is the signal that [`Build`]'s schema-only decode finally
+    /// has something to be measured against.
+    pub fn build_count(&self) -> usize {
+        self.slides.iter().map(|s| s.builds.len()).sum()
     }
 
     /// The layout a slide is built on.
@@ -576,30 +1068,157 @@ fn references(message: &Message, number: u32) -> Vec<u64> {
         .collect()
 }
 
-/// The transition a slide or a layout carries.
+fn float32(message: &Message, number: u32) -> Option<f32> {
+    match message.get(number)? {
+        Value::Fixed32(bytes) => Some(f32::from_le_bytes(*bytes)),
+        Value::Fixed64(bytes) => Some(f64::from_le_bytes(*bytes) as f32),
+        _ => None,
+    }
+}
+
+/// The transition a slide or a layout carries, parameters and all.
 pub fn transition(slide: &Message) -> Transition {
-    let animation = slide
+    let attributes = slide
         .bytes(slide_field::TRANSITION)
         .and_then(decode_nested)
         .and_then(|t| {
             t.bytes(transition_field::ATTRIBUTES)
                 .and_then(decode_nested)
-        })
-        .and_then(|a| {
-            a.bytes(transition_field::ANIMATION_ATTRIBUTES)
-                .and_then(decode_nested)
         });
-    let Some(animation) = animation else {
+    let Some(attributes) = attributes else {
         return Transition::default();
     };
+    transition_attributes(&attributes)
+}
+
+/// Decode a `KN.TransitionAttributesArchive` — field 8 and the `custom_*` block
+/// beside it.
+///
+/// The same message sits at `KN.SlideStylePropertiesArchive.transition` (2),
+/// which is how a *theme* gives a layout a default transition, so this is the
+/// one place that knows the layout.
+pub fn transition_attributes(attributes: &Message) -> Transition {
+    // The animation attributes are what a transition *is*; the parameters
+    // beside them are read whether or not there are any, because a tripwire
+    // that only fires on well-formed input is not a tripwire.
+    let animation = attributes
+        .bytes(transition_field::ANIMATION_ATTRIBUTES)
+        .and_then(decode_nested)
+        .unwrap_or_default();
+    let mut unknown_parameters: Vec<u32> = attributes
+        .fields
+        .iter()
+        .map(|field| field.number)
+        .filter(|number| !transition_field::NAMED.contains(number))
+        .collect();
+    unknown_parameters.sort_unstable();
+    unknown_parameters.dedup();
+    let effect = text(&animation, transition_field::EFFECT);
     Transition {
-        effect: text(&animation, transition_field::EFFECT),
+        // An attributes message with no effect at all is the same "no
+        // transition" the app writes as `"none"`, and saying so keeps
+        // [`effect_name`] answering for every transition a deck can hold.
+        effect: if effect.is_empty() {
+            "none".into()
+        } else {
+            effect
+        },
         animation_type: text(&animation, transition_field::ANIMATION_TYPE),
         duration: double(&animation, transition_field::DURATION, 0.0),
         delay: double(&animation, transition_field::DELAY, 0.0),
         automatic: flag(&animation, transition_field::AUTOMATIC, false),
         direction: animation.varint(transition_field::DIRECTION).unwrap_or(0),
         seed: animation.varint(transition_field::SEED).unwrap_or(0),
+        color: animation
+            .bytes(transition_field::COLOR)
+            .and_then(decode_nested)
+            .as_ref()
+            .and_then(crate::drawable::Color::decode),
+        rtl: flag(&animation, transition_field::RTL, false),
+        parameters: TransitionParameters {
+            twist: float32(attributes, transition_field::CUSTOM_TWIST),
+            mosaic_size: attributes.varint(transition_field::CUSTOM_MOSAIC_SIZE),
+            mosaic_type: attributes.varint(transition_field::CUSTOM_MOSAIC_TYPE),
+            bounce: attributes
+                .varint(transition_field::CUSTOM_BOUNCE)
+                .map(|v| v != 0),
+            magic_move_fade_unmatched: attributes
+                .varint(transition_field::CUSTOM_MAGIC_MOVE_FADE_UNMATCHED)
+                .map(|v| v != 0),
+            timing_curve: attributes
+                .varint(transition_field::CUSTOM_TIMING_CURVE)
+                .map(TimingCurve::of),
+            text_delivery: attributes
+                .varint(transition_field::CUSTOM_TEXT_DELIVERY)
+                .map(TextDelivery::of),
+            motion_blur: attributes
+                .varint(transition_field::CUSTOM_MOTION_BLUR)
+                .map(|v| v != 0),
+            travel_distance: float32(attributes, transition_field::CUSTOM_TRAVEL_DISTANCE),
+            angle: float32(attributes, transition_field::CUSTOM_ANGLE),
+            blur_amount: float32(attributes, transition_field::CUSTOM_BLUR_AMOUNT),
+        },
+        unknown_parameters,
+    }
+}
+
+/// Every field number of `KN.BuildAttributesArchive` the 15.3.1 schema names.
+const BUILD_ATTRIBUTE_FIELDS: [u32; 34] = [
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+    27, 28, 29, 30, 33, 34, 35, 36,
+];
+
+/// One `KN.BuildArchive`. Schema-only — see [`Build`].
+fn build(identifier: u64, archive: &Message) -> Build {
+    let attributes = archive
+        .bytes(build_field::ATTRIBUTES)
+        .and_then(decode_nested)
+        .unwrap_or_default();
+    let mut unknown_attributes: Vec<u32> = attributes
+        .fields
+        .iter()
+        .map(|field| field.number)
+        .filter(|number| !BUILD_ATTRIBUTE_FIELDS.contains(number) && !(37..=41).contains(number))
+        .collect();
+    unknown_attributes.sort_unstable();
+    unknown_attributes.dedup();
+    let animation = attributes
+        .bytes(build_field::ANIMATION_ATTRIBUTES)
+        .and_then(decode_nested);
+    Build {
+        identifier,
+        drawable: reference(archive, build_field::DRAWABLE),
+        delivery: text(archive, build_field::DELIVERY),
+        event_trigger: attributes.varint(build_field::EVENT_TRIGGER),
+        // A build's animation attributes are a transition's, so they are read
+        // by the same code and the `custom_*` block simply stays empty.
+        animation: match animation {
+            Some(animation) => {
+                let mut wrapper = Message::default();
+                wrapper.set(
+                    transition_field::ANIMATION_ATTRIBUTES,
+                    Value::Bytes(animation.encode()),
+                );
+                transition_attributes(&wrapper)
+            }
+            None => Transition::default(),
+        },
+        text_delivery: attributes.varint(build_field::CUSTOM_TEXT_DELIVERY),
+        delivery_option: attributes.varint(build_field::CUSTOM_DELIVERY_OPTION),
+        has_motion_path: attributes.get(build_field::ACTION_MOTION_PATH).is_some(),
+        unknown_attributes,
+    }
+}
+
+/// One `KN.BuildChunkArchive`. Schema-only — see [`Build`].
+fn build_chunk(identifier: u64, archive: &Message) -> BuildChunk {
+    BuildChunk {
+        identifier,
+        build: reference(archive, build_field::CHUNK_BUILD),
+        delay: double(archive, build_field::CHUNK_DELAY, 0.0),
+        duration: double(archive, build_field::CHUNK_DURATION, 0.0),
+        automatic: flag(archive, build_field::CHUNK_AUTOMATIC, false),
+        referent: flag(archive, build_field::CHUNK_REFERENT, false),
     }
 }
 
@@ -859,8 +1478,14 @@ pub fn show(document: &crate::Document) -> Option<Show> {
             drawables,
             z_order: references(archive, slide_field::DRAWABLES_Z_ORDER),
             transition: transition(archive),
-            builds: archive.all(slide_field::BUILDS).count(),
-            build_chunks: archive.all(slide_field::BUILD_CHUNKS).count(),
+            builds: references(archive, slide_field::BUILDS)
+                .into_iter()
+                .filter_map(|id| archives.get(&id).map(|(_, m)| build(id, m)))
+                .collect(),
+            build_chunks: references(archive, slide_field::BUILD_CHUNKS)
+                .into_iter()
+                .filter_map(|id| archives.get(&id).map(|(_, m)| build_chunk(id, m)))
+                .collect(),
             style: reference(archive, slide_field::STYLE),
             texts,
         });
@@ -875,10 +1500,49 @@ pub fn show(document: &crate::Document) -> Option<Show> {
         .and_then(|id| archives.get(&id).map(|(_, m)| (id, m)))
         .map(|(identifier, m)| Soundtrack {
             identifier,
-            volume: double(m, 1, 0.0),
-            mode: m.varint(2).unwrap_or(0),
-            tracks: m.all(3).count(),
+            volume: double(m, soundtrack_field::VOLUME, 0.0),
+            mode: m.varint(soundtrack_field::MODE).unwrap_or(0),
+            media: references(m, soundtrack_field::MOVIE_MEDIA),
         });
+
+    let recording = reference(&show_archive, show_field::RECORDING)
+        .and_then(|id| archives.get(&id).map(|(_, m)| (id, m)))
+        .map(|(identifier, m)| Recording {
+            identifier,
+            event_tracks: references(m, recording_field::EVENT_TRACKS),
+            movie_track: reference(m, recording_field::MOVIE_TRACK),
+            duration: double(m, recording_field::DURATION, 0.0),
+        });
+
+    // The theme names one collection; the collection names its sources and,
+    // separately, its default — which in every deck here is the only one there
+    // is, listed nowhere else.
+    let mut live_video_sources = Vec::new();
+    if let Some(collection) = theme_archive
+        .as_ref()
+        .and_then(|t| reference(t, theme_field::LIVE_VIDEO_SOURCES))
+        .and_then(|id| archives.get(&id))
+        .map(|(_, m)| m)
+    {
+        let listed = references(collection, live_video_field::COLLECTION_SOURCES);
+        let mut wanted = listed.clone();
+        if let Some(default) = reference(collection, live_video_field::COLLECTION_DEFAULT) {
+            if !wanted.contains(&default) {
+                wanted.push(default);
+            }
+        }
+        for identifier in wanted {
+            let Some((_, source)) = archives.get(&identifier) else {
+                continue;
+            };
+            live_video_sources.push(LiveVideoSource {
+                identifier,
+                name: text(source, live_video_field::NAME),
+                is_default: flag(source, live_video_field::IS_DEFAULT, false),
+                listed: listed.contains(&identifier),
+            });
+        }
+    }
 
     Some(Show {
         identifier,
@@ -907,7 +1571,8 @@ pub fn show(document: &crate::Document) -> Option<Show> {
         plays_on_open: flag(&show_archive, show_field::PLAYS_ON_OPEN, false),
         stylesheet: reference(&show_archive, show_field::STYLESHEET),
         soundtrack,
-        recording: reference(&show_archive, show_field::RECORDING),
+        recording,
+        live_video_sources,
         slides,
         layouts,
     })
@@ -1455,5 +2120,166 @@ mod tests {
             ..Transition::default()
         };
         assert!(!t.is_none());
+    }
+
+    /// The effect table is the app's own pairing, and neither half of it
+    /// repeats — a duplicate identifier would make [`effect_name`] answer for
+    /// the wrong effect.
+    #[test]
+    fn the_effect_table_is_a_bijection() {
+        let names: BTreeSet<&str> = EFFECTS.iter().map(|(name, _)| *name).collect();
+        let wires: BTreeSet<&str> = EFFECTS.iter().map(|(_, wire)| *wire).collect();
+        assert_eq!(names.len(), EFFECTS.len(), "no name appears twice");
+        assert_eq!(wires.len(), EFFECTS.len(), "no identifier appears twice");
+        assert_eq!(effect_name("none"), Some("no transition effect"));
+        // The three the reader could not have guessed.
+        assert_eq!(effect_name("apple:revolve"), Some("flip"));
+        assert_eq!(effect_name("apple:ca-revolve"), Some("object revolve"));
+        assert_eq!(effect_name("apple:slide"), Some("move in"));
+        assert_eq!(effect_name("apple:not-a-real-effect"), None);
+    }
+
+    /// Only the parameters that are on the wire come back. Keynote writes the
+    /// ones the effect has and no others, so absent has to stay absent — an
+    /// effect without a bounce is not an effect whose bounce is off.
+    #[test]
+    fn a_parameter_that_is_not_written_is_not_read() {
+        let mut animation = Message::default();
+        animation.set(
+            transition_field::EFFECT,
+            Value::Bytes(b"apple:scale".into()),
+        );
+        let mut attributes = Message::default();
+        attributes.set(
+            transition_field::ANIMATION_ATTRIBUTES,
+            Value::Bytes(animation.encode()),
+        );
+        attributes.set(transition_field::CUSTOM_BOUNCE, Value::Varint(0));
+
+        let decoded = transition_attributes(&attributes);
+        assert_eq!(decoded.effect, "apple:scale");
+        assert_eq!(decoded.parameters.bounce, Some(false), "written false");
+        assert_eq!(decoded.parameters.twist, None, "not written at all");
+        assert!(!decoded.parameters.is_empty());
+        assert!(decoded.unknown_parameters.is_empty());
+    }
+
+    /// The tripwire fires on a field the 15.3.1 schema does not name — 14,
+    /// which is a hole in the message, and anything past 20.
+    #[test]
+    fn an_unnamed_parameter_field_is_reported() {
+        let mut attributes = Message::default();
+        attributes.set(
+            transition_field::ANIMATION_ATTRIBUTES,
+            Value::Bytes(Message::default().encode()),
+        );
+        attributes.set(14, Value::Varint(1));
+        attributes.set(31, Value::Varint(1));
+        assert_eq!(
+            transition_attributes(&attributes).unknown_parameters,
+            vec![14, 31]
+        );
+    }
+
+    /// The two enums of `KN.TransitionAttributesArchive`, and what a value the
+    /// schema does not list does.
+    #[test]
+    fn the_transition_enums_are_the_schemas() {
+        assert_eq!(TimingCurve::of(1), TimingCurve::Linear);
+        assert_eq!(TimingCurve::of(4), TimingCurve::EaseInEaseOut);
+        assert_eq!(TimingCurve::of(5), TimingCurve::Custom);
+        assert_eq!(TimingCurve::of(9), TimingCurve::Unknown(9));
+        assert_eq!(TimingCurve::of(9).as_str(), "unknown");
+        assert_eq!(TextDelivery::of(1), TextDelivery::ByObject);
+        assert_eq!(TextDelivery::of(2), TextDelivery::ByWord);
+        assert_eq!(TextDelivery::of(3), TextDelivery::ByCharacter);
+        assert_eq!(TextDelivery::of(4), TextDelivery::ByLine);
+        assert_eq!(TextDelivery::of(0), TextDelivery::Unknown(0));
+    }
+
+    /// Direction 0 is what the app writes and it means "the effect's default";
+    /// the named values are the two families the PowerPoint importer produced.
+    #[test]
+    fn directions_are_two_families_of_four() {
+        assert_eq!(direction_name(0), "the effect's own default");
+        assert_eq!(direction_name(11), "left to right");
+        assert_eq!(direction_name(14), "bottom to top");
+        assert_eq!(direction_name(21), "top left to bottom right");
+        assert_eq!(direction_name(24), "bottom right to top left");
+        assert_eq!(direction_name(1), "unknown", "1 is not 11");
+        assert_eq!(direction_name(15), "unknown");
+    }
+
+    /// A soundtrack's `movie_media` is an ordered list of data identifiers, and
+    /// order is the play order — so it is read as a list, not as a set.
+    #[test]
+    fn a_soundtrack_track_list_keeps_its_order() {
+        let mut archive = Message::default();
+        archive.set(
+            soundtrack_field::VOLUME,
+            Value::Fixed64(0.5f64.to_le_bytes()),
+        );
+        archive.set(soundtrack_field::MODE, Value::Varint(1));
+        for id in [30u64, 10, 20] {
+            archive.append_in_order(soundtrack_field::MOVIE_MEDIA, reference_bytes(id));
+        }
+        let track = Soundtrack {
+            identifier: 1,
+            volume: double(&archive, soundtrack_field::VOLUME, 0.0),
+            mode: archive.varint(soundtrack_field::MODE).unwrap_or(0),
+            media: references(&archive, soundtrack_field::MOVIE_MEDIA),
+        };
+        assert_eq!(track.media, vec![30, 10, 20]);
+        assert_eq!(track.tracks(), 3);
+        assert_eq!(track.mode_name(), "loop");
+        assert_eq!(track.volume, 0.5);
+    }
+
+    /// A build is decoded from the schema and has never been seen; what this
+    /// asserts is that the decode does not invent one. An empty archive is a
+    /// build with no drawable, no delivery and no effect — not a panic, and not
+    /// a build that claims to know something.
+    #[test]
+    fn a_build_decodes_without_claiming_anything() {
+        let empty = build(7, &Message::default());
+        assert_eq!(empty.identifier, 7);
+        assert_eq!(empty.drawable, None);
+        assert!(empty.delivery.is_empty());
+        assert_eq!(empty.event_trigger, None);
+        assert!(empty.animation.is_none());
+        assert_eq!(empty.animation.effect, "none");
+        assert!(!empty.has_motion_path);
+        assert!(empty.unknown_attributes.is_empty());
+
+        // A build's animation attributes are a transition's, read by the same
+        // code — so an effect on a build reads out the same way.
+        let mut animation = Message::default();
+        animation.set(
+            transition_field::EFFECT,
+            Value::Bytes(b"apple:move-in".into()),
+        );
+        animation.set(
+            transition_field::DURATION,
+            Value::Fixed64(2.0f64.to_le_bytes()),
+        );
+        let mut attributes = Message::default();
+        attributes.set(
+            build_field::ANIMATION_ATTRIBUTES,
+            Value::Bytes(animation.encode()),
+        );
+        attributes.set(build_field::EVENT_TRIGGER, Value::Varint(2));
+        attributes.set(99, Value::Varint(1));
+        let mut archive = Message::default();
+        archive.set(build_field::DELIVERY, Value::Bytes(b"byParagraph".into()));
+        archive.set(build_field::DRAWABLE, reference_bytes(42));
+        archive.set(build_field::ATTRIBUTES, Value::Bytes(attributes.encode()));
+
+        let decoded = build(8, &archive);
+        assert_eq!(decoded.drawable, Some(42));
+        assert_eq!(decoded.delivery, "byParagraph");
+        assert_eq!(decoded.event_trigger, Some(2));
+        assert_eq!(decoded.animation.effect, "apple:move-in");
+        assert_eq!(decoded.animation.duration, 2.0);
+        assert_eq!(decoded.unknown_attributes, vec![99]);
     }
 }
