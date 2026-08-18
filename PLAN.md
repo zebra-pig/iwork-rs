@@ -657,6 +657,20 @@ fixture, and what the app accepted.
   directory taken before the app is warmed, carrying the holder's pid so an
   abandoned lock is stolen rather than waited out. Every entry point takes it.
 
+  Pulling that thread found **two more harness faults, both of the kind the
+  README warns about — a check that says yes when it should say no.**
+  `table-oracle.sh` read `$?` after `if ! osa_run …`, which is the status of the
+  *negation*: every failure exited 0 with an empty answer, so a Numbers that had
+  timed out on the 2411-cell fixture looked like a decoder disagreeing about a
+  document it reads correctly. And the oracle script opened a document and then
+  read `document 1` — only the right document when nothing else is open, which
+  is not true of an app that restores its last session; the failure mode is a
+  complete, plausible reading of *another file*, and it was seen as an edited
+  fixture reporting its pre-edit values. It now waits for the document by name,
+  matching two, because Numbers answers `numbers-values` for a document it wrote
+  itself (the Finder's hide-extension flag) and `iwork-set-cell.numbers` for one
+  this crate wrote.
+
   **The `type == 0` precondition, resolved by measuring rather than
   implementing.** The published references disagree about the merge rules
   because nothing 15.3.1 writes exercises them. Over all twelve fixtures:
