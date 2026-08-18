@@ -46,6 +46,7 @@
 
 pub mod document;
 pub mod drawable;
+pub mod formula;
 pub mod iwa;
 pub mod media;
 pub mod package;
@@ -58,6 +59,7 @@ pub mod text;
 
 pub use document::{Component, DataFile, Document, Kind, TextEdit, TextStorage};
 pub use drawable::{Drawable, Geometry, Placement};
+pub use formula::{Ast, Formula, Node, Reference};
 pub use media::MediaReplacement;
 pub use package::Package;
 pub use style::{CreatedStyle, Label, StyleDeletion, StyleKind, StyleUse, TextStyle};
