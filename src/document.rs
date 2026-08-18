@@ -2580,6 +2580,45 @@ impl Document {
         self.show().map(|s| s.layouts).unwrap_or_default()
     }
 
+    /// Skip a slide, or stop skipping it. Returns whether the flag changed.
+    ///
+    /// The slide may be named by its `KN.SlideArchive` or by its
+    /// `KN.SlideNodeArchive`; both are printed by `iwork slides`.
+    pub fn set_slide_skipped(&mut self, slide: u64, skipped: bool) -> Result<bool, Error> {
+        crate::keynote::set_slide_skipped(self, slide, skipped)
+    }
+
+    /// Move a slide to another position in the deck, counting from 0. Returns
+    /// where it landed.
+    pub fn move_slide(&mut self, slide: u64, to: usize) -> Result<usize, Error> {
+        crate::keynote::move_slide(self, slide, to)
+    }
+
+    /// Copy a slide, and put the copy straight after it.
+    ///
+    /// See [`crate::keynote::duplicate_slide`] for what a copy has to touch and
+    /// how that was measured.
+    pub fn duplicate_slide(&mut self, slide: u64) -> Result<crate::keynote::SlideCopy, Error> {
+        crate::keynote::duplicate_slide(self, slide)
+    }
+
+    /// Replace a slide's presenter notes.
+    ///
+    /// Notes are an ordinary `TSWP.StorageArchive` of kind 4, so this is
+    /// [`Document::set_text`] on the storage `iwork slides` prints — named here
+    /// because "which storage" is the only hard part.
+    pub fn set_presenter_notes(&mut self, slide: u64, text: &str) -> Result<TextEdit, Error> {
+        let show = self
+            .show()
+            .ok_or_else(|| Error::Format("not a Keynote document".into()))?;
+        let found = show
+            .slide(slide)
+            .ok_or(Error::NoSuchObject(slide))?
+            .note_storage
+            .ok_or_else(|| Error::Format(format!("slide {slide} has no presenter notes")))?;
+        self.set_text(found, text)
+    }
+
     /// Comments, their authors, and tracked changes.
     ///
     /// Present in every document — the author storage always is — and empty in
@@ -3532,6 +3571,90 @@ impl Document {
             .map_err(|e| Error::Format(format!("{name}: storage {identifier}: {e}")))
     }
 
+    /// [`Document::set_archive`], for the modules that model one app.
+    pub(crate) fn set_archive_of(
+        &mut self,
+        identifier: u64,
+        archive: &Message,
+    ) -> Result<(), Error> {
+        self.set_archive(identifier, archive)
+    }
+
+    /// Every object of one stream, cloned — the raw material of a component
+    /// copy.
+    pub(crate) fn stream_objects(&self, name: &str) -> Vec<ArchiveObject> {
+        self.streams.get(name).cloned().unwrap_or_default()
+    }
+
+    /// Add a stream the package does not have yet.
+    ///
+    /// [`Document::save`] writes any stream whose framed bytes differ from the
+    /// package's, and a stream the package has never held differs from nothing
+    /// — so a new entry appears with no further ceremony. Adding one twice is
+    /// refused rather than silently replacing a component.
+    pub(crate) fn add_stream(
+        &mut self,
+        name: &str,
+        objects: Vec<ArchiveObject>,
+    ) -> Result<(), Error> {
+        if self.streams.contains_key(name) {
+            return Err(Error::Format(format!("{name} is already in the package")));
+        }
+        self.streams.insert(name.to_string(), objects);
+        Ok(())
+    }
+
+    /// Add an object to the stream that holds `neighbour`, straight after it.
+    ///
+    /// The framing — version numbers, the message-type header — is the
+    /// neighbour's, which is the copy-don't-synthesise rule applied to the one
+    /// part of an object this crate would otherwise have to invent.
+    pub(crate) fn add_object_after(
+        &mut self,
+        neighbour: u64,
+        identifier: u64,
+        message_type: u32,
+        archive: &Message,
+    ) -> Result<(), Error> {
+        if self.object(identifier).is_some() {
+            return Err(Error::Format(format!(
+                "object {identifier} is already in the document"
+            )));
+        }
+        let (stream, index) = self
+            .locate(neighbour)
+            .ok_or(Error::NoSuchObject(neighbour))?;
+        let mut object = self.streams[&stream][index].clone();
+        object.identifier = identifier;
+        object.messages.truncate(1);
+        let message = object
+            .messages
+            .first_mut()
+            .ok_or_else(|| Error::Format(format!("object {neighbour} carries no message")))?;
+        message.message_type = message_type;
+        message.payload = archive.encode();
+        self.streams
+            .get_mut(&stream)
+            .expect("stream came from the document")
+            .insert(index + 1, object);
+        Ok(())
+    }
+
+    /// Edit `TSP.PackageMetadata` at the wire level.
+    pub(crate) fn update_package_metadata(
+        &mut self,
+        edit: impl FnOnce(&mut Message),
+    ) -> Result<(), Error> {
+        let identifier = self
+            .objects()
+            .find(|(_, object)| object.message_type() == crate::TYPE_PACKAGE_METADATA)
+            .map(|(_, object)| object.identifier)
+            .ok_or_else(|| Error::Format("no TSP.PackageMetadata".into()))?;
+        let mut metadata = self.archive_of(identifier)?;
+        edit(&mut metadata);
+        self.set_archive(identifier, &metadata)
+    }
+
     fn set_archive(&mut self, identifier: u64, archive: &Message) -> Result<(), Error> {
         let (stream, index) = self
             .locate(identifier)
@@ -3550,7 +3673,7 @@ impl Document {
 
     /// Raise `TSP.PackageMetadata` field 1 so iWork does not reissue an
     /// identifier this crate has already handed out.
-    fn set_last_object_identifier(&mut self, value: u64) -> Result<(), Error> {
+    pub(crate) fn set_last_object_identifier(&mut self, value: u64) -> Result<(), Error> {
         let metadata = self
             .objects()
             .find(|(_, object)| object.message_type() == crate::TYPE_PACKAGE_METADATA)

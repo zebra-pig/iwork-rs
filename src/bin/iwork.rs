@@ -126,9 +126,20 @@ Keynote decks
                                            how many builds it carries
   iwork layouts   <file>                   the theme's slide layouts, in the
                                            order the app lists them
+  iwork set-notes <file> <slide> <text> <out>
+                                           replace a slide's presenter notes
+  iwork skip-slide   <file> <slide> <out>  leave a slide out of the show
+  iwork unskip-slide <file> <slide> <out>  put it back
+  iwork move-slide <file> <slide> <to> <out>
+                                           move a slide to position <to>, from 0
+  iwork duplicate-slide <file> <slide> <out>
+                                           copy a slide, straight after it
 
-Both are Keynote-only; a Pages or Numbers document has no `KN.ShowArchive`
-and they say so. A skipped slide has no number: the app answers -1 for it and
+All Keynote-only; a Pages or Numbers document has no `KN.ShowArchive` and they
+say so. A <slide> is the object id `iwork slides` prints, either the slide's or
+its node's. Title and body text are ordinary storages — `iwork slides` prints
+their ids and `iwork set-text` writes them, with the same remapping as any
+other text. A skipped slide has no number: the app answers -1 for it and
 numbers the rest around it.
 
 text styles
@@ -230,6 +241,21 @@ fn main() -> ExitCode {
         ["structure", file] => structure(file),
         ["slides", file] => slides(file),
         ["layouts", file] => layouts(file),
+        ["set-notes", file, slide, new_text, out] => {
+            identifier(slide).and_then(|slide| set_notes(file, slide, new_text, out))
+        }
+        ["skip-slide", file, slide, out] => {
+            identifier(slide).and_then(|slide| skip_slide(file, slide, true, out))
+        }
+        ["unskip-slide", file, slide, out] => {
+            identifier(slide).and_then(|slide| skip_slide(file, slide, false, out))
+        }
+        ["move-slide", file, slide, to, out] => identifier(slide)
+            .and_then(|slide| index(to).map(|to| (slide, to)))
+            .and_then(|(slide, to)| move_slide(file, slide, to, out)),
+        ["duplicate-slide", file, slide, out] => {
+            identifier(slide).and_then(|slide| duplicate_slide(file, slide, out))
+        }
         ["properties"] => properties(),
         ["set-color", file, id, r, g, b, out] => set_color(file, id, r, g, b, out),
         ["paragraphs", file, storage] => {
@@ -1008,6 +1034,48 @@ fn layouts(path: &str) -> Result<(), Error> {
         );
     }
     Ok(())
+}
+
+fn set_notes(path: &str, slide: u64, new_text: &str, out: &str) -> Result<(), Error> {
+    let mut doc = Document::open(path)?;
+    let edit = doc.set_presenter_notes(slide, new_text)?;
+    report_edit(edit);
+    save(&doc, out)
+}
+
+fn skip_slide(path: &str, slide: u64, skipped: bool, out: &str) -> Result<(), Error> {
+    let mut doc = Document::open(path)?;
+    let changed = doc.set_slide_skipped(slide, skipped)?;
+    println!(
+        "slide {slide} is {}{}",
+        if skipped { "skipped" } else { "in the show" },
+        if changed { "" } else { " (it already was)" }
+    );
+    save(&doc, out)
+}
+
+fn move_slide(path: &str, slide: u64, to: usize, out: &str) -> Result<(), Error> {
+    let mut doc = Document::open(path)?;
+    let landed = doc.move_slide(slide, to)?;
+    println!("slide {slide} is now at position {landed}");
+    save(&doc, out)
+}
+
+fn duplicate_slide(path: &str, slide: u64, out: &str) -> Result<(), Error> {
+    let mut doc = Document::open(path)?;
+    let copy = doc.duplicate_slide(slide)?;
+    println!(
+        "copied slide {} to {} (node {}) at position {}",
+        copy.source, copy.identifier, copy.node, copy.index
+    );
+    println!("  {} object(s) into {}", copy.objects, copy.stream);
+    if copy.media > 0 {
+        println!("  {} media file(s) shared with the original", copy.media);
+    }
+    if copy.declarations > 0 {
+        println!("  {} external reference(s) declared", copy.declarations);
+    }
+    save(&doc, out)
 }
 
 fn structure(path: &str) -> Result<(), Error> {

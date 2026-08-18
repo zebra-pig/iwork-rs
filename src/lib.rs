@@ -67,7 +67,7 @@ pub use chart::{Chart, DataReferences, Grid, GridValue, Series};
 pub use document::{Component, DataFile, Document, Kind, TextEdit, TextStorage};
 pub use drawable::{Drawable, Geometry, Placement};
 pub use formula::{Ast, Formula, Node, Reference};
-pub use keynote::{Layout, Placeholder, Show, Slide, Transition};
+pub use keynote::{Layout, Placeholder, Show, Slide, SlideCopy, Transition};
 pub use media::MediaReplacement;
 pub use package::Package;
 pub use style::{CreatedStyle, Label, StyleDeletion, StyleKind, StyleUse, TextStyle};
