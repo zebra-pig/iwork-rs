@@ -389,13 +389,18 @@ confidently. Read-first, then the safest writes.
 
 ## Phase 8a — Keynote: inventory and text (app-verified)
 
-- [ ] Presenter-notes and slide-text extraction; slide/master/build/
+- [x] Presenter-notes and slide-text extraction; slide/master/build/
       transition *inventory* (names and counts — parameters are 8b's job)
-      surfaced in API + CLI.
-- [ ] Write: edit slide text (title/body/notes) app-verified; duplicate a
+      surfaced in API + CLI. *(`Document::show|slides|slide_layouts`,
+      `iwork slides|layouts`. The build inventory is honestly empty: there is
+      no `KN.BuildArchive` in any of the four decks or in any of the 182
+      bundled themes, and nothing can make one — see the log.)*
+- [x] Write: edit slide text (title/body/notes) app-verified; duplicate a
       slide by copying; skip/unskip a slide; reorder slides.
-- [ ] FORMAT.md §Keynote extended with what the probes prove; registry
+- [x] FORMAT.md §Keynote extended with what the probes prove; registry
       evidence upgraded from Inferred to Confirmed where the app accepts it.
+      *(§13 is now a full section; fourteen `KN` entries added or corrected,
+      type 9 among them.)*
 
 ## Phase 8b — Keynote: builds, transitions, playback (read)
 
@@ -2083,6 +2088,156 @@ fixture, and what the app accepted.
     `hasUnmaterializedRemoteData`, both false everywhere. They are exactly the
     flags a hardening phase would want to set or check, and nothing here has
     seen a true one.
+
+- 2026-08-18 — **Phase 8a complete (Keynote: inventory and text, app-verified).**
+  New module `src/keynote.rs`, `Document::show | slides | slide_layouts |
+  set_slide_skipped | move_slide | duplicate_slide | set_presenter_notes`,
+  `iwork slides | layouts | set-notes | skip-slide | unskip-slide | move-slide |
+  duplicate-slide`, six new `iwork check` invariants, FORMAT.md §13 and writing
+  rules 22–23, fourteen `KN` registry entries, a new oracle
+  (`scripts/slide-oracle.sh`), a new fixture (`keynote-slides.key`) and
+  `tests/keynote.rs` — 24 tests, eleven of which the app answers.
+  `cargo fmt --check` and `cargo clippy --all-targets -D warnings` clean;
+  `cargo test --all-targets` green: 145 unit + 16 cell + 18 chart + 18 drawable
+  + 24 fixture + 14 formula + **24 keynote** + 18 pages + 34 style + 22 table +
+  14 text + 4 doc. `IWORK_APP_CHECK=1 cargo test --all-targets` green over all
+  24 fixtures.
+
+  **The oracle agreed about everything it was asked.** `slide-oracle.sh` reads
+  the show line, every layout by name and every slide's number, base layout,
+  skipped flag, title showing, body showing, title, body, presenter notes and
+  transition. Over `keynote-deck` and `keynote-slides`: slide counts 6 and 8,
+  layout counts 17 and 17, sizes 1920 × 1080, **34 layout names in the app's
+  order**, and **14 slides × nine fields** — no disagreements anywhere, before
+  or after the writes.
+
+  What the show graph turned out to be, and where the old §Keynote was wrong:
+
+  - **The slide tree is inline and positional.** `KN.ShowArchive.slideTree` (3)
+    is a `KN.SlideTreeArchive` written into the show, not a reference, and its
+    repeated field 2 *is* the deck order. Keynote's own `move slide 1 to after
+    slide 3` rewrites that repeated field and **nothing else** — every node and
+    every slide component came back byte for byte.
+  - **Type 9 was not a slide-template archive.** It is `KN.SlideStyleArchive`,
+    it lives in the document stylesheet, and there is one per *layout* because
+    every slide on a layout shares it — which is why counting one per
+    `Index/TemplateSlide-*.iwa` looked right.
+  - **`KN.SlideArchive` field 7 is `owned_drawables` and field 42 is
+    `drawables_z_order`.** Phase 3 recorded field 7 as the z-order; it is
+    ownership, and the two hold the same members in every deck here, so nothing
+    in this corpus tells them apart by content. The placeholder fields do: field
+    5 can name a title that is in neither.
+  - **"Title showing" is ownership.** Keynote reports `title showing` false for
+    a slide whose field 5 still names a placeholder holding text; what it means
+    is membership of field 7. Twelve out of twelve on `keynote-deck`, the
+    "Statement" slide included, whose title reads "Eine Behauptung" and is not
+    drawn.
+  - **A skipped slide has no number.** The app answers `slide number` with -1
+    and numbers the rest around it, so the number is arithmetic over the deck.
+    `Slide::number` is an `Option` for that reason.
+  - **"Slide numbers showing" is a flag on every node**, not on the show:
+    `isSlideNumberVisible` (18) is 1 on all eight nodes of the deck whose
+    numbers are on, and `KN.ShowArchive.slideNumbersVisible` (6) is **absent**
+    in both the deck with numbers and the deck without.
+  - **A slide is a component**, whose identifier is its `KN.SlideArchive`'s own,
+    with its node in `Index/Document.iwa` beside the show. Nothing else in the
+    format splits one user-visible thing across two components.
+  - Presenter notes are `KN.NoteArchive` (15) → a storage of **kind 4**, and the
+    kind-4 storages of a deck are exactly its notes — asserted as set equality
+    over all four decks.
+  - Transitions decode to the identifier the app's own dictionary lists:
+    `apple:dissolve`, `apple:push`, `apple:magic-move-implied-motion-path`,
+    `apple:wipe`, `com.apple.iWork.Keynote.KLNConfetti`, with duration, delay
+    and `is_automatic` matching the app exactly.
+
+  **The duplicate is the crown and it landed.** Keynote's own `duplicate slide`
+  was measured first — save, duplicate, save, diff — and the recipe reproduced:
+  a new `Index/Slide-<id>.iwa` with the source stream's objects one for one
+  (19 for a text slide, 22 for an image slide), every reference *inside* the
+  stream remapped and every reference *out* of it left alone; a new
+  `KN.SlideNodeArchive` identical to the source's but for the slide it names and
+  `thumbnailsAreDirty`; a new `TSP.ComponentInfo` with the same external and
+  data references, the data references' *using object* remapped, and fresh
+  object UUIDs; one more entry in the slide tree; and no `Data/` bytes copied.
+
+  Verified: Keynote opens the deck, reports 7 slides where there were 6, reads
+  the copy's layout, title, body and presenter notes back, then reads the
+  *edited* copy's own title and notes back while the original keeps its own;
+  `iwork check` clean; `resave.sh` survives, so what is on disk afterwards was
+  written by Keynote from its own model and still holds the copy under the
+  identifier this crate gave it. Three streams are rewritten and no more:
+  `Index/Document.iwa`, `Index/Metadata.iwa` and the new one.
+
+  **The thing that made the first attempt fail is worth the whole entry.** A
+  copy with the stream, the node, the tree entry and the component entry all
+  correct still did not work: Keynote opened the deck, counted seven slides, and
+  answered `missing value` for the seventh's base layout, title and body. The
+  missing piece was in `Index/Document.iwa`'s *component*, which declares
+  `{component_identifier: <slide>}` for every slide component its nodes point at
+  — 475 declarations in a six-slide deck. `undeclared_references` had excused
+  root references on the grounds that a component's identifier is its root
+  object's identifier; that was wrong. The rule now covers them, with `Document`
+  and `DocumentMetadata` (objects 1 and 71) the only exemptions, and reports
+  **zero** undeclared references over all 23 documents of the corpus — so it
+  costs nothing on files the apps wrote and catches the one this crate can now
+  create.
+
+  What resisted, honestly:
+
+  - **There is no build anywhere.** `KN.SlideArchive.builds` (2) and
+    `buildChunks` (43) are empty in all four decks *and* in all 182 bundled
+    `.kth` themes, which were scanned for types 8 and 153. Keynote's dictionary
+    has no build vocabulary at all, and template mining does not help because a
+    theme carries masters, not animations. The build count is honestly zero and
+    `KN.BuildArchive` stays Inferred.
+  - **The theme's display name is not in the document.** The stored name is
+    `21_BasicWhite`; the app says `Basic White`. Nothing in the package holds
+    the second.
+  - **No slide is created from nothing and none is deleted.** A new slide is a
+    new component, and ground rule 3 says copy; a deletion has to unwind the
+    tree entry, the node, the component, its metadata entry, its media refcounts
+    and its declarations together, and no probe has watched Keynote do it.
+  - **A copy's thumbnail is the original's**, marked dirty — which is exactly
+    what the app's own duplicate leaves behind, so it is a limitation shared
+    with Keynote rather than a defect.
+
+  Two more app traps for the harness's collection: `automatic` is the
+  cell-format constant `NMCTfaut`, so `set automatic to "-"` compiles and fails
+  at run time with -10003 (the `plain` trap again); and a text item cannot be
+  *made* with its text — `make new text item … with properties {object
+  text:"…"}` answers -10000 — and has to be made inside a `tell slide` block.
+
+  What Phase 8b (builds, transitions, playback) should know:
+
+  - **The transition chain is decoded and named**: `KN.SlideArchive.transition`
+    (4) → `KN.TransitionArchive.attributes` (2) →
+    `KN.TransitionAttributesArchive.animationAttributes` (8) →
+    `KN.AnimationAttributesArchive`, whose fields 1–6, 11 and 16 are read.
+    Everything 8b wants beyond the inventory is the *sibling* fields of
+    `KN.TransitionAttributesArchive` — 9–20, the `custom_*` block: twist, mosaic
+    size and type, bounce, magic-move fade-unmatched, timing curve, text
+    delivery, motion blur, travel distance, angle, blur amount. All named from
+    the 15.3.1 schema, none exercised. `transition properties` is settable from
+    a script, and `keynote-slides.applescript` shows how, so 8b can make a
+    fixture per effect and read the `custom_*` fields the app fills in — but the
+    dictionary exposes only effect, duration, delay and automatic, so the rest
+    have to be diffed between two decks rather than read back.
+  - **The 42 effect identifiers are already known**, from the app's `transition
+    effects` enumeration: the sdef gives the cocoa string for each, and those
+    strings are exactly what lands in `effect`. That table is the mapping 8b
+    needs and it does not need a probe.
+  - **Builds need a deck from outside this corpus.** Nothing here can make one.
+    If one turns up, `Slide::builds` and `Slide::build_chunks` already count
+    them and `KN.BuildArchive`/`KN.BuildChunkArchive` field maps are in
+    `reference/protos-15.3/keynote/KNArchives.proto`.
+  - **Playback settings are read already** and are all at their defaults:
+    `KN.ShowArchive` loop (8), mode (9), autoplay delays (10, 11), idle timer
+    (15, 16), plays-on-open (18), and `KN.Soundtrack` (21) with volume 1, mode
+    "play once" and no media — one per deck, every deck. The dictionary has
+    `auto loop`, `auto play`, `auto restart` and `maximum idle duration`, so
+    these *can* be exercised.
+  - **A recorded presentation would hang off `KN.ShowArchive.recording` (7)**,
+    and there is none; ground rule 8 says read and pass through, never author.
 
 ## Execution notes
 

@@ -505,7 +505,7 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | "Title showing" is ownership — membership of `owned_drawables` | — | — | ✅ |
 | Transitions read by the identifier the app's dictionary lists (5 of them) | — | — | ✅ |
 | Builds: zero in four decks and in all 182 bundled themes, and nothing can make one | — | — | ✅ |
-| **The app agrees about every slide** — 47 records, both decks | — | — | ✅ |
+| **The app agrees about every slide** — 34 layout names and 14 slides, nine fields each | — | — | ✅ |
 | Skip and unskip a slide; unskipping restores the bytes exactly | — | — | ✅ |
 | Reorder slides: a permutation of the slide tree, nothing else touched | — | — | ✅ |
 | Write presenter notes through the Phase 4 remapper | — | — | ✅ |
