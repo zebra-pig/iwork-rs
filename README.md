@@ -35,6 +35,28 @@ doc.apply_text_style(6083, 0..8, kicker.identifier)?;                   // UTF-1
 doc.save("Report-edited.pages")?;
 ```
 
+A new document is made the way the apps make one — out of a template:
+
+```rust
+// A template bundle is a document package; what a new document needs is an
+// identity of its own, and a document from a template gets a *whole* new one,
+// lineage included. Two calls give two documents.
+let doc = iwork::Document::from_template(
+    "/Applications/Pages.app/Contents/SharedSupport/Templates/08_Journal_Newsletter/ISO.template",
+)?;
+doc.save("Newsletter.pages")?;
+```
+
+Either shape of package is read and written, and a document keeps the shape it
+was in — `File > Advanced > Change File Type` writes a directory instead of a
+ZIP, and `Package::write_as` converts on request:
+
+```rust
+let package = iwork::Package::read("Huge.numbers")?;         // file or directory
+println!("{}", package.form.as_str());                        // "single file"
+package.write_as("Huge-as-a-package.numbers", iwork::Form::Directory)?;
+```
+
 Tables are read the same way, and are cross-app — a Numbers sheet, a Pages page
 and a Keynote slide all hold the same `TST` archives:
 
@@ -74,7 +96,8 @@ for chart in doc.charts() {
 ```
 cargo install --path .
 
-iwork inspect   Report.pages              # package, components, media, object census
+iwork inspect   Report.pages              # package form, previews, components,
+                                          # media, object census
 iwork text      Report.pages              # every text storage, with its object id
 iwork storages  Report.pages              # …and every attribute table each one carries
 iwork links     Report.pages              # hyperlinks and smart fields, with their text
@@ -133,6 +156,9 @@ iwork metadata  Report.pages              # the two plists, the identity, the bu
 iwork annotations Report.pages            # authors, comments and their anchors,
                                           # tracked changes — none of which exists
 iwork duplicate Report.pages copy.pages   # a copy with a *new* document identity
+iwork new "/Applications/Pages.app/Contents/SharedSupport/Templates/08_Journal_Newsletter/ISO.template" \
+          Newsletter.pages                # a document from a template bundle
+iwork strip-previews Report.pages out.pages   # drop the stale thumbnails
 
 iwork styles       Report.pages           # every text style, with its object id
 iwork style        Report.pages 3712      # one style, field by field, and what uses it
@@ -151,7 +177,7 @@ The format is four layers deep, and this crate gives you each of them:
 
 | Layer | What it is | Module |
 |---|---|---|
-| 1 | ZIP package, every entry *stored* | [`package`](src/package.rs) |
+| 1 | package — a ZIP with every entry *stored*, or a directory of the same entries | [`package`](src/package.rs) |
 | 2 | `Index/*.iwa` — raw Snappy blocks, 64 KiB each | [`iwa`](src/iwa.rs) |
 | 3 | flat stream of length-delimited protobuf objects | [`iwa`](src/iwa.rs), [`pb`](src/pb.rs) |
 | 4 | an object graph whose shape depends on the app | [`document`](src/document.rs), [`pages`](src/pages.rs) |
@@ -459,7 +485,7 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | Object styles: fill, stroke, opacity, shadow, reflection, inheritance | ✅ | ✅ | ✅ |
 | Media registry: digest is the SHA-1 of the bytes, every stored file | ✅ | — | ✅ |
 | Non-destructive edit state detected: crop, shaped mask, Instant Alpha, adjustments, derived renderings | ✅ | — | ✅ |
-| Movies, live video, galleries, 3D, drawings, pencil: read and named | — | — | ✅ |
+| Movies and live video: read and named (galleries, 3D and pencil are registry names only) | — | — | ✅ |
 | Every geometry re-encodes to the bytes it came from | ✅ | ✅ | ✅ |
 | **Every rectangle agrees with the app** | ✅ | — | ✅ |
 | Move and resize a drawable; only the touched stream is rewritten | ✅ | — | ✅ |
@@ -498,7 +524,7 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | No comment, no reply, no tracked change and no author exists to decode, anywhere | ✅ | ✅ | ✅ |
 | Change tracking is off and its ten fields are at their defaults, everywhere | ✅ | — | — |
 | An edit through a tracked change is refused by name | ✅ | ✅ | ✅ |
-| Alt text (`accessibility_description`) read, in nine fixtures | ✅ | — | ✅ |
+| Alt text (`accessibility_description`) read — 59 of them, in twelve fixtures | ✅ | ✅ | ✅ |
 | The show: theme, slide size, slide tree, layouts in the app's order | — | — | ✅ |
 | Every slide's layout is one the theme lists; every layout has a name | — | — | ✅ |
 | Placeholder kinds match the fields that name them (title/body/number/object) | — | — | ✅ |
@@ -526,6 +552,14 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | The same duplicate twice produces the same file, byte for byte | — | — | ✅ |
 | A copied image slide shares the media instead of growing the package | — | — | ✅ |
 | **Keynote reads back the copy's title and notes, and saves the deck itself** | — | — | ✅ |
+| The package form: a directory reads as the same entries, and saves back as a directory | ✅ | ✅ | ✅ |
+| **The app opens a package this crate wrote**, and writes one file back over it | ✅ | ✅ | ✅ |
+| An entry name that would escape the package is refused; a symlink is not an entry | ✅ | ✅ | ✅ |
+| A document from a template: a new identity, its own lineage, the template recorded | ✅ | ✅ | ✅ |
+| **All three apps open a document made from a template, save it, and leave the identity alone** | ✅ | ✅ | ✅ |
+| An edit leaves every `preview*.jpg` byte for byte | ✅ | ✅ | ✅ |
+| **A document with its previews removed still opens in the app** | ✅ | ✅ | ✅ |
+| Thousands of mutated documents fail rather than panic | ✅ | ✅ | ✅ |
 
 Keynote is the gap in that block for one reason only — neither AppleScript nor
 any bundled theme will put a table on a slide, so there is no fixture. The
@@ -591,7 +625,7 @@ in six decks or in 182 themes, so `KN.BuildArchive` is decoded from the 15.3.1
 schema, reported if it is ever met, and guarded by a test that fails the day a
 fixture produces one.
 
-**There are no builds anywhere.** Not in the four decks, not in any of the 182
+**There are no builds anywhere.** Not in the six decks, not in any of the 182
 bundled `.kth` themes, and nothing in Keynote's dictionary will make one — so
 the build count this crate reports is honestly zero and `KN.BuildArchive` stays
 Inferred.
@@ -622,16 +656,20 @@ instead:
 scripts/make-fixtures.sh          # into tests/fixtures/generated/, gitignored
 ```
 
-Thirteen documents that between them cover plain and styled text, non-Latin
-text including emoji, a table and an image, two sheets of typed cells and
-formulas, a 300-row imported table, a deck of slides with presenter notes and a
-skipped slide, a slide carrying one of every drawable a script can make — a
-shape, a rotated shape, a shape at half opacity with a reflection, a text box, a
-line, an image, a locked shape and an image Keynote itself cropped — and four
-spreadsheets built from templates Apple ships, carrying a
-category with a summary row, two pivot tables, a filter that hides rows,
-columns hidden by hand, conditional highlighting, a custom cell format and a
-sort rule. Existing files are left alone unless `--force` is given.
+Twenty-seven documents that between them cover plain and styled text, non-Latin
+text including emoji, a table and an image, lists, sections and facing pages, a
+table of contents, a page-layout document with linked text boxes, page
+numbering, columns, a password-protected document, two sheets of typed cells and
+formulas, a 300-row imported table, six decks — presenter notes, a skipped
+slide, charts, all 44 transition effects, the playback settings — and a slide
+carrying one of every drawable a script can make: a shape, a rotated shape, a
+shape at half opacity with a reflection, a text box, a line, an image, a locked
+shape and an image Keynote itself cropped. Five spreadsheets are built from
+templates Apple ships, carrying a category with a summary row, two pivot tables,
+a filter that hides rows, columns hidden by hand, conditional highlighting, a
+custom cell format and a sort rule; a sixth is Apple's `.nmbtemplate` bundle
+renamed, for the hyperlink fields nothing else here can make. Existing files are
+left alone unless `--force` is given.
 
 Keynote builds the drawable fixture because it is the only one of the three
 apps that will create a drawable from a script: Pages and Numbers answer `make
@@ -675,12 +713,47 @@ report. Pages has no header, footer, footnote or column property at all, so
 document and **save it**, and the file that comes out was written by Pages from
 its own model. A header this crate invented badly does not survive that.
 
+### Fuzzing
+
+`tests/fuzz.rs` is a mutation fuzzer over the corpus, and it runs as part of
+`cargo test`: every fixture, every entry of every fixture, every object payload
+and a synthetic package built in memory are seeds, a deterministic generator
+mutates one, and the result goes through the ZIP layer, the Snappy framing, the
+object stream, the plists and then every reader the crate has — under
+`catch_unwind`, so a panic is a test failure with the seed that caused it and
+the offending bytes dumped to `/tmp`.
+
+```
+cargo test --test fuzz                                   # ~20 seconds, the default budget
+IWORK_FUZZ_SECONDS=600 cargo test --release --test fuzz  # a proper run
+IWORK_FUZZ_SEED=12437 IWORK_FUZZ_ITERATIONS=1 \
+  IWORK_FUZZ_BACKTRACE=1 RUST_BACKTRACE=1 \
+  cargo test --test fuzz                                 # replay one case
+```
+
+Run it in **both** profiles. A debug build panics on integer overflow, which is
+how the plist length arithmetic was caught; a release build is an order of
+magnitude faster and reaches further into the readers. Everything the fuzzer has
+found is fixed, and each fix has a named test beside the harness describing the
+shape of the input that caused it.
+
+`cargo fuzz` is not used: it needs a nightly toolchain for `-Z sanitizer` and
+this machine has only stable, so the committed harness is the whole of the
+fuzzing story rather than half of it.
+
 ## Limitations
 
-- **Previews go stale.** The `preview*.jpg` thumbnails are not regenerated, so
-  the Finder and iCloud will show the old first page until iWork re-saves the
-  document. Regenerating them means rendering the layout, which is a far larger
-  project than reading and writing the file.
+- **Previews go stale, deliberately.** The three `preview*.jpg` thumbnails are a
+  picture of the document as it was, and an edit here does not redraw them —
+  drawing one means laying the document out, which is a far larger project than
+  reading and writing the file. They are also not *removed*, which was the
+  choice worth making rather than assuming: nothing in 927 packages refers to
+  them, the app draws them again the next time it saves, and taking them out
+  would cost the byte-identity a no-op save promises. So the Finder shows the
+  old first page until iWork saves the document, `iwork check` says nothing
+  about it, and `iwork strip-previews` is there for the caller who would rather
+  have no thumbnail than a wrong one — every template Apple ships has none, and
+  all three apps open a document without them. `FORMAT.md` §1 has the evidence.
 - **A text edit that would delete an anchored object is refused.** Deleting the
   `U+FFFC` an image, a footnote mark or a table hangs off means deleting that
   object from the drawable list, the z-order and the media registry. Pages does
@@ -795,8 +868,8 @@ its own model. A header this crate invented badly does not survive that.
   `scripts/app-check.sh` is how, and `IWORK_APP_CHECK=1 cargo test` runs it over
   every fixture, on a machine that has the apps.
 - **No comment, no reply and no tracked change exists to decode, anywhere.**
-  All 23 fixtures and all 901 templates the three apps ship carry exactly one
-  `TSK.AnnotationAuthorStorageArchive`, and in every one of those 924 it is
+  All 26 readable fixtures and all 901 templates the three apps ship carry
+  exactly one `TSK.AnnotationAuthorStorageArchive`, and in every one of those 927 it is
   empty. No scripting dictionary has a comment command, a comment class or a
   change-tracking property, and a template ships without review state, so
   neither AppleScript nor template mining can produce one. Everything below the
@@ -825,7 +898,32 @@ its own model. A header this crate invented badly does not survive that.
   at a different character style is accepted and survives a reopen, but has not
   been observed to change the rendering, so something else evidently wins.
   Unresolved.
-- **Encrypted documents are not supported.**
+- **A document is created from a template, never from nothing.**
+  `Document::from_template` copies a template bundle into a new identity, which
+  is the only way to make a document that ground rule "copy, don't synthesise"
+  allows. Two things it cannot do: name the template when the bundle is not one
+  of the app's own — a user template in `~/Library` has an identifier and it is
+  not derivable from the path — and clear view state, of which there is none in
+  any bundled template to clear. A `.template` renamed `.pages` also works and
+  always has; what `from_template` adds is the identity.
+- **The file type is kept, not chosen.** A package (a directory) is read and
+  saved as a package, a single file as a single file. `File > Advanced > Change
+  File Type` is a menu item, so what a document a user has set to the package
+  form does on save could not be watched; what was watched is Pages handed a
+  package from a script and told to save, which wrote one file back over it.
+  `Package::write_as` performs the conversion when a caller asks for it.
+- **Hostile files are fuzzed, not proven safe.** `tests/fuzz.rs` runs thousands
+  of mutated documents through every decoder on every `cargo test`, and
+  everything it has found is fixed — a Snappy block claiming to decompress to
+  four gigabytes, a `MessageInfo` claiming 2^60 bytes of payload, a ZIP entry
+  claiming a size no file has, plist lengths that overflow when doubled, an
+  archive with no message in it. That is coverage, not a proof: the harness is
+  dumb mutation over a corpus of 27 documents, `cargo fuzz` needs a nightly
+  toolchain this machine does not have, and a decoder can still meet a shape
+  nothing here generated.
+- **Encrypted documents are refused rather than decrypted** — see the
+  password-protected bullet above; there is no key derivation here and none is
+  planned.
 
 ## Prior art
 
