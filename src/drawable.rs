@@ -742,8 +742,11 @@ pub enum Placement {
     Slide(String),
     /// A Pages section template — the page furniture a template puts down.
     SectionTemplate(u64),
-    /// Pages' floating drawables: on the page, out of the text flow.
-    Floating,
+    /// Pages' floating drawables: on the page, out of the text flow, on the
+    /// page the archive files them under.
+    Floating {
+        page: u32,
+    },
     /// Anchored in or inline with text, at a character index.
     InText {
         storage: u64,
@@ -762,7 +765,7 @@ impl Placement {
             Placement::Sheet(name) => format!("sheet {name}"),
             Placement::Slide(stream) => format!("slide {stream}"),
             Placement::SectionTemplate(owner) => format!("section template {owner}"),
-            Placement::Floating => "floating".to_string(),
+            Placement::Floating { page } => format!("floating on page {}", page + 1),
             Placement::InText { storage, character } => {
                 format!("anchored in storage {storage} at character {character}")
             }
@@ -1415,8 +1418,33 @@ fn containers(document: &crate::Document) -> BTreeMap<u64, (Placement, usize)> {
                 }
             }
             (10010, crate::Kind::Pages) => {
-                for (z, target) in listed(1).into_iter().enumerate() {
-                    record(target, Placement::Floating, z);
+                // **Two levels, not one.** The archive is one entry *per page*
+                // — `{1: page index, 4: [{1: reference}]}` — and reading field
+                // 1 as a list of references reads the page number as an object
+                // identifier, so every floating drawable in every Pages
+                // document came back `Unknown`. Found by a chart: the only
+                // drawable in `pages-numbering` that is neither anchored in
+                // text nor part of a section template.
+                for page_entry in archive.all(1) {
+                    let Value::Bytes(raw) = page_entry else {
+                        continue;
+                    };
+                    let Some(page) = decode_nested(raw) else {
+                        continue;
+                    };
+                    let number = page.varint(1).unwrap_or(0) as u32;
+                    for (z, value) in page.all(4).enumerate() {
+                        let Value::Bytes(entry) = value else {
+                            continue;
+                        };
+                        // Each entry is a wrapper around the reference, not
+                        // the reference itself: `{1: {1: identifier}}`.
+                        if let Some(target) = decode_nested(entry)
+                            .and_then(|wrapper| wrapper.bytes(1).and_then(reference))
+                        {
+                            record(target, Placement::Floating { page: number }, z);
+                        }
+                    }
                 }
             }
             (10143, crate::Kind::Pages) => {

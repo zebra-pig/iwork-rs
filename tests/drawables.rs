@@ -663,7 +663,7 @@ fn the_app_agrees_about_every_rectangle() {
                 drawable.placement,
                 iwork::Placement::Slide(_)
                     | iwork::Placement::Sheet(_)
-                    | iwork::Placement::Floating
+                    | iwork::Placement::Floating { .. }
                     | iwork::Placement::InText { .. }
             ) {
                 continue;
