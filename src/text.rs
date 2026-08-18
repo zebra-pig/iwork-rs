@@ -250,6 +250,23 @@ pub const BOOKMARK_TABLE: u32 = 15;
 pub const FOOTNOTE_TABLE: u32 = 16;
 /// `table_section`.
 pub const SECTION_TABLE: u32 = 17;
+/// `table_insertion` — a tracked insertion.
+pub const INSERTION_TABLE: u32 = 21;
+/// `table_deletion` — a tracked deletion, whose characters are still in the
+/// text.
+pub const DELETION_TABLE: u32 = 22;
+/// `table_highlight` — a comment anchor, run-anchored.
+pub const HIGHLIGHT_TABLE: u32 = 23;
+/// `table_overlapping_highlight` — a comment anchor with an explicit range, so
+/// two comments may cover the same characters.
+pub const OVERLAPPING_HIGHLIGHT_TABLE: u32 = 25;
+
+/// The two tables change tracking uses.
+///
+/// A storage carrying either is a storage this crate will not edit — see
+/// [`crate::Error::TrackedChanges`] and the module comment of
+/// [`crate::annotations`].
+pub const CHANGE_TABLES: &[u32] = &[INSERTION_TABLE, DELETION_TABLE];
 
 /// The table at a storage field, if that field is one.
 pub fn table(field: u32) -> Option<&'static Table> {

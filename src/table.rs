@@ -702,6 +702,11 @@ pub struct ListEntry {
     pub format: Option<Message>,
     /// Field 9 — `RICH_TEXT_PAYLOAD`.
     pub rich_text: Option<u64>,
+    /// Field 10 — `COMMENT_STORAGE`, a `TSD.CommentStorageArchive` (3056). This
+    /// is where a comment on a *cell* lives: the cell holds the key, the list
+    /// holds the comment, exactly as for a string. **No list of this type
+    /// exists in the corpus** — see [`crate::annotations`].
+    pub comment_storage: Option<u64>,
     /// Field 12 — `CONTROL_CELL_SPEC`, as a `TST.CellSpecArchive`.
     pub cell_spec: Option<Message>,
     /// Field 5 — `FORMULA`, decoded to its AST. A formula stored here carries
@@ -749,6 +754,7 @@ impl DataList {
                     reference: entry.bytes(4).and_then(reference),
                     format: entry.bytes(6).and_then(decode_nested),
                     rich_text: entry.bytes(9).and_then(reference),
+                    comment_storage: entry.bytes(10).and_then(reference),
                     cell_spec: entry.bytes(12).and_then(decode_nested),
                     formula: entry
                         .bytes(5)

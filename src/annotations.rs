@@ -1,0 +1,767 @@
+//! Comments, annotation authors and change tracking — the review layer.
+//!
+//! Every iWork document carries an `Index/AnnotationAuthorStorage*.iwa` with
+//! exactly one `TSK.AnnotationAuthorStorageArchive` in it, and that object is
+//! the anchor of everything here: a comment has an author, a tracked change has
+//! a session and a session has an author, and all of them are entries in that
+//! one storage.
+//!
+//! ```text
+//!  TSK.AnnotationAuthorStorageArchive (213)   Index/AnnotationAuthorStorage*
+//!    └── annotation_author (1) → TSK.AnnotationAuthorArchive (212)
+//!                                  name, colour, collaboration public id
+//!
+//!  TSD.CommentStorageArchive (3056)   the comment itself
+//!    ├── text (1), creation_date (2), author (3) → 212
+//!    └── replies (4) → more 3056, in order
+//!
+//!  reached from three places, one per thing a comment can be put on:
+//!    text     TSWP.StorageArchive.table_highlight (23) or
+//!             table_overlapping_highlight (25) → TSWP.HighlightArchive (2013)
+//!             → comment storage; the bubble on the page is a
+//!             TSWP.CommentInfoArchive (2014), a shape with the same storage
+//!    object   TSD.DrawableArchive.comment (6) → comment storage
+//!    cell     TST.CommentStorageWrapperArchive → comment storage
+//!
+//!  TSWP.ChangeArchive (2060)   one tracked insertion or deletion
+//!    ├── kind (1): 1 = insertion, 2 = deletion — there is no zero
+//!    ├── session (2) → TSWP.ChangeSessionArchive (2062) → author, date
+//!    └── reached from table_insertion (21) / table_deletion (22)
+//! ```
+//!
+//! ## What of this has ever been seen
+//!
+//! **The storage, and nothing else.** All 23 fixtures and all 901 template
+//! bundles the three apps ship carry exactly one type-213 object, and in every
+//! one of the 924 its payload is **zero bytes long**: no authors, therefore no
+//! comments and no tracked changes. Not one document anywhere on this machine
+//! has a 212, a 2013, a 2014, a 2060, a 2061, a 2062 or a 3056 in it, and no
+//! storage carries field 21, 22, 23 or 25.
+//!
+//! Nor can one be made. None of the three scripting dictionaries has a comment
+//! command, a comment class or a change-tracking property — `sdef` over all
+//! three finds "annotation" only as Pages' `include annotations` *export*
+//! option, and "change" not at all. Template mining, the substitute this
+//! repository uses when AppleScript runs out (PLAN.md ground rule 7), finds
+//! nothing either, because a template ships without review state.
+//!
+//! So everything below the author storage is decoded **from the 15.3.1 schema
+//! and has never met a live example**. It is written down because a document
+//! that arrives from somebody else's Mac will have all of it, and a reader that
+//! silently ignores a comment anchor is a reader that loses one; it is marked
+//! `Unverified` in the registry and in FORMAT.md, and
+//! [`crate::Document::annotations`] reports what it finds rather than pretending
+//! to understand it. The tripwire tests in this module fail the day a fixture
+//! finally has one — which is the point of them.
+//!
+//! ## Tracked deletions keep their characters
+//!
+//! The one claim here that changes what an *edit* may do. A deletion under
+//! change tracking does not remove the characters; it adds an entry to
+//! `table_deletion` covering them, and Pages draws them struck through. So the
+//! text of a storage with tracked changes contains text nobody is going to see,
+//! and a remap that treats field 22 as an ordinary run table will move a
+//! deletion marker onto characters nobody deleted. Since no probe here can
+//! watch Pages do it, [`crate::Document::replace_text`] refuses instead —
+//! [`crate::Error::TrackedChanges`].
+
+use std::collections::BTreeMap;
+
+use crate::drawable::Color;
+use crate::pb::{Message, Value};
+use crate::style::reference_target;
+
+/// `TSK.AnnotationAuthorArchive` — a comment or change author.
+pub const TYPE_AUTHOR: u32 = 212;
+/// `TSK.AnnotationAuthorStorageArchive` — the document's list of them.
+pub const TYPE_AUTHOR_STORAGE: u32 = 213;
+/// `TSD.CommentStorageArchive` — a comment, or one reply to one.
+pub const TYPE_COMMENT_STORAGE: u32 = 3056;
+/// `TSWP.CommentInfoArchive` — the floating bubble a text comment is drawn as.
+pub const TYPE_COMMENT_INFO: u32 = 2014;
+/// `TSWP.HighlightArchive` — a comment's anchor in text.
+pub const TYPE_HIGHLIGHT: u32 = 2013;
+/// `TSWP.ChangeArchive` — one tracked insertion or deletion.
+pub const TYPE_CHANGE: u32 = 2060;
+/// `TSK.DeprecatedChangeAuthorArchive` — a pre-collaboration change author.
+pub const TYPE_DEPRECATED_CHANGE_AUTHOR: u32 = 2061;
+/// `TSWP.ChangeSessionArchive` — an editing session, with its author and date.
+pub const TYPE_CHANGE_SESSION: u32 = 2062;
+/// `TST.TableDataList.ListType.COMMENT_STORAGE` — the list a cell's comment is
+/// an entry of.
+pub const CELL_COMMENT_LIST: u32 = 10;
+
+/// Field numbers of `TSK.AnnotationAuthorArchive`.
+pub mod author_field {
+    pub const NAME: u32 = 1;
+    pub const COLOR: u32 = 2;
+    pub const PUBLIC_ID: u32 = 3;
+    pub const IS_PUBLIC_AUTHOR: u32 = 4;
+    pub const PUBLIC_IDS: u32 = 5;
+}
+
+/// Field numbers of `TSD.CommentStorageArchive`.
+pub mod comment_field {
+    pub const TEXT: u32 = 1;
+    pub const CREATION_DATE: u32 = 2;
+    pub const AUTHOR: u32 = 3;
+    pub const REPLIES: u32 = 4;
+    pub const STORAGE_UUID: u32 = 5;
+}
+
+/// Field numbers of `TSWP.ChangeArchive`.
+pub mod change_field {
+    pub const KIND: u32 = 1;
+    pub const SESSION: u32 = 2;
+    pub const DATE: u32 = 3;
+    pub const TEXT_ATTRIBUTE_UUID: u32 = 4;
+}
+
+/// Field numbers of `TSWP.ChangeSessionArchive`.
+pub mod session_field {
+    pub const SESSION_UID: u32 = 1;
+    pub const AUTHOR: u32 = 2;
+    pub const DATE: u32 = 3;
+}
+
+/// One entry of the document's author storage.
+#[derive(Debug, Clone)]
+pub struct Author {
+    pub identifier: u64,
+    pub name: Option<String>,
+    /// The colour the app tints this author's comments and changes with.
+    pub color: Option<Color>,
+    /// The collaboration identity, when the document has been shared.
+    pub public_id: Option<String>,
+    pub is_public_author: bool,
+}
+
+/// What a comment is attached to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Anchor {
+    /// A range of text: an entry in `table_highlight` (23) or
+    /// `table_overlapping_highlight` (25) of this storage.
+    Text {
+        storage: u64,
+        /// Field number of the table the entry came from — 23 or 25.
+        table: u32,
+        /// First character covered, in UTF-16 code units.
+        start: u64,
+        /// How many characters, where the table says so. `table_highlight` is a
+        /// run table and does not: its entry reaches to the next one.
+        length: Option<u64>,
+    },
+    /// An image, a shape, a table or a chart: `TSD.DrawableArchive.comment`.
+    Drawable(u64),
+    /// A cell of a table, through `TST.CommentStorageWrapperArchive`.
+    Cell(u64),
+    /// A `TSWP.CommentInfoArchive` — the bubble, whose own anchor is the
+    /// highlight in the text it points at.
+    Bubble(u64),
+    /// A reply: it hangs off another comment, not off the document.
+    ReplyTo(u64),
+    /// The comment is in the document and nothing this crate walks points at
+    /// it. Reported rather than dropped.
+    Unattached,
+}
+
+impl Anchor {
+    pub fn as_str(&self) -> String {
+        match self {
+            Anchor::Text {
+                storage,
+                table,
+                start,
+                length,
+            } => {
+                let name = crate::text::table(*table).map(|t| t.name).unwrap_or("?");
+                match length {
+                    Some(n) => format!("storage {storage} {start}..{} ({name})", start + n),
+                    None => format!("storage {storage} from {start} ({name})"),
+                }
+            }
+            Anchor::Drawable(id) => format!("drawable {id}"),
+            Anchor::Cell(id) => format!("cell storage {id}"),
+            Anchor::Bubble(id) => format!("comment shape {id}"),
+            Anchor::ReplyTo(id) => format!("reply to comment {id}"),
+            Anchor::Unattached => "unattached".to_string(),
+        }
+    }
+}
+
+/// One comment or one reply.
+#[derive(Debug, Clone)]
+pub struct Comment {
+    pub identifier: u64,
+    pub stream: String,
+    pub text: Option<String>,
+    /// Seconds since 2001-01-01, as `TSP.Date` counts them.
+    pub created: Option<f64>,
+    /// The `TSK.AnnotationAuthorArchive` this belongs to.
+    pub author: Option<u64>,
+    /// Replies, in the order the archive lists them.
+    pub replies: Vec<u64>,
+    pub anchor: Anchor,
+}
+
+/// One tracked insertion or deletion.
+#[derive(Debug, Clone)]
+pub struct Change {
+    pub identifier: u64,
+    pub stream: String,
+    pub kind: ChangeKind,
+    pub session: Option<u64>,
+    pub created: Option<f64>,
+    /// The storage and character index the change covers, where a table points
+    /// at it.
+    pub anchor: Option<(u64, u32, u64)>,
+}
+
+/// `TSWP.ChangeArchive.ChangeKind`.
+///
+/// **There is no zero value**: insertion is 1 and deletion is 2. An archive
+/// whose kind field is absent or zero is therefore not an insertion — it is an
+/// archive this crate does not understand, which is what [`ChangeKind::Unknown`]
+/// says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangeKind {
+    Insertion,
+    Deletion,
+    Unknown(u64),
+}
+
+impl ChangeKind {
+    pub fn from_varint(value: Option<u64>) -> ChangeKind {
+        match value {
+            Some(1) => ChangeKind::Insertion,
+            Some(2) => ChangeKind::Deletion,
+            other => ChangeKind::Unknown(other.unwrap_or(0)),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ChangeKind::Insertion => "insertion",
+            ChangeKind::Deletion => "deletion",
+            ChangeKind::Unknown(_) => "unknown kind",
+        }
+    }
+}
+
+/// Everything the review layer of one document holds.
+///
+/// In every document this crate has been shown, `authors` is empty and so is
+/// everything else; `author_storage` is the one object that is always there.
+#[derive(Debug, Clone, Default)]
+pub struct Annotations {
+    /// The `TSK.AnnotationAuthorStorageArchive`, and the stream it lives in.
+    pub author_storage: Option<(u64, String)>,
+    pub authors: Vec<Author>,
+    pub comments: Vec<Comment>,
+    pub changes: Vec<Change>,
+    /// `TSWP.ChangeSessionArchive` objects, by identifier.
+    pub sessions: Vec<u64>,
+    /// Storages carrying `table_insertion` (21) or `table_deletion` (22): the
+    /// text an edit must not be allowed through.
+    pub tracked_storages: Vec<u64>,
+    /// Storages carrying `table_highlight` (23) or
+    /// `table_overlapping_highlight` (25).
+    pub commented_storages: Vec<u64>,
+    /// Objects of a type this module knows about but did not reach from
+    /// anywhere — reported so a document with an unexpected shape says so
+    /// rather than looking empty.
+    pub unreached: Vec<(u64, u32)>,
+}
+
+impl Annotations {
+    /// Nothing to report: no comment, no tracked change, no author.
+    pub fn is_empty(&self) -> bool {
+        self.authors.is_empty()
+            && self.comments.is_empty()
+            && self.changes.is_empty()
+            && self.tracked_storages.is_empty()
+            && self.commented_storages.is_empty()
+    }
+
+    /// One line for a reader — what `iwork inspect` prints.
+    pub fn summary(&self) -> String {
+        if self.is_empty() {
+            return "no comments, no tracked changes, no annotation authors".to_string();
+        }
+        let mut parts = Vec::new();
+        if !self.authors.is_empty() {
+            parts.push(format!("{} annotation author(s)", self.authors.len()));
+        }
+        if !self.comments.is_empty() {
+            parts.push(format!("{} comment archive(s)", self.comments.len()));
+        }
+        if !self.changes.is_empty() {
+            parts.push(format!("{} tracked change(s)", self.changes.len()));
+        }
+        if !self.tracked_storages.is_empty() {
+            parts.push(format!(
+                "{} storage(s) with tracked changes",
+                self.tracked_storages.len()
+            ));
+        }
+        if !self.commented_storages.is_empty() {
+            parts.push(format!(
+                "{} storage(s) with comment anchors",
+                self.commented_storages.len()
+            ));
+        }
+        parts.join(", ")
+    }
+}
+
+/// Read the review layer of a document.
+///
+/// One pass over `objects()` into a map, then a walk — the shape
+/// [`crate::Document::structure`] established. It costs a decode of the whole
+/// document and is fine at this scale.
+pub fn annotations(document: &crate::Document) -> Annotations {
+    let mut archives: BTreeMap<u64, (u32, String, Message)> = BTreeMap::new();
+    for (stream, object) in document.objects() {
+        if let Ok(message) = Message::decode(object.payload()) {
+            archives.insert(
+                object.identifier,
+                (object.message_type(), stream.to_string(), message),
+            );
+        }
+    }
+
+    let mut out = Annotations::default();
+
+    // The author storage, and the authors it lists. Field 1 is repeated, so a
+    // document with several authors has several entries and each is a
+    // reference.
+    if let Some((identifier, (_, stream, storage))) = archives
+        .iter()
+        .find(|(_, (message_type, _, _))| *message_type == TYPE_AUTHOR_STORAGE)
+        .map(|(id, entry)| (*id, entry.clone()))
+    {
+        out.author_storage = Some((identifier, stream));
+        for target in references(&storage, 1) {
+            if let Some((message_type, _, author)) = archives.get(&target) {
+                if *message_type == TYPE_AUTHOR {
+                    out.authors.push(read_author(&target, author));
+                }
+            }
+        }
+    }
+    // An author the storage does not list is still an author, and a reader that
+    // only walks the storage would miss it.
+    for (identifier, (message_type, _, author)) in &archives {
+        if *message_type == TYPE_AUTHOR && !out.authors.iter().any(|a| a.identifier == *identifier)
+        {
+            out.authors.push(read_author(identifier, author));
+        }
+    }
+
+    // Where a comment is anchored, gathered before the comments themselves so
+    // each one can be told what points at it.
+    let mut anchors: BTreeMap<u64, Anchor> = BTreeMap::new();
+    for (identifier, (message_type, _, archive)) in &archives {
+        if *message_type == crate::TYPE_STORAGE {
+            for field in [
+                crate::text::HIGHLIGHT_TABLE,
+                crate::text::OVERLAPPING_HIGHLIGHT_TABLE,
+            ] {
+                let found = highlight_anchors(archive, field, *identifier, &archives);
+                if !found.is_empty() {
+                    out.commented_storages.push(*identifier);
+                    for (comment, anchor) in found {
+                        anchors.entry(comment).or_insert(anchor);
+                    }
+                }
+            }
+            if archive.get(crate::text::INSERTION_TABLE).is_some()
+                || archive.get(crate::text::DELETION_TABLE).is_some()
+            {
+                out.tracked_storages.push(*identifier);
+            }
+        }
+        // An object comment: `TSD.DrawableArchive.comment`, wherever the
+        // drawable archive sits inside the payload.
+        for target in comment_references(archive) {
+            anchors
+                .entry(target)
+                .or_insert(Anchor::Drawable(*identifier));
+        }
+        if *message_type == TYPE_COMMENT_INFO {
+            if let Some(target) = reference(archive, 2) {
+                anchors.entry(target).or_insert(Anchor::Bubble(*identifier));
+            }
+        }
+        // A comment on a *cell* is an entry in a `TST.TableDataList` of type 10
+        // — the same string-table indirection every other cell payload uses.
+        // The list is the anchor this crate can name; which cell holds the key
+        // needs a tile walk, and there is no list of this type anywhere to walk
+        // one for.
+        if *message_type == crate::table::TYPE_DATA_LIST {
+            let list = crate::table::DataList::decode(archive);
+            if list.list_type == CELL_COMMENT_LIST {
+                for entry in list.entries.values() {
+                    if let Some(target) = entry.comment_storage {
+                        anchors.entry(target).or_insert(Anchor::Cell(*identifier));
+                    }
+                }
+            }
+        }
+    }
+    out.commented_storages.sort_unstable();
+    out.commented_storages.dedup();
+    out.tracked_storages.sort_unstable();
+    out.tracked_storages.dedup();
+
+    // Replies win over any other anchor: a reply belongs to its parent.
+    for (identifier, (message_type, _, archive)) in &archives {
+        if *message_type != TYPE_COMMENT_STORAGE {
+            continue;
+        }
+        for reply in references(archive, comment_field::REPLIES) {
+            anchors.insert(reply, Anchor::ReplyTo(*identifier));
+        }
+    }
+
+    for (identifier, (message_type, stream, archive)) in &archives {
+        match *message_type {
+            TYPE_COMMENT_STORAGE => out.comments.push(Comment {
+                identifier: *identifier,
+                stream: stream.clone(),
+                text: crate::style::string_at(archive, &[comment_field::TEXT]),
+                created: date(archive, comment_field::CREATION_DATE),
+                author: reference(archive, comment_field::AUTHOR),
+                replies: references(archive, comment_field::REPLIES),
+                anchor: anchors
+                    .get(identifier)
+                    .cloned()
+                    .unwrap_or(Anchor::Unattached),
+            }),
+            TYPE_CHANGE => out.changes.push(Change {
+                identifier: *identifier,
+                stream: stream.clone(),
+                kind: ChangeKind::from_varint(archive.varint(change_field::KIND)),
+                session: reference(archive, change_field::SESSION),
+                created: date(archive, change_field::DATE),
+                anchor: None,
+            }),
+            TYPE_CHANGE_SESSION => out.sessions.push(*identifier),
+            TYPE_HIGHLIGHT | TYPE_COMMENT_INFO | TYPE_DEPRECATED_CHANGE_AUTHOR => {
+                out.unreached.push((*identifier, *message_type))
+            }
+            _ => {}
+        }
+    }
+    out.comments.sort_by_key(|c| c.identifier);
+    out.changes.sort_by_key(|c| c.identifier);
+
+    // Now that the changes are known, say where each one is anchored.
+    let placements = change_anchors(&archives);
+    for change in &mut out.changes {
+        change.anchor = placements.get(&change.identifier).copied();
+    }
+    out
+}
+
+fn read_author(identifier: &u64, archive: &Message) -> Author {
+    Author {
+        identifier: *identifier,
+        name: crate::style::string_at(archive, &[author_field::NAME]),
+        color: archive
+            .bytes(author_field::COLOR)
+            .and_then(crate::pb::decode_nested)
+            .and_then(|m| Color::decode(&m)),
+        public_id: crate::style::string_at(archive, &[author_field::PUBLIC_ID]),
+        is_public_author: archive.varint(author_field::IS_PUBLIC_AUTHOR) == Some(1),
+    }
+}
+
+/// Comment storages a highlight table points at, with where the entry sits.
+///
+/// `table_highlight` (23) is a run table — `{character_index, reference}` — and
+/// `table_overlapping_highlight` (25) carries an explicit `TSP.Range` so that
+/// two comments may cover the same characters. Both hold their reference
+/// through a `TSWP.HighlightArchive`, whose field 1 is the comment storage.
+fn highlight_anchors(
+    storage: &Message,
+    field: u32,
+    identifier: u64,
+    archives: &BTreeMap<u64, (u32, String, Message)>,
+) -> Vec<(u64, Anchor)> {
+    let mut out = Vec::new();
+    for entry in storage.fields.iter().filter(|f| f.number == field) {
+        let Value::Bytes(raw) = &entry.value else {
+            continue;
+        };
+        let Some(entry) = crate::pb::decode_nested(raw) else {
+            continue;
+        };
+        let start = entry.varint(1).unwrap_or(0);
+        // The overlapping table's entry carries `{location, length}` rather
+        // than a bare index; the run table's does not.
+        let length = entry
+            .bytes(3)
+            .and_then(crate::pb::decode_nested)
+            .and_then(|range| range.varint(2));
+        let Some(target) = reference(&entry, 2) else {
+            continue;
+        };
+        // The entry points at a highlight, and the highlight at the comment.
+        // A document that points straight at the comment is also accepted:
+        // nothing here has ever been seen, so neither shape is assumed.
+        let comment = match archives.get(&target) {
+            Some((TYPE_HIGHLIGHT, _, highlight)) => reference(highlight, 1).unwrap_or(target),
+            _ => target,
+        };
+        out.push((
+            comment,
+            Anchor::Text {
+                storage: identifier,
+                table: field,
+                start,
+                length,
+            },
+        ));
+    }
+    out
+}
+
+/// Storage, table field and character index of every tracked-change entry.
+fn change_anchors(
+    archives: &BTreeMap<u64, (u32, String, Message)>,
+) -> BTreeMap<u64, (u64, u32, u64)> {
+    let mut out = BTreeMap::new();
+    for (identifier, (message_type, _, archive)) in archives {
+        if *message_type != crate::TYPE_STORAGE {
+            continue;
+        }
+        for field in [crate::text::INSERTION_TABLE, crate::text::DELETION_TABLE] {
+            for entry in archive.fields.iter().filter(|f| f.number == field) {
+                let Value::Bytes(raw) = &entry.value else {
+                    continue;
+                };
+                let Some(entry) = crate::pb::decode_nested(raw) else {
+                    continue;
+                };
+                if let Some(target) = reference(&entry, 2) {
+                    out.insert(target, (*identifier, field, entry.varint(1).unwrap_or(0)));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Every `TSD.DrawableArchive.comment` in a payload, at whatever depth the
+/// drawable archive sits: field 6 of a message that also has a geometry at 1
+/// and is not itself a comment storage.
+///
+/// Walking by shape rather than by type is what makes this work for the six
+/// different archives that embed a drawable — an image, a shape, a group, a
+/// table info, a chart, a Keynote placeholder — without a table of paths.
+fn comment_references(archive: &Message) -> Vec<u64> {
+    let mut out = Vec::new();
+    walk_for_comments(archive, 0, &mut out);
+    out
+}
+
+fn walk_for_comments(message: &Message, depth: usize, out: &mut Vec<u64>) {
+    // A drawable archive is never more than three levels down — `[1]` for an
+    // image, `[1, 1]` for a shape info, `[1, 1, 1]` for a placeholder — and a
+    // bound keeps this off the deep object graphs a table builds.
+    if depth > 3 {
+        return;
+    }
+    let looks_like_drawable = message.get(crate::drawable::field::GEOMETRY).is_some()
+        || message.get(crate::drawable::field::PARENT).is_some();
+    if looks_like_drawable {
+        if let Some(target) = reference(message, crate::drawable::field::COMMENT) {
+            out.push(target);
+        }
+    }
+    for field in &message.fields {
+        if let Value::Bytes(raw) = &field.value {
+            if let Some(nested) = crate::pb::decode_nested(raw) {
+                walk_for_comments(&nested, depth + 1, out);
+            }
+        }
+    }
+}
+
+fn reference(message: &Message, field: u32) -> Option<u64> {
+    message
+        .bytes(field)
+        .and_then(crate::pb::decode_nested)
+        .and_then(|m| reference_target(&m))
+}
+
+fn references(message: &Message, field: u32) -> Vec<u64> {
+    message
+        .fields
+        .iter()
+        .filter(|f| f.number == field)
+        .filter_map(|f| match &f.value {
+            Value::Bytes(raw) => crate::pb::decode_nested(raw).and_then(|m| reference_target(&m)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A `TSP.Date` — one required double, seconds from 2001-01-01.
+fn date(message: &Message, field: u32) -> Option<f64> {
+    let nested = crate::pb::decode_nested(message.bytes(field)?)?;
+    match nested.get(1)? {
+        Value::Fixed64(bytes) => Some(f64::from_le_bytes(*bytes)),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pb::Field;
+
+    fn message(fields: Vec<(u32, Value)>) -> Message {
+        Message {
+            fields: fields
+                .into_iter()
+                .map(|(number, value)| Field { number, value })
+                .collect(),
+        }
+    }
+
+    fn reference_bytes(identifier: u64) -> Value {
+        Value::Bytes(message(vec![(1, Value::Varint(identifier))]).encode())
+    }
+
+    #[test]
+    fn a_change_kind_has_no_zero() {
+        assert_eq!(
+            ChangeKind::from_varint(Some(1)),
+            ChangeKind::Insertion,
+            "1 is an insertion"
+        );
+        assert_eq!(ChangeKind::from_varint(Some(2)), ChangeKind::Deletion);
+        // The point of the enum: a missing kind is not the first variant.
+        assert_eq!(ChangeKind::from_varint(None), ChangeKind::Unknown(0));
+        assert_eq!(ChangeKind::from_varint(Some(0)), ChangeKind::Unknown(0));
+        assert_eq!(ChangeKind::from_varint(Some(7)), ChangeKind::Unknown(7));
+    }
+
+    #[test]
+    fn an_author_reads_its_name_and_colour() {
+        let colour = message(vec![
+            (1, Value::Varint(1)),
+            (3, Value::Fixed32(1.0f32.to_le_bytes())),
+            (4, Value::Fixed32(0.5f32.to_le_bytes())),
+            (5, Value::Fixed32(0.0f32.to_le_bytes())),
+            (6, Value::Fixed32(1.0f32.to_le_bytes())),
+        ]);
+        let author = read_author(
+            &42,
+            &message(vec![
+                (author_field::NAME, Value::Bytes(b"Ada Lovelace".to_vec())),
+                (author_field::COLOR, Value::Bytes(colour.encode())),
+                (author_field::PUBLIC_ID, Value::Bytes(b"abc123".to_vec())),
+                (author_field::IS_PUBLIC_AUTHOR, Value::Varint(1)),
+            ]),
+        );
+        assert_eq!(author.name.as_deref(), Some("Ada Lovelace"));
+        assert_eq!(author.public_id.as_deref(), Some("abc123"));
+        assert!(author.is_public_author);
+        assert_eq!(author.color.map(|c| c.to_string()), Some("#ff8000".into()));
+    }
+
+    /// `table_highlight` is a run table: `{index, reference}`, no length. The
+    /// reference is to a `TSWP.HighlightArchive`, and *that* points at the
+    /// comment — two hops, and a decoder that takes one lands on the wrong
+    /// object.
+    #[test]
+    fn a_run_highlight_reaches_the_comment_through_the_highlight() {
+        let mut archives: BTreeMap<u64, (u32, String, Message)> = BTreeMap::new();
+        archives.insert(
+            700,
+            (
+                TYPE_HIGHLIGHT,
+                "Index/Document.iwa".into(),
+                message(vec![(1, reference_bytes(900))]),
+            ),
+        );
+        let entry = message(vec![(1, Value::Varint(12)), (2, reference_bytes(700))]);
+        let storage = message(vec![(
+            crate::text::HIGHLIGHT_TABLE,
+            Value::Bytes(entry.encode()),
+        )]);
+
+        let found = highlight_anchors(&storage, crate::text::HIGHLIGHT_TABLE, 5, &archives);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, 900, "the comment, not the highlight");
+        assert_eq!(
+            found[0].1,
+            Anchor::Text {
+                storage: 5,
+                table: crate::text::HIGHLIGHT_TABLE,
+                start: 12,
+                length: None,
+            }
+        );
+    }
+
+    /// `table_overlapping_highlight` carries an explicit range, which is how
+    /// two comments cover the same characters.
+    #[test]
+    fn an_overlapping_highlight_carries_its_own_length() {
+        let archives = BTreeMap::new();
+        let range = message(vec![(1, Value::Varint(12)), (2, Value::Varint(9))]);
+        let entry = message(vec![
+            (1, Value::Varint(12)),
+            (2, reference_bytes(900)),
+            (3, Value::Bytes(range.encode())),
+        ]);
+        let storage = message(vec![(
+            crate::text::OVERLAPPING_HIGHLIGHT_TABLE,
+            Value::Bytes(entry.encode()),
+        )]);
+
+        let found = highlight_anchors(
+            &storage,
+            crate::text::OVERLAPPING_HIGHLIGHT_TABLE,
+            5,
+            &archives,
+        );
+        assert_eq!(
+            found[0].1,
+            Anchor::Text {
+                storage: 5,
+                table: crate::text::OVERLAPPING_HIGHLIGHT_TABLE,
+                start: 12,
+                length: Some(9),
+            }
+        );
+        assert_eq!(
+            found[0].1.as_str(),
+            "storage 5 12..21 (table_overlapping_highlight)"
+        );
+    }
+
+    /// A comment on an image is field 6 of the drawable archive, and the
+    /// drawable archive is one level inside a `TSD.ImageArchive`.
+    #[test]
+    fn an_object_comment_is_found_inside_the_archive_that_carries_it() {
+        let drawable = message(vec![
+            (crate::drawable::field::GEOMETRY, Value::Bytes(Vec::new())),
+            (crate::drawable::field::COMMENT, reference_bytes(901)),
+        ]);
+        let image = message(vec![(1, Value::Bytes(drawable.encode()))]);
+        assert_eq!(comment_references(&image), vec![901]);
+    }
+
+    #[test]
+    fn a_date_is_a_double_in_a_submessage() {
+        let inner = message(vec![(1, Value::Fixed64(768_000_000f64.to_le_bytes()))]);
+        let outer = message(vec![(2, Value::Bytes(inner.encode()))]);
+        assert_eq!(date(&outer, 2), Some(768_000_000.0));
+        assert_eq!(date(&outer, 3), None);
+    }
+}

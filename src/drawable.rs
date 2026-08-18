@@ -387,7 +387,8 @@ pub struct Color {
 }
 
 impl Color {
-    fn decode(message: &Message) -> Option<Color> {
+    /// Read the channels of a `TSP.Color`, if that is what this message is.
+    pub fn decode(message: &Message) -> Option<Color> {
         if !crate::style::is_color(message) {
             return None;
         }
