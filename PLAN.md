@@ -360,15 +360,32 @@ confidently. Read-first, then the safest writes.
 
 ## Phase 7 — Comments, metadata, document properties
 
-- [ ] Read annotations/comments and their anchors, authors storage —
+- [x] Read annotations/comments and their anchors, authors storage —
       including resolved/unresolved state, reply threads (author + timestamp
       per reply), reviewer text highlights (annotation-layer, distinct from
       formatting highlight), and anchors into cells and chart elements, not
-      just text.
-- [ ] Read+write document metadata (Properties.plist fields, custom format
+      just text. *(The author storage is decoded and is **empty in all 924
+      documents on this machine** — 23 fixtures and all 901 bundled templates.
+      Comments, replies, their three anchor kinds and the two highlight tables
+      are decoded from the 15.3.1 schema and marked Unverified, because nothing
+      here has one and no scripting dictionary will make one. Two tripwire
+      tests fail the day a fixture does. **Resolved/unresolved state is not in
+      the 15.3.1 `TSD.CommentStorageArchive` at all** — it has text, date,
+      author, replies and a UUID, and no such field; whatever carries it is not
+      in this schema and is not invented here.)*
+- [x] Read+write document metadata (Properties.plist fields, custom format
       lists), regenerate `Metadata/DocumentIdentifier`/UUIDs correctly on
       "save as new document" so two edited copies don't collide in iCloud.
-- [ ] Change-tracking: read-level survey only; document in FORMAT.md.
+      *(Both plist forms read, the binary one written; `Document::save_as_new`
+      and `iwork duplicate` implement the rule Pages' own Save As was measured
+      applying. The iCloud half is Inferred — see the log entry.)*
+- [x] Change-tracking: read-level survey only; document in FORMAT.md.
+      *(All ten `TP` fields read and at their defaults everywhere; the two text
+      tables decoded; an edit through either is refused by name.)*
+- [x] Password detection, pulled forward from phase 9: `set password` turned
+      out to be scriptable in all three apps, so a locked package could be
+      *made* and measured rather than described. `Error::Encrypted`, a fixture,
+      and the shape written down in FORMAT.md §11.
 
 ## Phase 8a — Keynote: inventory and text (app-verified)
 
@@ -400,8 +417,11 @@ confidently. Read-first, then the safest writes.
 - [ ] Package-form documents: File > Advanced > Change File Type saves a
       real *directory* instead of a ZIP (Apple recommends it above ~500 MB).
       Detect and read both forms; `iwork inspect` says which it has.
-- [ ] Encrypted documents: detect, fail with a named error (not a parse
-      failure), refuse to write. The common hostile-bytes case.
+- [x] Encrypted documents: detect, fail with a named error (not a parse
+      failure), refuse to write. The common hostile-bytes case. *(Done in
+      phase 7 — the detection is exact and the fixture is real. What remains
+      for phase 9 is the *package-form* variant of the same question, and
+      whatever a hostile `.iwpv2` does to the fuzzer.)*
 - [ ] Decide and document the preview-staleness rule (byte-identity says
       leave `preview*.jpg`; correctness says they now lie — pick one,
       record it in FORMAT.md, teach `iwork check` to note it).
@@ -1890,6 +1910,179 @@ fixture, and what the app accepted.
     points at: they legitimately disagree between the app's last recalculation
     and the next open. If that check is ever wanted it has to be a note, not a
     problem — the same shape as the stale formula cache in §9.
+
+- 2026-08-18 — **Phase 7 complete (comments, metadata, document properties).**
+  Three new modules — `src/plist.rs`, `src/metadata.rs`, `src/annotations.rs`;
+  `doc.metadata() | annotations() | save_as_new()`; `iwork metadata |
+  annotations | duplicate`, three new lines on `iwork inspect` and a tracking
+  line on `iwork structure`; two new errors (`Encrypted`, `TrackedChanges`);
+  three new `iwork check` invariants; a new fixture (`pages-locked.pages`) and
+  the builder for it; FORMAT.md §11 and §12 and writing rules 19–21; two
+  registry entries corrected and seven added. `cargo fmt --check` and `cargo
+  clippy --all-targets -D warnings` clean; `cargo test --all-targets` green:
+  **139 unit** + 16 cell + 18 chart + 18 drawable + **24 fixture** + 14 formula
+  + **18 pages** + 34 style + 22 table + **15 text** + 4 doc.
+  `IWORK_APP_CHECK=1` green over the whole suite, twenty-four fixtures.
+
+  **The probe that changed the phase.** The brief asked two questions of the
+  sdefs before anything else, and both answers were decisive.
+
+  | Probe | Answer |
+  |---|---|
+  | Does Pages expose change tracking? | **No.** `sdef` finds the string "change" nowhere in Pages.sdef. No `change tracking enabled`, no accept/reject, nothing. Tables 21/22 stay Unverified |
+  | Does anything set alt text? | **Yes**, `description` on an `image`, read-write, cocoa key `scriptAccessibilityDescription` — but phase 6 already reads it (`TSD.DrawableArchive.accessibility_description`, field 8) and nine fixtures carry one |
+  | Does anything set a password? | **Yes, and this was not expected.** `set password`, `remove password` and a read-only `password protected` are in the *shared* iWork suite, so all three apps have them |
+
+  So the encryption item was pulled forward from phase 9 and done with real
+  evidence instead of from format knowledge, and change tracking stayed a
+  read-level survey exactly as the plan predicted.
+
+  **What a password does to a package**, from four locked documents — one per
+  app, plus a re-lock with a different password and no hint:
+
+  | | Locked |
+  |---|---|
+  | `.iwpv2` | new, **104 bytes in all four**, beginning `02 00 01 00 A0 86 01 00` — 2, 1, 100000 — then 96 bytes that differ every time |
+  | `.iwph` | new, the hint as raw UTF-8; absent when no hint was given |
+  | `Index/*.iwa`, `Data/*`, `BuildVersionHistory.plist` | ciphertext |
+  | `Properties.plist`, `DocumentIdentifier` | plain, unchanged in shape |
+  | `preview*.jpg` | **gone** |
+
+  Detection is the presence of `.iwpv2` and it is exact: no unencrypted
+  document in the corpus or in any of the 901 bundles has one.
+  `Document::open` refuses before anything tries to decompress a stream, which
+  it previously reported as "unexpected chunk marker 0x56".
+
+  **The identity rule, and how it was settled.** `pages-plain.pages` was opened
+  by Pages and written to a second path with `save doc in file`; the original
+  was left byte for byte alone and the copy differed in exactly five keys.
+
+  | Key | Save As |
+  |---|---|
+  | `documentUUID`, `shareUUID`, `privateUUID`, `versionUUID` | all new |
+  | `revision` | new, `"0::"` + the new version |
+  | `stableDocumentUUID` | **unchanged — the lineage** |
+  | `DocumentIdentifier` | new, the new `documentUUID` |
+  | build history, format version, the three booleans | unchanged |
+
+  `save_as_new` implements that table. Then the app was asked twice more, and
+  this is the strongest evidence in the phase: `iwork duplicate` followed by
+  `resave.sh` **twice** left `documentUUID`, `shareUUID`, `privateUUID` and
+  `stableDocumentUUID` exactly as this crate wrote them and moved only the
+  version — while a plain `cp` of the same fixture, resaved, came back with a
+  new `documentUUID`, `shareUUID` and `privateUUID` and the stable one kept.
+  **Pages re-identifies a byte copy of its own accord and leaves a properly
+  re-identified one alone.** Numbers reproduces it on a `.numbers`, and all
+  three apps open a copy this crate wrote.
+
+  **What could not be settled, said plainly.** Opening two documents at once
+  does *not* distinguish them: Pages opens an original and a byte-identical
+  copy side by side and reports two documents with two paths, exactly as it
+  does for a properly re-identified pair. The identity matters to the sync
+  layer and there is no iCloud account here to watch it matter, so "two edited
+  copies don't collide in iCloud" rests on the Save As measurement and on the
+  app re-identifying byte copies unprompted. Marked Inferred in FORMAT.md.
+
+  **A registry entry that was wrong in an interesting way.** 11014 and 11015
+  were `TSP.AnnotationAuthorArchive` and its storage, carried over from prior
+  art, so every document in the corpus reported three annotation authors. The
+  15.3.1 registry names them `TSP.DataMetadata` and `TSP.DataMetadataMap`, and
+  the payloads agree exactly: the map's `data_identifier`s in `pages-report`
+  are 11, 10 and 14 — precisely its three *theme assets*, the images it names
+  and does not carry — and each metadata is one `fallback_color`, what iWork
+  draws where the asset is not there. Both are now Confirmed. The real
+  annotation authors are 212/213 and there are none.
+
+  **The sweep, and it is the whole story of this phase's read side.** 924
+  documents — 23 fixtures and all 901 bundles — carry **exactly one**
+  `TSK.AnnotationAuthorStorageArchive` each, and in every one of them the
+  payload is **zero bytes long**. Not one 212, 2013, 2014, 2060, 2061, 2062 or
+  3056 anywhere; not one storage with field 21, 22, 23 or 25. So the storage is
+  Confirmed and everything below it is Unverified, with `iwork annotations`
+  reporting what it finds and two tripwire tests failing the day a fixture
+  finally has one.
+
+  Three things worth knowing that the schema said and no document could:
+
+  - **A comment reaches text through two hops**, not one: `table_highlight`
+    (23) or `table_overlapping_highlight` (25) → `TSWP.HighlightArchive` (2013)
+    → `TSD.CommentStorageArchive` (3056). A decoder that takes one hop lands on
+    the highlight.
+  - **A cell's comment is an interned entry**, in a `TST.TableDataList` of
+    `listType = 10` — the same string-table indirection every other cell
+    payload uses.
+  - **There is no resolved flag.** `TSD.CommentStorageArchive` has text, date,
+    author, replies and a UUID, and the string `resolv` does not occur in any
+    of the 121 descriptor files carved out of 15.3.1. Whatever records that a
+    thread is resolved is not in this schema, and nothing here invents it.
+
+  **Two plists, two formats.** `Properties.plist` is `bplist00`;
+  `BuildVersionHistory.plist` is XML. A reader that assumes one and meets the
+  other reports a corrupt document. `src/plist.rs` reads both and writes the
+  binary one, with no new dependency: 945 plists across the corpus and the
+  bundles parse, and the binary ones re-serialise to something `plutil` prints
+  identically. It is deliberately *not* byte-identical to CoreFoundation's
+  output — Pages writes 21 objects for 20 values, referencing one `false` three
+  times and orphaning two more, while writing three equal UUID strings out in
+  full — so ten keys come to 443 bytes here and 525 there. Pages read the
+  result and saved it back without changing a key.
+
+  **Where the document's own description lives, and it is cross-app.**
+  `TSA.DocumentArchive` is the `super` of each app's document archive at a
+  *different* field: Pages 15, Numbers 8, Keynote 3. It carries
+  `document_language` (a proofing language — `en-GB` on a document whose locale
+  is `en_CH`), `template_identifier`
+  (`Application/26_Stocks/Traditional`) and `custom_format_list`, which is the
+  `TSK.CustomFormatListArchive` phase 1b already read — the document-scoped
+  list the brief asked to be cross-linked. One level in, `TSK.DocumentArchive`
+  has `locale_identifier`, `creation_locale_identifier` and
+  `annotation_author_storage`.
+
+  A trap found on the way: **`en_US` re-encodes as a valid one-field
+  submessage**, because `e` is `0x65`, the tag byte of a `fixed32` at field 12.
+  A decoder that tries the submessage interpretation first reports the
+  document's locale as `200061.72`, which is what `iwork dump` does.
+
+  Three AppleScript traps, all compiler rather than app, all in one script:
+  `before` is a reserved word, so `set before to password protected of doc`
+  will not compile; `locked` is the iWork item property, so `set locked to …`
+  compiles and then fails at run time with -10006; and `set password pw` will
+  not compile with a *variable* in the direct parameter, because the compiler
+  reads `password` as the first word of `password protected`. The call is built
+  as text and compiled at run time with `run script`.
+
+  What Phase 8a/8b (Keynote) should know:
+
+  - **A Keynote deck has the same identity surface as everything else**, and
+    `save_as_new` is app-verified on one. If 8a duplicates a *slide* it should
+    not confuse that with duplicating the document.
+  - `TSA.DocumentArchive` is at field **3** in `KN.DocumentArchive`, not 15 or
+    8; `crate::metadata::super_field` is the one place that knows.
+  - The corpus filter in every test file now excludes password-protected
+    packages **by shape** (`.iwpv2`), not by name. A new test file that walks
+    `tests/fixtures/generated` needs the same three lines or it will trip over
+    `pages-locked.pages`.
+
+  What Phase 9 (hardening) should know:
+
+  - **Encryption detection is done and is exact**; what is left is the
+    package-*form* document (a real directory instead of a ZIP), which
+    `Package::read` does not handle at all, and the fuzzer's view of a hostile
+    `.iwpv2` or a hostile plist. `src/plist.rs` is new attack surface and was
+    written to refuse rather than guess — every unknown marker, every truncated
+    offset table and every nesting depth over 32 is an `Error::Format` — but it
+    has not been fuzzed.
+  - **`save_as_new` is the honest half of `from_template`.** Phase 9's
+    `Document::from_template` wants exactly this identity rewrite plus cleared
+    view state; the identity half is done, app-verified, and the rule it
+    follows is the app's own.
+  - **The preview-staleness rule now has a second data point**: a
+    password-protected package has **no previews at all**, so "leave them
+    alone" is not the only thing the apps do with them.
+  - `Properties.plist` carries `hasExternalReferenceOrMissingData` and
+    `hasUnmaterializedRemoteData`, both false everywhere. They are exactly the
+    flags a hardening phase would want to set or check, and nothing here has
+    seen a true one.
 
 ## Execution notes
 

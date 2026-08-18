@@ -2935,6 +2935,12 @@ Reached from three places, one per thing a comment can be put on:
 | an object | `TSD.DrawableArchive.comment` (6) → 3056 |
 | a cell | `TST.TableDataList` with `listType = 10` (`COMMENT_STORAGE`), entry field 10 → 3056 |
 
+**There is no resolved flag.** `TSD.CommentStorageArchive` has text, date,
+author, replies and a UUID, and the string `resolv` does not occur in any of
+the 121 descriptor files carved out of 15.3.1 — not in `TSD`, not in `TSK`, not
+in `TSCK`. Whatever records that a comment thread has been resolved is not in
+this schema, and nothing here invents a field for it.
+
 Two hops for text, not one: the table entry points at a `TSWP.HighlightArchive`
 and *that* points at the comment. The bubble drawn beside the page is a
 `TSWP.CommentInfoArchive` (2014), a `TSWP.ShapeInfoArchive` with the same
