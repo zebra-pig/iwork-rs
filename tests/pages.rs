@@ -695,3 +695,46 @@ fn pages_saves_the_document_with_the_header_this_crate_wrote() {
     // And the document Pages wrote still keeps every rule this crate checks.
     assert!(after.problems().is_empty(), "{:?}", after.problems());
 }
+
+/// Where a page number's **format** lives, which is not on the section.
+///
+/// A section says whether numbering continues or restarts and at what; what
+/// the number is *drawn as* is on the `TSWP.NumberAttachmentArchive` behind
+/// the `U+FFFC` in the footer. So a document can number one section in roman
+/// and another in arabic without either section archive saying anything.
+#[test]
+fn a_page_number_carries_its_own_format() {
+    let path = fixture!("pages-numbering.pages");
+    let doc = Document::open(&path).unwrap();
+    let numbered: Vec<_> = doc
+        .header_footers()
+        .into_iter()
+        .filter(|hf| !hf.numbers.is_empty())
+        .collect();
+    assert!(!numbered.is_empty(), "the footer holds a page number");
+    for entry in &numbered {
+        // The storage is a lone object-replacement character: the number is
+        // not text, it is a thing standing in for one.
+        assert_eq!(entry.text, "\u{FFFC}");
+        for number in &entry.numbers {
+            assert_eq!(number.kind, 0, "a page number, not a page count");
+            assert_eq!(number.kind_name(), "page number");
+            assert_eq!(number.format_name, "decimal");
+            assert_eq!(number.index, 0);
+            assert_eq!(number.storage, entry.storage);
+        }
+    }
+
+    // And a header with ordinary text has none.
+    let plain = doc
+        .header_footers()
+        .into_iter()
+        .find(|hf| hf.text == "1")
+        .or_else(|| {
+            doc.header_footers()
+                .into_iter()
+                .find(|hf| hf.text.is_empty())
+        })
+        .unwrap();
+    assert!(plain.numbers.is_empty());
+}

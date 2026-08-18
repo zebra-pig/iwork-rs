@@ -401,6 +401,7 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | Linked text boxes: the thread, its storage and its boxes in order | ✅ | — | — |
 | Table of contents: both settings archives, its rules and its entries | ✅ | — | — |
 | Columns: equal and non-equal, as fractions that add up to one | ✅ | — | — |
+| A page number's format is on the attachment, not on the section | ✅ | — | — |
 | No footnote body and no bookmark exists to decode, anywhere | ✅ | — | — |
 | Write a header or footer; only the touched stream is rewritten | ✅ | — | — |
 | **Pages opens the edited document, saves it, and the header is still there** | ✅ | — | — |

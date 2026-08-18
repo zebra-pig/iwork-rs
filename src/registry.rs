@@ -275,10 +275,15 @@ const ENTRIES: &[Entry] = &[
         confidence: Confirmed,
         app: App::Any,
     },
+    // A page number, a page count or a footnote mark, behind a `U+FFFC` in an
+    // ordinary attachment table. **This is where a page number's format
+    // lives** — not on the section, which only says whether numbering
+    // continues or restarts. 129 of them across the 640 bundled Pages
+    // templates and every one is `kind` 0, `number_format` 0, `"decimal"`.
     Entry {
         message_type: 2043,
         name: "TSWP.NumberAttachmentArchive",
-        confidence: Inferred,
+        confidence: Confirmed,
         app: App::Any,
     },
     // -- drawables -----------------------------------------------------------

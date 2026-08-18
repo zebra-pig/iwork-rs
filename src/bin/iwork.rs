@@ -529,11 +529,19 @@ fn sections(path: &str) -> Result<(), Error> {
                     } else {
                         format!("\"{}\"", oneline(&hf.text, 28))
                     };
+                    // A lone ▨ is not much of a report; say what stands there.
+                    let numbers: Vec<String> = hf
+                        .numbers
+                        .iter()
+                        .map(|n| format!("{} as {}", n.kind_name(), n.format_name))
+                        .collect();
                     format!(
-                        "    {:<6} {:<6} id={:<8} {text}",
+                        "    {:<6} {:<6} id={:<8} {text}{}{}",
                         hf.kind(),
                         hf.zone.as_str(),
-                        hf.storage
+                        hf.storage,
+                        if numbers.is_empty() { "" } else { " — " },
+                        numbers.join(", ")
                     )
                 })
                 .collect();

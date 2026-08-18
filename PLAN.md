@@ -1332,6 +1332,13 @@ fixture, and what the app accepted.
     one.
   - **A thread is numbered, not named.** `TSWP.FlowInfoArchive`'s only identity
     is `user_interface_identifier`.
+  - **A page number's *format* is not on the section.** The section says
+    continue-or-restart-at-N; what the number is drawn as is a
+    `TSWP.NumberAttachmentArchive` behind the `U+FFFC` in the footer, with
+    `kind` (page number / page count / footnote mark) and
+    `number_format_name`. 129 of them across the 640 templates and every one is
+    kind 0, format 0, `"decimal"`, so the field is Confirmed and its other
+    values are not.
   - **`orientation` is 0 even on the landscape templates.** Pages swaps width
     and height instead.
   - **A header's text is often not text.** The date in the newsletter's header

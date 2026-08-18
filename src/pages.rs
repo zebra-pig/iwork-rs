@@ -81,6 +81,9 @@ pub const TYPE_FLOW_INFO_CONTAINER: u32 = 2411;
 pub const TYPE_FOOTNOTE_REFERENCE: u32 = 2008;
 /// `TSWP.BookmarkFieldArchive`.
 pub const TYPE_BOOKMARK_FIELD: u32 = 2035;
+/// `TSWP.NumberAttachmentArchive` — a page number, a page count or a footnote
+/// mark, standing behind a `U+FFFC`.
+pub const TYPE_NUMBER_ATTACHMENT: u32 = 2043;
 
 /// Field numbers of `TP.DocumentArchive`.
 pub mod document_field {
@@ -337,6 +340,47 @@ impl Zone {
     }
 }
 
+/// A page number, page count or footnote mark standing in a header, a footer
+/// or the body — a `TSWP.NumberAttachmentArchive` (2043) behind a `U+FFFC`.
+///
+/// This is where the *format* of a page number lives. A section says whether
+/// numbering continues or restarts and at what
+/// ([`Section::page_number_kind`], [`Section::page_number_start`]); what the
+/// number is drawn as is here, on the attachment, and a document can therefore
+/// number one section in roman and another in arabic without either section
+/// archive saying so.
+///
+/// Across the 640 bundled Pages templates there are **129 of these and every
+/// one is `kind` 0, `format` 0, `"decimal"`** — so the other kinds and formats
+/// are named from the 15.3.1 schema and are Unverified.
+#[derive(Debug, Clone)]
+pub struct NumberField {
+    /// The storage it stands in.
+    pub storage: u64,
+    /// Character index of the `U+FFFC`.
+    pub index: u64,
+    /// The `TSWP.NumberAttachmentArchive`.
+    pub identifier: u64,
+    /// `TSWP.TextualAttachmentArchive.kind`: 0 page number, 1 page count,
+    /// 2 footnote mark.
+    pub kind: u64,
+    /// `number_format`, 0 everywhere it has been seen.
+    pub format: u64,
+    /// `number_format_name` — `"decimal"` in all 129 observed.
+    pub format_name: String,
+}
+
+impl NumberField {
+    pub fn kind_name(&self) -> &'static str {
+        match self.kind {
+            0 => "page number",
+            1 => "page count",
+            2 => "footnote mark",
+            _ => "unknown",
+        }
+    }
+}
+
 /// One header or footer storage, with everything needed to name it.
 #[derive(Debug, Clone)]
 pub struct HeaderFooter {
@@ -352,6 +396,9 @@ pub struct HeaderFooter {
     /// Header or footer.
     pub footer: bool,
     pub text: String,
+    /// The page numbers and page counts standing in it, if any. A footer whose
+    /// text is a lone `U+FFFC` usually has exactly one.
+    pub numbers: Vec<NumberField>,
 }
 
 impl HeaderFooter {
@@ -731,6 +778,7 @@ pub fn structure(document: &crate::Document) -> Option<Structure> {
                         zone,
                         footer,
                         text: document.storage_text(storage).unwrap_or_default(),
+                        numbers: number_fields(&archives, storage),
                     });
                 }
             }
@@ -884,6 +932,43 @@ pub fn structure(document: &crate::Document) -> Option<Structure> {
         body_storage,
         bookmarks,
     })
+}
+
+/// The page numbers and page counts standing in one storage.
+///
+/// They are `table_attachment` (field 9) entries like an anchored image, told
+/// apart by what they point at: a `TSWP.NumberAttachmentArchive` rather than a
+/// `TSWP.DrawableAttachmentArchive`.
+fn number_fields(archives: &BTreeMap<u64, (u32, Message)>, storage: u64) -> Vec<NumberField> {
+    let Some((_, archive)) = archives.get(&storage) else {
+        return Vec::new();
+    };
+    let Some(table) = archive.bytes(9).and_then(decode_nested) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (index, object) in crate::text::entry_indices(&table, crate::text::Anchoring::Character) {
+        let Some(identifier) = object else { continue };
+        let Some((message_type, attachment)) = archives.get(&identifier) else {
+            continue;
+        };
+        if *message_type != TYPE_NUMBER_ATTACHMENT {
+            continue;
+        }
+        out.push(NumberField {
+            storage,
+            index,
+            identifier,
+            kind: attachment
+                .bytes(1)
+                .and_then(decode_nested)
+                .and_then(|super_| super_.varint(2))
+                .unwrap_or(0),
+            format: attachment.varint(2).unwrap_or(0),
+            format_name: text(attachment, 4),
+        });
+    }
+    out
 }
 
 /// One paragraph range and the column layout in force over it.

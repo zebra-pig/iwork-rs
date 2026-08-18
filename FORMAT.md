@@ -1864,6 +1864,29 @@ rendered to; replacing the text removes the field and freezes the date. A page
 number is a `U+FFFC` with an attachment behind it, and replacing the text
 removes that too.
 
+### Where a page number's format lives
+
+Not on the section. `TP.SectionArchive` says whether numbering continues or
+restarts and at what; what the number is *drawn as* is a
+`TSWP.NumberAttachmentArchive` (2043) behind the `U+FFFC`, reached through the
+storage's ordinary `table_attachment` (field 9):
+
+```
+TSWP.NumberAttachmentArchive
+  1  super → TSWP.TextualAttachmentArchive
+       1  string_equivalent
+       2  kind    0 page number, 1 page count, 2 footnote mark
+  2  number_format
+  3  string_value
+  4  number_format_name     "decimal"
+```
+
+So a document may number one section in roman and another in arabic with
+neither section archive saying anything about it. Across the 640 bundled Pages
+templates there are **129 of these and every one is kind 0, format 0,
+`"decimal"`** — the field is Confirmed, the other kinds and formats are
+Unverified.
+
 ### Page templates — `TP.PageTemplateArchive` (10017)
 
 Page-layout documents only.
