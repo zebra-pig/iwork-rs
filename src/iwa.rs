@@ -46,8 +46,18 @@ pub struct ArchiveObject {
 }
 
 impl ArchiveObject {
+    /// The first message's payload, or nothing.
+    ///
+    /// An `ArchiveInfo` with no `MessageInfo` in it is not something any app
+    /// writes — every object in the corpus has at least one — but it is three
+    /// bytes to write by hand, and indexing `messages[0]` for it was a panic
+    /// in the middle of an otherwise ordinary document. `message_type` has
+    /// always answered 0 for the same object; this answers no bytes.
     pub fn payload(&self) -> &[u8] {
-        &self.messages[0].payload
+        self.messages
+            .first()
+            .map(|m| m.payload.as_slice())
+            .unwrap_or_default()
     }
 
     pub fn message_type(&self) -> u32 {
@@ -70,6 +80,23 @@ pub fn decompress(data: &[u8]) -> Result<Vec<u8>, String> {
         let end = pos + len;
         if end > data.len() {
             return Err("truncated IWA chunk body".into());
+        }
+        // What the block *says* it decompresses to, before anything allocates
+        // that much. A raw Snappy block begins with the uncompressed length as
+        // a varint, and nothing stops a hostile one from being four gigabytes
+        // in five bytes: `snap` believes it and allocates. 24,358 blocks — the
+        // 26 fixtures and all 901 bundled templates — are at most 65,536 bytes
+        // and not one is over, which is the block size Apple's writer and this
+        // one both use.
+        match snap::raw::decompress_len(&data[pos..end]) {
+            Ok(size) if size > BLOCK_SIZE => {
+                return Err(format!(
+                    "IWA chunk claims to decompress to {size} bytes, over the {BLOCK_SIZE}-byte \
+                     block size"
+                ))
+            }
+            Ok(_) => {}
+            Err(e) => return Err(format!("snappy: {e}")),
         }
         let block = snap::raw::Decoder::new()
             .decompress_vec(&data[pos..end])
@@ -105,6 +132,7 @@ pub fn parse(data: &[u8]) -> Result<Vec<ArchiveObject>, String> {
         let mut identifier = 0u64;
         let mut messages = Vec::new();
         let mut extra = Vec::new();
+        let mut claimed = 0usize;
 
         for field in &info.fields {
             match (field.number, &field.value) {
@@ -127,6 +155,21 @@ pub fn parse(data: &[u8]) -> Result<Vec<ArchiveObject>, String> {
                             (3, Value::Varint(v)) => len = *v as usize,
                             _ => mi_extra.push(f.clone()),
                         }
+                    }
+                    // `length` is a varint out of the file and the payload it
+                    // describes has to be *in* the file: a stream saying its
+                    // next message is 2^60 bytes long would otherwise be a
+                    // request to allocate 2^60 bytes, and the reader would die
+                    // of a corrupt integer rather than report one. The bytes
+                    // are read below; this only refuses to reserve room for
+                    // more than the stream can possibly hold.
+                    let remaining = stream.len() - reader.pos;
+                    claimed = claimed.saturating_add(len);
+                    if claimed > remaining {
+                        return Err(format!(
+                            "object {identifier}: its messages claim {claimed} bytes of payload \
+                             and {remaining} remain in the stream"
+                        ));
                     }
                     messages.push(ArchiveMessage {
                         message_type,
