@@ -368,6 +368,12 @@ pub struct Slide {
     /// answers `-1` for.
     pub number: Option<usize>,
     pub skipped: bool,
+    /// `KN.SlideNodeArchive.isSlideNumberVisible` (18) — and **this is where
+    /// the app's document-level `slide numbers showing` lives**. Turning it on
+    /// in Keynote sets the flag on every node and leaves
+    /// `KN.ShowArchive.slideNumbersVisible` (6) absent; the document property
+    /// is "every slide shows its number", not a switch of its own.
+    pub number_visible: bool,
     /// The layout it is built on — a `KN.SlideArchive` in a
     /// `Index/TemplateSlide-*.iwa`.
     pub layout: Option<u64>,
@@ -473,6 +479,10 @@ pub struct Show {
     /// number the app's `width` and `height` report.
     pub width: f32,
     pub height: f32,
+    /// `KN.ShowArchive.slideNumbersVisible` (6). **Absent from every deck in
+    /// this corpus, including the one whose numbers are on**: the app writes
+    /// the per-slide flag instead. See [`Slide::number_visible`] and
+    /// [`Show::numbers_shown_on`].
     pub slide_numbers_visible: bool,
     pub loop_presentation: bool,
     /// 0 normal, 1 auto-play, 2 hyperlinks only.
@@ -499,6 +509,12 @@ impl Show {
             2 => "hyperlinks only",
             _ => "unknown",
         }
+    }
+
+    /// How many slides show their number — the app's document-level `slide
+    /// numbers showing`, which is true when this is every slide.
+    pub fn numbers_shown_on(&self) -> usize {
+        self.slides.iter().filter(|s| s.number_visible).count()
     }
 
     /// The slide with this identifier, whichever way it was named — by the
@@ -741,6 +757,7 @@ pub fn show(document: &crate::Document) -> Option<Show> {
             continue;
         };
         let skipped = flag(node_archive, node_field::SKIPPED, false);
+        let number_visible = flag(node_archive, node_field::SLIDE_NUMBER_VISIBLE, false);
         // The app numbers the slides it will show, and answers -1 for the rest.
         let visible = if skipped {
             None
@@ -825,6 +842,7 @@ pub fn show(document: &crate::Document) -> Option<Show> {
             index,
             number: visible,
             skipped,
+            number_visible,
             layout: reference(archive, slide_field::TEMPLATE_SLIDE),
             layout_name: reference(archive, slide_field::TEMPLATE_SLIDE)
                 .and_then(|id| layout_name.get(&id).cloned())

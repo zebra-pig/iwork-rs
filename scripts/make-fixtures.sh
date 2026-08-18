@@ -371,6 +371,14 @@ copy_template numbers-links \
 osa_warm key
 build keynote-deck key 240 "$png"
 
+# The deck the *show* is read out of: eight slides across six layouts, notes on
+# seven of them, a skipped slide in the middle and another at the end, slide
+# numbers turned on, a free text box beside the placeholders on one slide, and
+# five different transitions. `keynote-deck` covers the drawables on a slide;
+# this one covers the inventory — layouts, numbering, skipping, notes and
+# transition names.
+build keynote-slides key 300
+
 # One of every drawable a script can put on a slide, with the properties the
 # app can read back — geometry, rotation, opacity, reflection, lock — plus an
 # image whose file the app replaces, which is how a *cropped* image gets into

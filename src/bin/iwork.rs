@@ -902,14 +902,12 @@ fn slides(path: &str) -> Result<(), Error> {
         show.height,
         theme
     );
-    let mut playback = vec![format!(
-        "slide numbers {}",
-        if show.slide_numbers_visible {
-            "shown"
-        } else {
-            "hidden"
-        }
-    )];
+    let shown = show.numbers_shown_on();
+    let mut playback = vec![match shown {
+        0 => "slide numbers hidden".to_string(),
+        n if n == show.slides.len() => "slide numbers shown".to_string(),
+        n => format!("slide numbers shown on {n} of {}", show.slides.len()),
+    }];
     playback.push(format!("presentation {}", show.mode_name()));
     if show.loop_presentation {
         playback.push("loops".into());

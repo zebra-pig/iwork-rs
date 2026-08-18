@@ -4,8 +4,11 @@
 -- slide's order, its layout, its title, its body, its presenter notes and its
 -- skipped flag is what those things *are*; a reader that disagrees is wrong.
 --
--- Output, one record per line, tab-separated, with tabs and newlines inside a
--- text escaped as \t and \n so that one slide is always one line:
+-- Output, one record per line, tab-separated, with tabs and line breaks inside
+-- a text escaped as \t, \n and \r so that one slide is always one line. The
+-- two line breaks are kept apart on purpose: Keynote separates the paragraphs
+-- of a body placeholder with a **carriage return**, and a reader that folded
+-- them together could not tell that it had them right.
 --
 --   show   <slide count>  <layout count>  <width>  <height>  <slide numbers showing>  <theme name>
 --   layout <index>  <name>
@@ -59,7 +62,7 @@ on escape(t)
 	set out to parts as text
 	set text item delimiters to return
 	set parts to text items of out
-	set text item delimiters to "\\n"
+	set text item delimiters to "\\r"
 	set out to parts as text
 	set text item delimiters to ""
 	return out
