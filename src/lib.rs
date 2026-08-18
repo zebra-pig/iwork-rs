@@ -143,6 +143,15 @@ pub enum Error {
         storage: u64,
         field: u32,
     },
+    /// The storage carries `table_insertion` (21) or `table_deletion` (22):
+    /// change tracking is on and there are changes in this text. A tracked
+    /// deletion leaves its characters *in* the storage, so an edit through one
+    /// is not the run remap it looks like — see [`annotations`]. Nothing here
+    /// can make Pages produce one to watch, so this crate declines.
+    TrackedChanges {
+        storage: u64,
+        field: u32,
+    },
     /// Text to be written contains a character that only means something with
     /// an object behind it — see [`text::UNWRITABLE`].
     UnwritableCharacter {
@@ -217,6 +226,16 @@ impl std::fmt::Display for Error {
                 f,
                 "storage {storage}: field {field} is not an attribute table this crate \
                  knows, and an edit would have to guess how its entries are anchored"
+            ),
+            Error::TrackedChanges { storage, field } => write!(
+                f,
+                "storage {storage} carries {} — change tracking is on and this text has \
+                 tracked changes in it. A tracked deletion keeps its characters, so an \
+                 edit through one is not a plain remap, and nothing available here can \
+                 make the app perform one to be watched",
+                text::table(*field)
+                    .map(|t| t.name)
+                    .unwrap_or("a change table")
             ),
             Error::Encrypted { hint } => write!(
                 f,

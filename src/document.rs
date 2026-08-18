@@ -530,6 +530,22 @@ impl Document {
                     });
                 }
 
+                // Change tracking, before anything is measured. Both tables
+                // *look* like run tables and would remap without complaint;
+                // `table_deletion` covers characters that are still in the text
+                // and are not going to be shown, which is a different thing
+                // from a style run and would need a probe nothing here can
+                // perform. See `crate::annotations`.
+                if let Some(field) = text::CHANGE_TABLES
+                    .iter()
+                    .find(|field| storage.get(**field).is_some())
+                {
+                    return Err(Error::TrackedChanges {
+                        storage: identifier,
+                        field: *field,
+                    });
+                }
+
                 let old = text::read(&storage);
                 let length = text::length(&old);
                 let (start, end) = (range.start, range.end.max(range.start));
