@@ -1110,14 +1110,43 @@ const ENTRIES: &[Entry] = &[
         confidence: Confirmed,
         app: InKeynote,
     },
-    // One per `Index/TemplateSlide-*.iwa`, and what a slide's field 1 points at.
-    // `KN.MasterSlideArchive` was the obvious guess and is not a message that
-    // exists; the role is clear from the document, the name is not, so it does
-    // not get one.
+    // The document's view state — canvas scale and offset, which slide is being
+    // edited, which are collapsed. One per deck, in `Index/ViewState.iwa`.
+    Entry {
+        message_type: 3,
+        name: "KN.UIStateArchive",
+        confidence: Confirmed,
+        app: InKeynote,
+    },
+    // The four fields 5, 6, 20 and 30 of a slide point at these, and field 2
+    // says which of the five kinds it is: 1 slide number, 2 title, 3 body,
+    // 4 object well, 0 unclassified. Every one of the 86 in `keynote-deck` is a
+    // `TSWP.ShapeInfoArchive` at field 1 with that one byte beside it.
+    Entry {
+        message_type: 7,
+        name: "KN.PlaceholderArchive",
+        confidence: Confirmed,
+        app: InKeynote,
+    },
+    // `KN.SlideArchive.builds` (2) points at these. **No document in this
+    // corpus has one**, because nothing in Keynote's dictionary makes a build —
+    // so the type is named from the 15.3.1 registry and the count this crate
+    // reports is always zero.
+    Entry {
+        message_type: 8,
+        name: "KN.BuildArchive",
+        confidence: Inferred,
+        app: InKeynote,
+    },
+    // What a slide's field 1 points at, one per layout and shared by every
+    // slide on it. It lives in the document stylesheet, not in the layout's own
+    // stream, which is why counting them per `Index/TemplateSlide-*.iwa` gave
+    // the wrong idea of what it was. Named by the 15.3.1 registry; the shape
+    // agrees — a `TSS.StyleArchive` at field 1.
     Entry {
         message_type: 9,
-        name: "KN slide-template archive",
-        confidence: Unverified,
+        name: "KN.SlideStyleArchive",
+        confidence: Confirmed,
         app: InKeynote,
     },
     // Names itself: field 1.3 is the theme name, `"58_Startup_Simple_PM"`.
@@ -1125,6 +1154,86 @@ const ENTRIES: &[Entry] = &[
         message_type: 10,
         name: "KN.ThemeArchive",
         confidence: Confirmed,
+        app: InKeynote,
+    },
+    // The presenter notes, and nothing but: one required reference to the
+    // `TSWP.StorageArchive` of kind 4 that holds them. Seven bytes on the wire.
+    Entry {
+        message_type: 15,
+        name: "KN.NoteArchive",
+        confidence: Confirmed,
+        app: InKeynote,
+    },
+    // A recorded presentation — ground rule 8's "read and pass through, never
+    // author". Nothing here has one; `KN.ShowArchive.recording` (7) is where it
+    // would hang.
+    Entry {
+        message_type: 16,
+        name: "KN.RecordingArchive",
+        confidence: Inferred,
+        app: InKeynote,
+    },
+    // One per slide layout, holding the layout's identifier-to-style map.
+    Entry {
+        message_type: 19,
+        name: "KN.ClassicStylesheetRecordArchive",
+        confidence: Inferred,
+        app: InKeynote,
+    },
+    // `KN.ShowArchive.soundtrack` (17) points at it, and every deck here has
+    // one: volume 1, mode "play once", no movie media.
+    Entry {
+        message_type: 21,
+        name: "KN.Soundtrack",
+        confidence: Confirmed,
+        app: InKeynote,
+    },
+    // The three `Index/ViewState.iwa` companions of `KN.UIStateArchive`.
+    Entry {
+        message_type: 23,
+        name: "KN.DesktopUILayoutArchive",
+        confidence: Confirmed,
+        app: InKeynote,
+    },
+    Entry {
+        message_type: 24,
+        name: "KN.CanvasSelectionArchive",
+        confidence: Confirmed,
+        app: InKeynote,
+    },
+    Entry {
+        message_type: 25,
+        name: "KN.SlideCollectionSelectionArchive",
+        confidence: Confirmed,
+        app: InKeynote,
+    },
+    // Eighteen in the document stylesheet of `keynote-deck` — the theme's
+    // motion-background presets, listed from `KN.ThemeArchive` field 10.
+    Entry {
+        message_type: 26,
+        name: "KN.MotionBackgroundStyleArchive",
+        confidence: Confirmed,
+        app: InKeynote,
+    },
+    // The theme's live-video sources, and the collection field 9 names.
+    Entry {
+        message_type: 184,
+        name: "KN.LiveVideoSource",
+        confidence: Confirmed,
+        app: InKeynote,
+    },
+    Entry {
+        message_type: 185,
+        name: "KN.LiveVideoSourceCollection",
+        confidence: Confirmed,
+        app: InKeynote,
+    },
+    // One stage of a build; `KN.SlideArchive.buildChunks` (43) lists them.
+    // Unseen for the same reason as the builds themselves.
+    Entry {
+        message_type: 153,
+        name: "KN.BuildChunkArchive",
+        confidence: Inferred,
         app: InKeynote,
     },
     // Seven of them, every one identifying itself as `dropcap-style-N` or
@@ -1216,7 +1325,7 @@ mod tests {
     #[test]
     fn confidence_shows_in_the_label() {
         assert_eq!(describe_in(Kind::Keynote, 5), "KN.SlideArchive");
-        assert_eq!(describe_in(Kind::Keynote, 9), "KN slide-template archive??");
+        assert_eq!(describe_in(Kind::Keynote, 8), "KN.BuildArchive?");
         assert_eq!(describe_in(Kind::Numbers, 2), "TN.SheetArchive??");
         assert_eq!(describe(999999), "? #999999");
     }
