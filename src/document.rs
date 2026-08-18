@@ -1103,6 +1103,241 @@ impl Document {
         })
     }
 
+    /// Swap the bytes an image is drawn from.
+    ///
+    /// `target` is an image drawable or a media-registry identifier, as
+    /// `iwork drawables` and `iwork media` print them. The bytes are written
+    /// into the package, the `DataInfo` is brought back into step — digest,
+    /// name, byte length and recorded pixel size — and every drawable showing
+    /// that picture has its `naturalSize`, its traced outline and its
+    /// "was replaced" flag updated, which is what Keynote did when a script
+    /// gave one of its images a new file.
+    ///
+    /// **What is deliberately not touched: the frame.** The app re-fits a
+    /// replaced picture by scaling it to fill the old window and cropping the
+    /// overflow with a mask — an 8 × 8 frame given a 32 × 24 picture came back
+    /// as a 10.67 × 8 image behind an 8 × 8 mask offset by 1.33. This does the
+    /// simpler thing and leaves the geometry alone, so a picture of a different
+    /// shape is drawn stretched; [`crate::MediaReplacement::aspect_note`] says
+    /// so, and `set_geometry` is how to fix it.
+    ///
+    /// **What it refuses, and why this method exists at all.** A drawable can
+    /// carry state that sits *between* the stored pixels and what is drawn: a
+    /// crop, a mask shaped like something other than a rectangle, an Instant
+    /// Alpha knockout path, tone and colour adjustments, cached renderings of
+    /// the old pixels, a traced outline of them. None of it is in the file
+    /// being swapped in, and none of it can be recomputed here. Replacing bytes
+    /// under any of it produces a document that opens, reports the same
+    /// geometry through AppleScript, passes every structural check — and
+    /// renders the wrong thing. So it is refused by name, with
+    /// [`Error::NonDestructiveEdit`] listing what was found. An *identity* mask
+    /// — the whole picture, no crop, which is what the app installs when it
+    /// replaces an image — is not an objection.
+    pub fn replace_media(
+        &mut self,
+        target: u64,
+        bytes: &[u8],
+        preferred_name: &str,
+        pixel_size: Option<(f32, f32)>,
+    ) -> Result<crate::media::MediaReplacement, Error> {
+        use crate::drawable::image_field;
+        use crate::media::{self, field as data_field};
+
+        let drawables = self.drawables();
+        let data = match drawables
+            .iter()
+            .find(|d| d.identifier == target)
+            .and_then(|d| d.media.as_ref())
+            .and_then(|m| m.data)
+        {
+            Some(data) => data,
+            None => target,
+        };
+        let file = self
+            .data_files()
+            .into_iter()
+            .find(|d| d.identifier == data)
+            .ok_or_else(|| Error::Format(format!("no media registered as {data}")))?;
+
+        // The edit state first, and before anything else that could refuse:
+        // it is the answer a caller most needs to hear, and a theme asset that
+        // is *also* cropped should say so.
+        let users: Vec<&crate::drawable::Drawable> = drawables
+            .iter()
+            .filter(|d| d.media.as_ref().and_then(|m| m.data) == Some(data))
+            .collect();
+        for drawable in &users {
+            let objections = drawable
+                .edit_state
+                .as_ref()
+                .map(|state| state.objections())
+                .unwrap_or_default();
+            if !objections.is_empty() {
+                return Err(Error::NonDestructiveEdit {
+                    drawable: drawable.identifier,
+                    reasons: objections,
+                });
+            }
+        }
+
+        let was = file.entry_name().ok_or_else(|| {
+            Error::Format(format!(
+                "media {data} ({}) lives in the app's theme bundle rather than in the \
+                 document, so there are no bytes here to replace",
+                file.original_name
+            ))
+        })?;
+
+        let new_size = match pixel_size.or_else(|| media::pixel_size(bytes)) {
+            Some(size) => size,
+            None => {
+                return Err(Error::Format(
+                    "the replacement is not a PNG or a JPEG, so its pixel size cannot be \
+                     read here — pass it explicitly"
+                        .into(),
+                ))
+            }
+        };
+        let digest = media::sha1(bytes);
+        let now = format!("Data/{}", media::stored_name(preferred_name, data));
+
+        // The registry entry first: if the metadata cannot be rewritten,
+        // nothing has been touched.
+        let mut old_pixel_size = None;
+        let metadata = self
+            .objects()
+            .find(|(_, object)| object.message_type() == crate::TYPE_PACKAGE_METADATA)
+            .map(|(_, object)| object.identifier)
+            .ok_or_else(|| Error::Format("no TSP.PackageMetadata".into()))?;
+        let mut archive = self.archive_of(metadata)?;
+        let mut found = false;
+        for field in &mut archive.fields {
+            if field.number != 4 {
+                continue;
+            }
+            let Value::Bytes(raw) = &field.value else {
+                continue;
+            };
+            let Some(mut info) = crate::pb::decode_nested(raw) else {
+                continue;
+            };
+            if info.varint(data_field::IDENTIFIER) != Some(data) {
+                continue;
+            }
+            old_pixel_size = media::attribute_pixel_size(&info);
+            info.set_in_order(data_field::DIGEST, Value::Bytes(digest.to_vec()));
+            info.set_in_order(
+                data_field::PREFERRED_FILE_NAME,
+                Value::Bytes(preferred_name.as_bytes().to_vec()),
+            );
+            info.set_in_order(
+                data_field::FILE_NAME,
+                Value::Bytes(
+                    now.strip_prefix("Data/")
+                        .unwrap_or(&now)
+                        .as_bytes()
+                        .to_vec(),
+                ),
+            );
+            if info.get(data_field::MATERIALIZED_LENGTH).is_some() {
+                info.set_in_order(
+                    data_field::MATERIALIZED_LENGTH,
+                    Value::Varint(bytes.len() as u64),
+                );
+            }
+            media::set_attribute_pixel_size(&mut info, new_size.0, new_size.1);
+            field.value = Value::Bytes(info.encode());
+            found = true;
+            break;
+        }
+        if !found {
+            return Err(Error::Format(format!(
+                "the media registry has no entry {data}"
+            )));
+        }
+        self.set_archive(metadata, &archive)?;
+
+        // Then the bytes, keeping the entry where it was in the package.
+        match self
+            .package
+            .entries
+            .iter_mut()
+            .find(|(name, _)| *name == was)
+        {
+            Some(entry) => {
+                entry.0 = now.clone();
+                entry.1 = bytes.to_vec();
+            }
+            None => self.package.set(&now, bytes.to_vec()),
+        }
+
+        // Then everything that has to agree with the new picture.
+        let mut updated = Vec::new();
+        for drawable in &users {
+            if drawable.kind != crate::drawable::Kind::Image {
+                continue;
+            }
+            let mut archive = self.archive_of(drawable.identifier)?;
+            let body_path: Vec<u32> =
+                drawable.path[..drawable.path.len().saturating_sub(1)].to_vec();
+            let mut body = if body_path.is_empty() {
+                archive.clone()
+            } else {
+                match style::get_path(&archive, &body_path) {
+                    Some(Value::Bytes(raw)) => crate::pb::decode_nested(&raw).unwrap_or_default(),
+                    _ => continue,
+                }
+            };
+            let mut point = body
+                .bytes(image_field::NATURAL_SIZE)
+                .and_then(crate::pb::decode_nested)
+                .unwrap_or_default();
+            point.set_in_order(1, Value::Fixed32(new_size.0.to_le_bytes()));
+            point.set_in_order(2, Value::Fixed32(new_size.1.to_le_bytes()));
+            body.set_in_order(image_field::NATURAL_SIZE, Value::Bytes(point.encode()));
+
+            // The traced outline is the picture's own rectangle and the app
+            // rewrites it with the picture. Anything else was refused above.
+            if body.get(image_field::TRACED_PATH).is_some() {
+                body.set_in_order(
+                    image_field::TRACED_PATH,
+                    Value::Bytes(
+                        crate::drawable::natural_rectangle(new_size.0, new_size.1).encode(),
+                    ),
+                );
+            }
+            let flags = body.varint(image_field::FLAGS).unwrap_or(0)
+                | u64::from(crate::drawable::media_flag::WAS_REPLACED);
+            body.set_in_order(image_field::FLAGS, Value::Varint(flags));
+
+            if body_path.is_empty() {
+                archive = body;
+            } else {
+                style::set_path(&mut archive, &body_path, Some(Value::Bytes(body.encode())))
+                    .map_err(|e| Error::Format(format!("drawable {}: {e}", drawable.identifier)))?;
+            }
+            self.set_archive(drawable.identifier, &archive)?;
+            updated.push(drawable.identifier);
+        }
+
+        let aspect_changed = old_pixel_size.is_some_and(|(w, h)| {
+            w > 0.0
+                && h > 0.0
+                && ((w / h) - (new_size.0 / new_size.1)).abs() > 0.01 * (w / h).max(0.01)
+        });
+        Ok(crate::media::MediaReplacement {
+            data,
+            was,
+            now,
+            digest,
+            bytes: bytes.len(),
+            old_pixel_size,
+            new_pixel_size: new_size,
+            drawables: updated,
+            aspect_changed,
+        })
+    }
+
     /// Write a geometry back at the field path the drawable was found through.
     fn write_geometry(
         &mut self,
@@ -1828,6 +2063,11 @@ impl Document {
             }
         }
 
+        // Drawables and the media registry check each other. Every rule here
+        // is one the apps keep across the whole corpus, and one a writer can
+        // break without the document failing to open.
+        problems.extend(self.media_problems());
+
         for (component, object, target) in self.undeclared_references() {
             problems.push(format!(
                 "object {object} refers to {target} in another component, which \
@@ -1846,6 +2086,130 @@ impl Document {
                 ));
             }
             problems.extend(table.audit());
+        }
+        problems
+    }
+
+    /// Everything about drawables and media that looks wrong.
+    ///
+    /// Five rules, each of them kept by every document in the corpus and each
+    /// of them breakable by a writer without the app noticing at open time:
+    ///
+    /// * **A data reference resolves.** A drawable naming media the registry
+    ///   does not list draws nothing, silently.
+    /// * **A stored file is there and its digest is its bytes.** The digest is
+    ///   a raw SHA-1 and iWork uses it to recognise the file; writing new bytes
+    ///   under an old digest is accepted when the document opens and is a lie
+    ///   afterwards.
+    /// * **`MessageInfo.data_references` lists what the payload uses.** The
+    ///   framing carries a packed list of the data ids inside each object, and
+    ///   across the corpus it is exactly the set the archive names — 12
+    ///   drawables in two documents, no extras and none missing.
+    /// * **A mask's parent is the image that names it.** The link is written
+    ///   both ways and the pair is meaningless if they disagree.
+    /// * **A drawable's parent exists.**
+    fn media_problems(&self) -> Vec<String> {
+        use crate::pb::Reader;
+        let mut problems = Vec::new();
+        let files = self.data_files();
+        let known: BTreeSet<u64> = files.iter().map(|f| f.identifier).collect();
+
+        for file in &files {
+            let Some(entry) = file.entry_name() else {
+                continue;
+            };
+            let Some(bytes) = self.package.get(&entry) else {
+                problems.push(format!(
+                    "media {} names {entry}, which the package does not have",
+                    file.identifier
+                ));
+                continue;
+            };
+            if !file.digest.is_empty() && file.digest != crate::media::sha1(bytes) {
+                problems.push(format!(
+                    "media {}: the digest is not the SHA-1 of {entry}",
+                    file.identifier
+                ));
+            }
+        }
+
+        let drawables = self.drawables();
+        for drawable in &drawables {
+            if let Some(parent) = drawable.parent {
+                if self.object(parent).is_none() {
+                    problems.push(format!(
+                        "drawable {} has parent {parent}, which does not exist",
+                        drawable.identifier
+                    ));
+                }
+            }
+            if let Some(mask) = drawable.mask() {
+                match self.drawable(mask) {
+                    Some(mask_drawable) if mask_drawable.parent == Some(drawable.identifier) => {}
+                    Some(mask_drawable) => problems.push(format!(
+                        "image {} is masked by {mask}, whose parent is {:?}",
+                        drawable.identifier, mask_drawable.parent
+                    )),
+                    None => problems.push(format!(
+                        "image {} is masked by {mask}, which does not exist",
+                        drawable.identifier
+                    )),
+                }
+            }
+
+            let used: BTreeSet<u64> = drawable
+                .media
+                .iter()
+                .flat_map(|media| [media.data, media.poster])
+                .flatten()
+                .collect();
+            for data in &used {
+                if !known.contains(data) {
+                    problems.push(format!(
+                        "drawable {} refers to media {data}, which the registry does not list",
+                        drawable.identifier
+                    ));
+                }
+            }
+            if used.is_empty() {
+                continue;
+            }
+            let Some((_, object)) = self.object(drawable.identifier) else {
+                continue;
+            };
+            let declared: BTreeSet<u64> = object
+                .messages
+                .iter()
+                .flat_map(|message| message.extra.iter())
+                .filter(|field| field.number == 6)
+                .filter_map(|field| match &field.value {
+                    Value::Bytes(raw) => Some(raw),
+                    _ => None,
+                })
+                .flat_map(|raw| {
+                    let mut reader = Reader::new(raw);
+                    let mut out = Vec::new();
+                    while !reader.done() {
+                        match reader.varint() {
+                            Ok(value) => out.push(value),
+                            Err(_) => break,
+                        }
+                    }
+                    out
+                })
+                .collect();
+            let missing: Vec<String> = used
+                .difference(&declared)
+                .map(u64::to_string)
+                .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                problems.push(format!(
+                    "drawable {} uses media {} without listing it in the object's \
+                     data references",
+                    drawable.identifier,
+                    missing.join(", ")
+                ));
+            }
         }
         problems
     }

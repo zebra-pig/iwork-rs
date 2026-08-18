@@ -22,10 +22,14 @@ drawables and media
 
   iwork drawables <file>                   every placed object: geometry, style,
                                            media and non-destructive edit state
+  iwork media     <file>                   every media file, its digest and its users
   iwork set-geometry <file> <id> <x> <y> [<w> <h>] <out>
                                            move or resize one drawable
+  iwork replace-media <file> <id> <image> <out>
+                                           swap the bytes an image is drawn from
 
-An <id> is an object identifier as printed by `iwork drawables`.
+An <id> is an object identifier as printed by `iwork drawables`; for
+replace-media it may also be a media identifier as printed by `iwork media`.
 Positions and sizes are in points, and are the rectangle the app reports — for
 a cropped image that is the mask's window, not the picture's own rectangle.
 
@@ -116,10 +120,12 @@ fn main() -> ExitCode {
             apply_style(file, storage, start, end, style, out)
         }
         ["drawables", file] => drawables(file),
+        ["media", file] => media(file),
         ["set-geometry", file, id, x, y, out] => set_geometry(file, id, x, y, None, out),
         ["set-geometry", file, id, x, y, w, h, out] => {
             set_geometry(file, id, x, y, Some((w, h)), out)
         }
+        ["replace-media", file, target, image, out] => replace_media(file, target, image, out),
         ["tables", file] => tables(file),
         ["cells", file, table] => cells(file, table, false),
         ["cells", file, table, "--raw"] => cells(file, table, true),
@@ -569,6 +575,61 @@ fn drawables(path: &str) -> Result<(), Error> {
     Ok(())
 }
 
+/// Every media file the package registers, and what points at it.
+fn media(path: &str) -> Result<(), Error> {
+    let doc = Document::open(path)?;
+    let files = doc.data_files();
+    if files.is_empty() {
+        println!("no media");
+        return Ok(());
+    }
+    let drawables = doc.drawables();
+    for file in &files {
+        let users: Vec<String> = drawables
+            .iter()
+            .filter(|d| d.media.as_ref().and_then(|m| m.data) == Some(file.identifier))
+            .map(|d| format!("{} ({})", d.identifier, d.kind.as_str()))
+            .collect();
+        let posters: Vec<String> = drawables
+            .iter()
+            .filter(|d| d.media.as_ref().and_then(|m| m.poster) == Some(file.identifier))
+            .map(|d| format!("{} poster", d.identifier))
+            .collect();
+        let stored = match file.entry_name() {
+            Some(entry) => match doc.package().get(&entry) {
+                Some(bytes) => format!("{entry} ({} bytes)", bytes.len()),
+                None => format!("{entry} — MISSING from the package"),
+            },
+            None => format!(
+                "{} in {} (theme asset)",
+                file.original_name, file.asset_path
+            ),
+        };
+        println!("  {:<6} {stored}", file.identifier);
+        println!(
+            "         digest {} {}",
+            file.digest
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>(),
+            match file
+                .entry_name()
+                .and_then(|e| doc.package().get(&e).map(iwork::media::sha1))
+            {
+                Some(actual) if actual.as_slice() == file.digest => "(matches the bytes)",
+                Some(_) => "(DOES NOT match the bytes)",
+                None => "",
+            }
+        );
+        let used = [users, posters].concat();
+        if !used.is_empty() {
+            println!("         used by {}", used.join(", "));
+        }
+    }
+    println!("\n{} media file(s)", files.len());
+    Ok(())
+}
+
 fn set_geometry(
     path: &str,
     id: &str,
@@ -611,6 +672,43 @@ fn set_geometry(
     );
     if let Some(mask) = change.mask {
         println!("  mask {mask} scaled with it");
+    }
+    save(&doc, out)
+}
+
+fn replace_media(path: &str, target: &str, image: &str, out: &str) -> Result<(), Error> {
+    let target = identifier(target)?;
+    let bytes = std::fs::read(image)?;
+    let name = std::path::Path::new(image)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("replacement");
+
+    let mut doc = Document::open(path)?;
+    let replacement = doc.replace_media(target, &bytes, name, None)?;
+    println!(
+        "media {}: {} -> {} ({} bytes, {:.0} × {:.0})",
+        replacement.data,
+        replacement.was,
+        replacement.now,
+        replacement.bytes,
+        replacement.new_pixel_size.0,
+        replacement.new_pixel_size.1
+    );
+    println!(
+        "  digest {}",
+        replacement
+            .digest
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    );
+    if !replacement.drawables.is_empty() {
+        let list: Vec<String> = replacement.drawables.iter().map(u64::to_string).collect();
+        println!("  drawable(s) brought into step: {}", list.join(", "));
+    }
+    if let Some(note) = replacement.aspect_note() {
+        println!("  warning: {note}");
     }
     save(&doc, out)
 }

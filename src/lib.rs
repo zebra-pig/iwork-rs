@@ -42,6 +42,7 @@
 pub mod document;
 pub mod drawable;
 pub mod iwa;
+pub mod media;
 pub mod package;
 pub mod pb;
 pub mod registry;
@@ -51,6 +52,7 @@ pub mod text;
 
 pub use document::{Component, DataFile, Document, Kind, TextStorage};
 pub use drawable::{Drawable, Geometry, Placement};
+pub use media::MediaReplacement;
 pub use package::Package;
 pub use style::{CreatedStyle, Label, StyleDeletion, StyleKind, StyleUse, TextStyle};
 pub use table::{Cell, CellControl, CellFormat, CellValue, Merge, Table};
@@ -75,6 +77,15 @@ pub enum Error {
         identifier: u64,
         references: Vec<u64>,
     },
+    /// An image's bytes were not replaced, because something between the stored
+    /// pixels and the render was computed from the old ones — a crop, a shaped
+    /// mask, an Instant Alpha path, tone adjustments, a cached rendering, a
+    /// traced outline. Swapping the bytes under any of those leaves a document
+    /// that opens, reports the same geometry, and draws the wrong thing.
+    NonDestructiveEdit {
+        drawable: u64,
+        reasons: Vec<String>,
+    },
 }
 
 impl std::fmt::Display for Error {
@@ -85,6 +96,11 @@ impl std::fmt::Display for Error {
             Error::Format(m) => write!(f, "{m}"),
             Error::NoSuchObject(id) => write!(f, "no object with identifier {id}"),
             Error::NoSuchStyle(id) => write!(f, "no text style with identifier {id}"),
+            Error::NonDestructiveEdit { drawable, reasons } => write!(
+                f,
+                "drawable {drawable} carries edit state a replacement would falsify: {}",
+                reasons.join("; ")
+            ),
             Error::StyleInUse {
                 identifier,
                 references,
