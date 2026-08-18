@@ -346,12 +346,17 @@ confidently. Read-first, then the safest writes.
 
 ## Phase 6 — Charts (read)
 
-- [ ] Enumerate `TSCH` chart objects (cross-app: Pages and Keynote carry
+- [x] Enumerate `TSCH` chart objects (cross-app: Pages and Keynote carry
       charts too), their type (~25 named types incl. 3D and interactive),
       and extract series/category data (charts carry a private copy of
       their data, *distinct from* their `TSCE` references back into tables —
-      read both and say which is which).
-- [ ] `iwork charts <doc>`. FORMAT.md §Charts.
+      read both and say which is which). *(33 charts in four documents plus 94
+      in the 69 bundled templates that have one; 23 of the 28 `ChartType`
+      values observed, every 3-D family but the donut, one interactive chart.
+      Nothing decodes a `TSCH.Generated.*` property archive — titles, axis
+      labels, error bars, the 3-D scene and the interactive control style are
+      carried and unread.)*
+- [x] `iwork charts <doc>`. FORMAT.md §Charts.
 
 ## Phase 7 — Comments, metadata, document properties
 
@@ -1651,6 +1656,240 @@ fixture, and what the app accepted.
     recalculates.** That is why `set_cell` refuses a formula cell, and why
     writing a formula is a phase of its own rather than a small addition to this
     one — writing rule 17 lists what it needs.
+
+- 2026-08-18 — **Phase 6 complete (charts, read).** New module `src/chart.rs`,
+  `doc.charts()`, `iwork charts`, four new `iwork check` invariants, FORMAT.md
+  §10 and a correction to §3, the `TSCH` registry block from three entries to
+  sixteen, README rows, and two new fixtures. `cargo fmt --check` and `cargo
+  clippy --all-targets -D warnings` clean; `cargo test --all-targets` green:
+  120 unit + 16 cell + **18 chart** + 18 drawable + 15 fixture + 14 formula +
+  17 pages + 34 style + 22 table + 14 text + 4 doc. `IWORK_APP_CHECK=1 cargo
+  test --all-targets` green over the whole suite, twenty-three fixtures.
+  **Nothing writes to a chart.**
+
+  **There is no read-back oracle for a chart, and that is a fact about the
+  apps, not a gap in the harness.** `chart` is an element of a Keynote slide, a
+  Numbers sheet and a Pages document, and in all three dictionaries the class is
+  `<class name="chart" inherits="iWork item">` with **no properties of its
+  own** — position, size, rotation, opacity, and not a word about type, data or
+  series. `formula of cell` has no counterpart here.
+
+  **So the oracle is the input.** Keynote's `add chart` is the only
+  chart-creating command in any of the three apps and it takes row names, column
+  names, a grid of numbers, a type and a grouping. `keynote-charts.key` is
+  eighteen charts built that way, each with its own hundred — chart *i* holds
+  `i×100 + 1, 2, 3` and `+11, 12, 13` — so no two share a value and a
+  mis-ordered read cannot pass. **All 108 values, both row names and all three
+  column names, agree for all seventeen types**, plus the eighteenth chart,
+  which is grouped by column and whose series is therefore `Jan = 7001, 7011`
+  rather than a category.
+
+  Chart-type coverage, and the mapping that had to be measured:
+
+  | Source | Types |
+  |---|---|
+  | Keynote zoo (17 slides) | 1–9, 12–19 — **every 3-D family but the donut** |
+  | `21_Simple_Charts` (12 charts) | 1, 2, 4, 5, 6, 9, 11, 20, 22, 25, 27 |
+  | `numbers-rules`, `pages-numbering` | 2, 8, 11 |
+  | **corpus total** | **23 of the 28**, all named |
+
+  Never seen: 0 `undefinedChartType`, 10 `mixedChartType2D` (one exists, in
+  `28_GradeBook`, and no fixture takes it), 21, 23, 24 (the multi-data bar,
+  scatter and bubble charts) and 26 `donutChartType3D`.
+
+  `add chart`'s `type` is a *legacy* seventeen-value enumeration that predates
+  `TSCH.ChartType`, and the mapping is neither the identity nor an ordering:
+  `vertical_bar_2d` is a **column** chart (1) and `horizontal_bar_2d` is a bar
+  chart (2). The whole table is in the fixture script's header and in FORMAT.md
+  §10.
+
+  **The private copy and the live references, which was the phase's brief.**
+
+  | | Pages | Keynote | Numbers |
+  |---|---|---|---|
+  | `ChartArchive.grid` (field 7, inline) | yes | yes | yes |
+  | `ChartArchive.mediator` (field 8) | **no** | **no** | yes |
+  | what it draws | the grid | the grid | the grid |
+  | what it follows | nothing | nothing | the mediator |
+
+  The grid is what is drawn in all three. In Numbers it is a **cache** of what
+  the mediator's `TSCE` formulas last evaluated to; elsewhere it is the data and
+  there is nothing behind it. All twelve Numbers charts have a mediator with one
+  data formula per series; all nineteen Pages and Keynote charts have none.
+  `iwork charts` prints the grid as a table and then either `fed by
+  Comparison of Units Sold by Year!B2:D2` or `private data only — no mediator,
+  nothing to follow`.
+
+  **Function 175, and the correction to Phase 5's note about it.** Every
+  reference a mediator holds goes through a `FUNCTION_NODE` of index 175 —
+  **915 of them across the 69 chart-bearing bundles, not one unwrapped** — and
+  175 has no published name. But it is **not** the one-argument wrapper Phase 5
+  recorded: its arity is nought, one or three, because a series may be fed by
+  several disjoint ranges (`175(B7, D7, F7)` in `26_MortgageCalculator`) and a
+  label list may name nothing (`175()`). The node is dropped and its *operands*
+  are printed, one per value the fragment leaves on the stack — which is why
+  `Formula::text` moved down onto `Ast` and gained `Ast::texts`.
+
+  Two more things a mediator holds that are not references: a bubble chart's row
+  labels are string **literals** written into the mediator, and a `#REF!`
+  survives there like anywhere else. Both are in `21_Simple_Charts` and both are
+  asserted.
+
+  **The trap the domain is known for, and it bit.**
+  `TSP.SparseReferenceArray.count` was the named one and cost nothing — 66
+  arrays in the corpus, no gaps, so it is asserted from the other side (every
+  index inside the count, the dense form as long as the count). The one that
+  actually bit was **the blank grid cell**: a blank is a *present, zero-length*
+  `GridValue`, this crate's `decode_nested` refuses empty bytes on purpose, and
+  the first grid reader therefore filtered the blank out — which does not lose a
+  blank, it **shifts every value after it one column left**. Empty is handled
+  before the decode now, on both levels, with a unit test built from bytes.
+  No fixture has one: `missing value` in `add chart`'s data is refused with
+  -1700, so the real-document behaviour is Inferred.
+
+  **A bug in Phase 3, found because a chart was in the wrong place.**
+  `TP.FloatingDrawablesArchive` is **two levels**: field 1 is one entry per
+  *page*, `{1: page index, 4: [{1: reference}]}`, and Phase 3 read field 1 as a
+  list of references — taking the page number for an object identifier and
+  recording nothing. **Every floating drawable in every Pages document has been
+  `Placement::Unknown` since Phase 3**, invisible because the fixtures that had
+  one had it anchored in text instead. `pages-numbering` puts its chart on the
+  page, and "unplaced" is an unacceptable answer to where a chart is.
+  `Placement::Floating` now carries the page number.
+
+  **A correction to Phase 2, and the first `diff_field_path` in this corpus.**
+  Phase 2 measured that 15.3.1 writes exactly one patched object per Numbers
+  document — the `TN.UIStateArchive` — and that `diff_field_path` is absent
+  from everything. **A chart of a type that did not exist in an older release
+  patches itself**, and it uses the field path:
+
+  | | donut | radar |
+  |---|---|---|
+  | base `MessageInfo.version` | `[2, 0, 25]` | `[2, 0, 25]` |
+  | `diff_merge_version` (8) | `[2, 3, ∞]` | `[11, 1, ∞]` |
+  | `diff_field_path` (9) | `{1: [10000]}` | `{1: [10000]}` |
+  | payload | `{1: 5}` — pie | `{1: 2}` — bar |
+
+  The path reaches into `TSCH.ChartArchive` and the whole patch is
+  `chart_type`, set to the nearest type the older app has. Donut arrived in 10.2
+  and radar in 11.2. The standing rule is unchanged and now has a second reason
+  to exist: never rewrite the first message of an object with patches.
+
+  **Structural evidence that needs no app.** 2090 chart-domain archives across
+  the corpus decode and re-encode to the bytes they came from; 33 chart
+  drawables are all exactly the two-field sandwich `{1, 10000}`; every grid is
+  rectangular with one name per row and per column; every chart is placed; and
+  the four new `iwork check` invariants are kept by every fixture **and by all
+  69 chart-bearing bundles**, which were also checked one by one.
+
+  Corpus decode summary — `iwork charts`, no app involved:
+
+  | Fixture | Charts | Types | Mediators |
+  |---|--:|---|--:|
+  | `keynote-charts.key` | 18 | 1–9, 12–19 | 0 |
+  | `numbers-charts.numbers` | 12 | 1, 2, 4, 5, 6, 9, 11, 20, 22, 25, 27 | 12 |
+  | `numbers-rules.numbers` | 2 | 2, 11 | 2 |
+  | `pages-numbering.pages` | 1 | 8 | 0 |
+
+  **The two fixtures, and why each had to come from where it did.**
+  `numbers-charts.numbers` is Apple's `21_Simple_Charts` instantiated, because
+  Numbers has no chart command at all — all 901 bundles were scanned, 69 have a
+  chart, and that one has twelve covering eleven types including the only
+  interactive chart and a two-axis chart. `keynote-charts.key` is built, because
+  a template cannot give known values.
+
+  Three AppleScript findings, each of which cost a run and all three now in the
+  script's header:
+
+  - the chart-type constants only resolve **inside** the `tell application`
+    block — outside it `pie_2d` is an undefined variable;
+  - every slide must exist before any chart goes on: interleaving `make new
+    slide` with `add chart` made Keynote lose the document reference (-1728,
+    "Can't get document id …") halfway through the run;
+  - **`add chart` ignores the slide it is given.** Its direct parameter is
+    documented as "the slide to add the chart to" and is not used — every chart
+    lands on the document's *current slide*, so the first build had eighteen
+    charts stacked on one. `set current slide of doc` before each call is what
+    places them. (`count of charts of slide 1` also answered 0 for a slide that
+    had one, which is the same fact from the other side.)
+
+  **What resisted.**
+
+  - **Every `TSCH.Generated.*` property archive.** The six presets and the
+    axis, legend and series styles under them are enumerated, counted and
+    carried; **not one property inside them is read.** Titles, axis labels and
+    ranges, number formats, error bars, trendlines, gap widths, corner radii,
+    the interactive chart's control style (Buttons Only vs slider) and the whole
+    3-D scene — depth, lighting, bevel, rotation — all live there. This is by
+    far the largest thing the phase does not do, and it is a phase of its own:
+    the property numbering is stable in the *persisted* archives but the
+    property *set* is chart-family-dependent, and a series fill read without the
+    family rule is the wrong colour.
+  - **3-D is read-level only**, as the brief allowed. The type says a chart is
+    3-D and `scene3d_settings_constant_depth` (10002) is on every chart, 3-D or
+    not; the scene payloads are `TSCH.Chart3D*` messages inside a style's
+    extension 10000, and `TSD.FillArchive` gains a `fill3d` at extension
+    **100** — one of the places a decoder that assumes "TSCH extensions start at
+    10000" silently loses data.
+  - **The interactive chart's control style is not decoded**; only its current
+    data set is, and that is `ChartArchive.multidataset_index` in the *model*.
+    The schema's other home — `TSCH.ChartUIState` at `TN.UIStateArchive` field
+    23, with an `upgraded_to_ui_state` flag at extension 10021 — is **absent**:
+    the document's view state has no field 23 and no chart carries 10021.
+  - **The pre-UFF chart model (5000–5017) has never been decoded.** Not one of
+    the 901 bundles has one, so the legacy grid's `repeated double` rows — which
+    cannot express a blank at all, which is why old imported charts show
+    spurious zeroes — is written down from the schema and asserted absent by a
+    tripwire test.
+  - **Reference lines.** Extension 10005 is on every chart and holds an empty
+    `ChartReferenceLinesArchive`; 5030 is in every document as part of the
+    theme; **5031, the non-style, is in none of the 901 bundles**, because no
+    template has a reference line and no script can add one.
+  - **Five chart types have no source**: 0, 10, 21, 23, 24 and 26. Mixed (10)
+    exists in `28_GradeBook` and was not worth a fixture of its own; the three
+    multi-data variants and the 3-D donut exist in no bundle at all and no
+    script makes one.
+  - **`local_series_indexes` / `remote_series_indexes`** are read and reported
+    and their meaning when they disagree is unexercised — `numbers-rules` has a
+    chart whose local index is `0xFFFFFFFF`.
+  - **Pixel correctness, as always, cannot be verified here.** The app round
+    trip proves the documents open; nothing on a locked screen can see what is
+    drawn.
+
+  What Phase 7 (comments, metadata) should know:
+
+  - **A chart element is one of the three comment anchor kinds**, and this phase
+    did not meet it: no fixture and no bundled template has a comment on a chart.
+    What a chart-anchored comment would hang off is `TSD.DrawableArchive.comment`
+    (field 6) on the 5021 — the same field an image's comment uses, already read
+    by `Drawable::comment` — or, for a *sub-element* of a chart, something in
+    the `TSCH` selection-path archives (5145–5152), none of which is persisted
+    in any document here.
+  - `Document::charts()` follows `Document::structure()`'s pattern: one pass
+    over `objects()` into a `BTreeMap<id, (type, Message)>`, then a walk over
+    `drawables()`. It costs a decode of the whole document twice over and is
+    fine at this scale.
+
+  What Phase 8a/8b (Keynote) should know:
+
+  - **Keynote will make a chart from a script**, which is the only drawable
+    besides shapes, lines, text items and images that it will make, and the only
+    one where the app is told the *content*. `keynote-charts.key` is nineteen
+    slides and is now the largest deck in the corpus.
+  - **`add chart` ignores its direct parameter and uses the current slide.**
+    Anything else that takes a container from a script deserves the same
+    suspicion; `make new shape at end of shapes of slide i` does honour it.
+  - A chart on a slide can carry a **Magic Chart build** (features.md §Keynote),
+    which is 8b's; nothing here touches `KN` build archives.
+
+  What Phase 9 (hardening) should know:
+
+  - **A chart's grid is a cache and a document can be internally inconsistent
+    on purpose.** Nothing here recalculates one, so `iwork check` deliberately
+    does *not* compare a Numbers chart's grid against the cells its mediator
+    points at: they legitimately disagree between the app's last recalculation
+    and the next open. If that check is ever wanted it has to be a note, not a
+    problem — the same shape as the stale formula cache in §9.
 
 ## Execution notes
 
