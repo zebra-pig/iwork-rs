@@ -156,9 +156,13 @@ fn every_cell_record_is_consumed_to_the_byte() {
             assert!(t.problems.is_empty(), "{name}/{}: {:?}", t.name, t.problems);
             for cell in t.cells() {
                 assert_eq!(
-                    cell.record.trailing, 0,
+                    cell.record.trailing(),
+                    0,
                     "{name}/{}/r{}c{}: {} bytes past the last field",
-                    t.name, cell.row, cell.column, cell.record.trailing
+                    t.name,
+                    cell.row,
+                    cell.column,
+                    cell.record.trailing()
                 );
                 assert_eq!(cell.record.version, 5);
                 assert_eq!(

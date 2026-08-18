@@ -642,10 +642,17 @@ fixture has two, and a row's absolute index is
 `tileid * tile_size + tile_row_index`. Rows with no cells have no `TileRowInfo`
 at all, so counting them is not an alternative.
 
-**Numbers 15.3.1 writes neither field 6 nor field 7 on the tile.** The published
-advice is to refuse a tile whose `last_saved_in_BNC` is not `true`; every tile
-in this corpus would be refused by that rule. The version that is actually there
-is `TileRowInfo` field 5, and it says 5.
+**Every tile in the corpus carries field 6 = `5` and field 7 = `true`**, so the
+published advice — refuse a tile whose `last_saved_in_BNC` is not `true` —
+accepts all of them. (Phase 1 recorded the opposite, having read the
+`TileStorage` message above the tile, whose fields 1–3 are the tile list, the
+tile size and the wide-row flag. Corrected in Phase 2 and asserted by
+`tests/cells.rs::every_tile_says_it_was_last_saved_by_the_current_storage_engine`.)
+`TileRowInfo` field 5 says 5 as well.
+
+**Field 3, `numCells`, is dead**: it is `0` on a tile holding 2411 of them.
+Field 4 does count the `TileRowInfo`s. Field 8, `should_use_wide_rows`, is set
+on two tiles of the pivot fixture and nowhere else.
 
 `TST.TileRowInfo`:
 

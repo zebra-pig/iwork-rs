@@ -54,7 +54,7 @@ const DECIMAL128_BIAS: i32 = 0x1820;
 /// `f64` is a lossy last step, not the representation — [`Decimal::to_f64`]
 /// goes through the decimal text so the result is the correctly rounded one
 /// rather than whatever `mantissa * 10f64.powi(exponent)` happens to give.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Decimal {
     pub mantissa: i128,
     pub exponent: i32,
@@ -65,6 +65,37 @@ impl Decimal {
         format!("{}e{}", self.mantissa, self.exponent)
             .parse()
             .unwrap_or(f64::NAN)
+    }
+
+    /// Read a decimal from the digits the user typed, keeping them.
+    ///
+    /// `1.10` is kept as `110 × 10⁻²` rather than as the nearest `f64`, which is
+    /// the reason cell numbers are not `double`s at all. Numbers itself normalises
+    /// to fifteen significant digits when *it* writes a value — `3.14159`
+    /// becomes `314159000000000 × 10⁻¹⁴` — but it reads the short form back
+    /// as the same number, so there is nothing to gain by padding.
+    pub fn parse(text: &str) -> Option<Decimal> {
+        let text = text.trim();
+        let (digits, exponent) = match text.split_once(['e', 'E']) {
+            Some((mantissa, exponent)) => (mantissa, exponent.parse::<i32>().ok()?),
+            None => (text, 0),
+        };
+        let (whole, fraction) = match digits.split_once('.') {
+            Some((whole, fraction)) => (whole, fraction),
+            None => (digits, ""),
+        };
+        if fraction.chars().any(|c| !c.is_ascii_digit()) {
+            return None;
+        }
+        let joined = format!("{whole}{fraction}");
+        // `-.5` and `+7` both have to parse, and an empty mantissa must not.
+        if joined.is_empty() || joined == "-" || joined == "+" {
+            return None;
+        }
+        Some(Decimal {
+            mantissa: joined.parse().ok()?,
+            exponent: exponent - fraction.len() as i32,
+        })
     }
 }
 
@@ -121,6 +152,39 @@ pub fn decode_decimal128(bytes: &[u8; 16]) -> Decimal {
         mantissa = -mantissa;
     }
     Decimal { mantissa, exponent }
+}
+
+/// Write the 16-byte decimal, the exact inverse of [`decode_decimal128`].
+///
+/// Fails rather than truncates: the mantissa is 113 bits and the biased
+/// exponent 14, and a number outside either is a number this format cannot
+/// hold — saying so is better than writing a different one.
+pub fn encode_decimal128(value: Decimal) -> Result<[u8; 16], String> {
+    let magnitude = value.mantissa.unsigned_abs();
+    if magnitude >> 113 != 0 {
+        return Err(format!(
+            "{} needs more than the 113 mantissa bits a cell number has",
+            value.mantissa
+        ));
+    }
+    let biased = value.exponent + DECIMAL128_BIAS;
+    if !(0..=0x3fff).contains(&biased) {
+        return Err(format!(
+            "exponent {} is outside the range a cell number can hold",
+            value.exponent
+        ));
+    }
+    let mut bytes = [0u8; 16];
+    for (at, byte) in bytes[..14].iter_mut().enumerate() {
+        *byte = (magnitude >> (8 * at)) as u8;
+    }
+    let biased = biased as u32;
+    bytes[14] = (((biased & 0x7f) << 1) as u8) | ((magnitude >> 112) & 1) as u8;
+    bytes[15] = ((biased >> 7) & 0x7f) as u8;
+    if value.mantissa < 0 {
+        bytes[15] |= 0x80;
+    }
+    Ok(bytes)
 }
 
 // -- the cell record ---------------------------------------------------------
@@ -215,9 +279,11 @@ pub struct CellRecord {
     pub boolean_format_id: Option<u32>,
     pub comment_id: Option<u32>,
     pub import_warning_id: Option<u32>,
-    /// Bytes left over after the last payload named by the flag word. Zero in
-    /// everything the apps have been seen to write.
-    pub trailing: usize,
+    /// Bytes left over after the last payload named by the flag word. Empty in
+    /// everything the apps have been seen to write, and carried rather than
+    /// dropped so that a record this crate does not fully understand still
+    /// re-encodes to the bytes it came from.
+    pub tail: Vec<u8>,
 }
 
 /// Which of the six format slots a cell carries a key for.
@@ -330,6 +396,108 @@ impl CellRecord {
             .or(self.text_format_id)
             .or(self.boolean_format_id)
     }
+
+    /// Bytes past the last payload the flag word names. Zero everywhere in the
+    /// corpus, and the check that pins the flag word's widths and order.
+    pub fn trailing(&self) -> usize {
+        self.tail.len()
+    }
+
+    /// The key held in one flag-word slot, by bit.
+    fn key_at(&self, bit: u32) -> Option<u32> {
+        match bit {
+            0x0000_0008 => self.string_id,
+            0x0000_0010 => self.rich_id,
+            0x0000_0020 => self.cell_style_id,
+            0x0000_0040 => self.text_style_id,
+            0x0000_0080 => self.conditional_style_id,
+            0x0000_0100 => self.conditional_rule_id,
+            0x0000_0200 => self.formula_id,
+            0x0000_0400 => self.control_id,
+            0x0000_0800 => self.formula_error_id,
+            0x0000_1000 => self.format_kind,
+            0x0000_2000 => self.number_format_id,
+            0x0000_4000 => self.currency_format_id,
+            0x0000_8000 => self.date_format_id,
+            0x0001_0000 => self.duration_format_id,
+            0x0002_0000 => self.text_format_id,
+            0x0004_0000 => self.boolean_format_id,
+            0x0008_0000 => self.comment_id,
+            0x0010_0000 => self.import_warning_id,
+            _ => None,
+        }
+    }
+
+    /// The flag word this record's contents call for.
+    ///
+    /// Derived rather than remembered: the flag word is a presence mask over
+    /// the fields below it, so a record that has been edited would otherwise
+    /// have to keep the two in step by hand, and one missed bit shifts every
+    /// payload after it.
+    pub fn derived_flags(&self) -> u32 {
+        let mut flags = 0;
+        if self.decimal.is_some() {
+            flags |= 0x0000_0001;
+        }
+        if self.double.is_some() {
+            flags |= 0x0000_0002;
+        }
+        if self.seconds.is_some() {
+            flags |= 0x0000_0004;
+        }
+        for &(bit, _, _) in &FLAGS[3..] {
+            if self.key_at(bit).is_some() {
+                flags |= bit;
+            }
+        }
+        flags
+    }
+
+    /// Re-encode the record as a tile's storage buffer holds it.
+    ///
+    /// Exactly inverts [`decode_cell`] — `encode(decode(bytes)) == bytes` for
+    /// every record in the corpus, which is what `tests/cells.rs` asserts.
+    /// Fields this crate does not model are not re-synthesised: bytes 2–5,
+    /// byte 6's chosen-format bits, byte 7 and any trailing bytes are carried
+    /// through as they arrived, and so are the conditional-style and
+    /// conditional-rule keys that a cell's highlighting hangs off.
+    pub fn encode(&self) -> Result<Vec<u8>, String> {
+        let known = FLAGS.iter().fold(0u32, |all, &(bit, _, _)| all | bit);
+        if self.flags & !known != 0 {
+            return Err(format!(
+                "cell record flags {:#010x} carry a bit this crate cannot place a payload for",
+                self.flags
+            ));
+        }
+        let flags = self.derived_flags();
+        let mut out = Vec::with_capacity(12 + 4 * flags.count_ones() as usize);
+        out.push(self.version);
+        out.push(self.cell_type);
+        out.extend_from_slice(&self.reserved);
+        out.extend_from_slice(&self.extras.to_le_bytes());
+        out.extend_from_slice(&flags.to_le_bytes());
+        for &(bit, _, _) in FLAGS {
+            if flags & bit == 0 {
+                continue;
+            }
+            match bit {
+                0x0000_0001 => {
+                    out.extend_from_slice(&encode_decimal128(self.decimal.expect("bit is set"))?)
+                }
+                0x0000_0002 => {
+                    out.extend_from_slice(&self.double.expect("bit is set").to_le_bytes())
+                }
+                0x0000_0004 => {
+                    out.extend_from_slice(&self.seconds.expect("bit is set").to_le_bytes())
+                }
+                other => {
+                    out.extend_from_slice(&self.key_at(other).expect("bit is set").to_le_bytes())
+                }
+            }
+        }
+        out.extend_from_slice(&self.tail);
+        Ok(out)
+    }
 }
 
 /// Decode one cell record from a tile's storage buffer.
@@ -394,7 +562,7 @@ pub fn decode_cell(bytes: &[u8]) -> Result<CellRecord, String> {
         }
         at = end;
     }
-    cell.trailing = bytes.len() - at;
+    cell.tail = bytes[at..].to_vec();
     Ok(cell)
 }
 
@@ -434,6 +602,42 @@ pub fn row_cells<'a>(
         out.push(Some((column, &buffer[begin..end])));
     }
     out
+}
+
+/// Lay records back out into a `TileRowInfo`'s buffer and `cell_offsets`.
+///
+/// The inverse of [`row_cells`], and the reason a rewritten row is not simply
+/// a patched buffer: every record after the edited one moves, so every offset
+/// after it has to move too. The array keeps the length it arrived with —
+/// Numbers pads it to 255 entries whatever the table's width — because that
+/// padding is what a reader steps through.
+pub fn encode_row(records: &[Option<Vec<u8>>], wide: bool) -> Result<(Vec<u8>, Vec<u8>), String> {
+    let scale = if wide { 4usize } else { 1 };
+    let mut buffer = Vec::new();
+    let mut offsets = Vec::with_capacity(records.len() * 2);
+    for (column, record) in records.iter().enumerate() {
+        let Some(record) = record else {
+            offsets.extend_from_slice(&(-1i16).to_le_bytes());
+            continue;
+        };
+        if buffer.len() % scale != 0 {
+            return Err(format!(
+                "column {column} would start at byte {}, which is not a multiple of the \
+                 {scale}-byte unit this row's offsets count in",
+                buffer.len()
+            ));
+        }
+        let start = buffer.len() / scale;
+        let start = i16::try_from(start).map_err(|_| {
+            format!(
+                "row storage reached {} bytes, past what an offset can name",
+                buffer.len()
+            )
+        })?;
+        offsets.extend_from_slice(&start.to_le_bytes());
+        buffer.extend_from_slice(record);
+    }
+    Ok((buffer, offsets))
 }
 
 // -- side tables -------------------------------------------------------------
@@ -2607,7 +2811,7 @@ mod tests {
         let record = decode_cell(&[5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap();
         assert_eq!(record.cell_type, cell_type::EMPTY);
         assert_eq!(record.flags, 0);
-        assert_eq!(record.trailing, 0);
+        assert_eq!(record.trailing(), 0);
         assert_eq!(record.explicit_format(), None);
     }
 
@@ -2624,7 +2828,7 @@ mod tests {
         let bytes = record(cell_type::TEXT, 0x0000, 0x0000_0008, &7u32.to_le_bytes());
         let cell = decode_cell(&bytes).unwrap();
         assert_eq!(cell.string_id, Some(7));
-        assert_eq!(cell.trailing, 0);
+        assert_eq!(cell.trailing(), 0);
     }
 
     /// **The two bit orders.** Payloads are consumed in ascending *flag-word*
@@ -2767,7 +2971,7 @@ mod tests {
         );
         let cell = decode_cell(&bytes).unwrap();
         assert_eq!(cell.formula_id, Some(99));
-        assert_eq!(cell.trailing, 0);
+        assert_eq!(cell.trailing(), 0);
     }
 
     #[test]
