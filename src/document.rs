@@ -2739,8 +2739,8 @@ impl Document {
     ///   and 25 of `TP.SectionArchive` reach `TP.SectionTemplateArchive`s, and
     ///   a section with none has no headers, footers or page background at all.
     /// * **A section template has three headers and three footers, and every
-    ///   one is a storage of kind 1.** Never any other count: 1734 of them
-    ///   across the bundled templates and 306 in this corpus.
+    ///   one is a storage of kind 1.** Never any other count: 3144 section
+    ///   templates across the bundled templates and 66 in this corpus.
     /// * **A thread's storage and boxes exist.** A linked-text-box thread that
     ///   names a missing box is a flow with a hole in it.
     fn structure_problems(&self) -> Vec<String> {

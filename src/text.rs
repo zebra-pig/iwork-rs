@@ -828,9 +828,9 @@ pub fn destroyed_anchors(
 /// `make new section`, the menu that would do it needs a window, and setting a
 /// section's body text to the empty string leaves the break exactly where it
 /// was with a zero-length section behind it. So what a merge should do to the
-/// two `TP.SectionArchive`s, their six `TP.SectionTemplateArchive`s, their
-/// eighteen header and footer storages, their guide storages and their
-/// background fills is not known, and this crate does not guess.
+/// two `TP.SectionArchive`s, their three `TP.SectionTemplateArchive`s each,
+/// their eighteen header and footer storages apiece, their guide storages and
+/// their background fills is not known, and this crate does not guess.
 pub fn destroyed_sections(storage: &Message, text: &str, edit: Edit) -> Vec<(u64, Option<u64>)> {
     let Some(table) = storage
         .bytes(SECTION_TABLE)

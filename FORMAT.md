@@ -1756,9 +1756,8 @@ Two more signals say the same thing, and neither was assumed:
   word-processing document has none.
 
 **A page-layout document has no sections to the app.** `pages-layout` carries
-two `TP.SectionArchive`s, each with its six section templates and its
-thirty-six header and footer storages, and Pages answers `count of sections`
-with 0. The `sections` element is word-processing only, the way the Document
+two `TP.SectionArchive`s — three section templates each, thirty-six header and
+footer storages between them — and Pages answers `count of sections` with 0. The `sections` element is word-processing only, the way the Document
 inspector is; the archives are still there and are still what the headers hang
 off.
 
@@ -1841,9 +1840,10 @@ TP.SectionTemplateArchive
   4  page_template_uuidpath
 ```
 
-**Always exactly three of each.** 1734 instances across the bundled templates
-and 306 across this corpus, and never any other count — which is Pages' three
-header and three footer fields. A *footer* storage is `kind = 1` as well; the
+**Always exactly three of each.** 3144 section templates across the 640
+bundled templates and 66 across this corpus — 396 header and footer storages —
+and never any other count, which is Pages' three header and three footer
+fields. A *footer* storage is `kind = 1` as well; the
 only thing that makes it a footer is being in field 2.
 
 The zone order is **left, centre, right**, and that is *Inferred*: nothing in
@@ -1991,8 +1991,11 @@ tripwire that says so out loud if a fixture ever grows one.
 ### Bookmarks — the same story
 
 `table_bookmark` (field 15) → `TSWP.BookmarkFieldArchive` (2035), a run-anchored
-table naming a range. **Not one of the 640 bundled Pages templates carries a
-`TSWP.BookmarkFieldArchive`**, and neither does anything in this corpus. A
+table naming a range. **Not one of the 901 templates the three apps ship
+carries a `TSWP.BookmarkFieldArchive`**, and neither does anything in this
+corpus. The same sweep found **zero** `TSWP.FootnoteReferenceAttachmentArchive`s
+and **zero** storages of kind 2, which is the footnote boundary above measured
+the same way. A
 bookmark is made by naming a range in the app's UI and nothing reachable here
 can name a range. Read, reported, **Unverified**.
 
@@ -2006,9 +2009,9 @@ paragraph-style property `show_in_bookmarks_list` (43) are present and are the
 **Refused, and the refusal is the finding.**
 
 Deleting the `U+0004` that begins a section merges two sections into one, and
-which of the two keeps its page templates, its six section templates, its
-eighteen header and footer storages, its guide storage and its background fill
-is not something any probe here could establish. Pages will not perform the
+which of the two keeps its three section templates, its eighteen header and
+footer storages, its guide storage and its background fill is not something any
+probe here could establish. Pages will not perform the
 edit for anyone to watch:
 
 - `delete section 2 of document 1` answers **-10000**, "AppleEvent handler
@@ -2096,8 +2099,9 @@ Rules a writer must respect:
 16. **Do not merge two sections by deleting the break between them.** The
     `U+0004` is what makes the section; deleting it leaves two
     `TP.SectionArchive`s where one boundary is needed, and which of the two
-    keeps its section templates, its eighteen header and footer storages, its
-    guides and its background is a question Pages will not answer for anyone —
+    keeps its three section templates, its eighteen header and footer storages,
+    its guides and its background is a question Pages will not answer for
+    anyone —
     it refuses the edit from a script. §8 has the four ways that was checked.
 17. **A field you cannot place is not a field to skip.** A storage's attribute
     tables are told apart by field number and by nothing else, and an

@@ -228,9 +228,10 @@ const ENTRIES: &[Entry] = &[
         app: App::Any,
     },
     // The footnote mark in the text, and the anchor half of a bookmark.
-    // **Neither exists anywhere that can be reached from here** — not in this
-    // corpus and not in any of the 901 bundled templates — so both are named
-    // from the 15.3.1 schema and nothing has decoded one.
+    // **Neither exists anywhere that can be reached from here.** All 901
+    // templates the three apps ship were scanned for both, and for a storage of
+    // kind 2: zero, zero and zero. Both names come from the 15.3.1 schema and
+    // nothing has decoded one.
     Entry {
         message_type: 2008,
         name: "TSWP.FootnoteReferenceAttachmentArchive",
@@ -742,7 +743,7 @@ const ENTRIES: &[Entry] = &[
     },
     // Was `TP.PageLayoutArchive` — the 2013 name for this id was
     // `TP.PageMasterArchive` and neither is right. Field 1 is three header
-    // storages and field 2 three footer storages, in every one of the 1734
+    // storages and field 2 three footer storages, in every one of the 3144
     // instances the bundled templates carry.
     Entry {
         message_type: 10143,

@@ -539,16 +539,17 @@ its own model. A header this crate invented badly does not survive that.
 - **Two sections cannot be merged, so deleting a section break is refused.**
   The `U+0004` is what makes the section; deleting it leaves two
   `TP.SectionArchive`s where one boundary is needed, and which of the two keeps
-  its section templates, its eighteen header and footer storages, its guides
-  and its background is a question Pages will not answer for anyone. `delete
+  its three section templates, its eighteen header and footer storages, its
+  guides and its background is a question Pages will not answer for anyone. `delete
   section 2` comes back -10000, there is no `make new section`, the menu needs
   a window, and setting a section's body text to the empty string leaves the
   break where it was with a zero-length section behind it. Rather than guess,
   `Error::SectionBreak` says which break, which section, and what is unknown.
-- **A footnote, an endnote and a bookmark have no source anywhere.** Not one of
-  the 901 templates the three apps ship has a storage of kind 2 or a
-  `TSWP.BookmarkFieldArchive`, no scripting dictionary can author one, and no
-  document from a real user is available here. The settings a footnote obeys
+- **A footnote, an endnote and a bookmark have no source anywhere.** All 901
+  templates the three apps ship were scanned for a storage of kind 2, a
+  `TSWP.FootnoteReferenceAttachmentArchive` and a `TSWP.BookmarkFieldArchive`:
+  zero, zero and zero. No scripting dictionary can author one, and no document
+  from a real user is available here. The settings a footnote obeys
   are read and are the defaults; the containment — a `U+FFFC` in the text, a
   `TSWP.FootnoteReferenceAttachmentArchive` and the note's own storage — is
   written down in `FORMAT.md` from the 15.3.1 schema and marked Unverified. The

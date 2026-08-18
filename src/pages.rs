@@ -300,9 +300,9 @@ impl TemplatePage {
 /// Where in the three-zone strip a header or footer storage sits.
 ///
 /// Every `TP.SectionTemplateArchive` in this corpus carries **exactly three
-/// headers and exactly three footers** — 1734 of them across the 320 bundled
-/// ISO templates, with no other shape — which is Pages' three header and three
-/// footer fields.
+/// headers and exactly three footers** — 3144 of them across the 640 bundled
+/// templates and 66 across this corpus, with no other shape — which is Pages'
+/// three header and three footer fields.
 ///
 /// The zone order is `left, centre, right` and is **Inferred**: nothing in the
 /// archive names them, and all three zones of a strip point at the same
@@ -512,8 +512,8 @@ pub struct Structure {
     /// Bookmark anchors — `table_bookmark` (field 15) entries, as
     /// `(storage, index, TSWP.BookmarkFieldArchive)`.
     ///
-    /// Empty in this corpus and in all 640 bundled Pages templates: not one
-    /// carries a `TSWP.BookmarkFieldArchive`. Bookmarks are the anchor half of
+    /// Empty in this corpus and in all 901 templates the three apps ship: not
+    /// one carries a `TSWP.BookmarkFieldArchive`. Bookmarks are the anchor half of
     /// "link to a bookmark", they are created by naming a range in the app's
     /// UI, and nothing reachable here can name a range.
     pub bookmarks: Vec<(u64, u64, Option<u64>)>,

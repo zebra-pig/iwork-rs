@@ -580,7 +580,7 @@ fn the_app_agrees_about_every_section() {
             "{name}: the app's `document body` and TP.SettingsArchive.body disagree"
         );
         // **A page-layout document has no sections to the app.** `pages-layout`
-        // carries two `TP.SectionArchive`s, each with its six section templates
+        // carries two `TP.SectionArchive`s, three section templates each
         // and its thirty-six header and footer storages, and Pages answers
         // `count of sections` with 0 — the element is word-processing only, the
         // way the Document inspector is. The archives are still there and still

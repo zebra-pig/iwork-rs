@@ -30,15 +30,28 @@ If you have Pages, Numbers and Keynote, the apps will write you a corpus:
 ../../scripts/make-fixtures.sh
 ```
 
-It builds seven documents into `generated/` — plain and styled text, non-Latin
-text including emoji, a table and a photo, typed cells and formulas across two
-sheets, a 301-row imported table, and a deck with presenter notes and a skipped
-slide. Existing files are left alone unless `--force` is given. Nothing in
-`generated/` is committed either; the generator is.
+It builds twenty documents into `generated/`: plain, styled and non-Latin text;
+a table and a photo; lists; sections, facing pages, a table of contents, a
+page-layout document with linked text boxes, page numbering and columns; typed
+cells, formats, formulas, sort rules, filters, categories, pivots and
+hyperlinks; a 301-row imported table; and two decks with presenter notes,
+shapes and a skipped slide. Existing files are left alone unless `--force` is
+given. Nothing in `generated/` is committed either; the generator is.
+
+Most of the interesting ones come from Apple's own templates, because no
+scripting dictionary can create the feature: `make new document with properties
+{document template: …}` has the app write the whole structure out again, which
+is what a fixture is for. Two are the template bundle itself, renamed — a
+`.template` is the same ZIP a document is — for the two features whose only
+source in the entire install is a template this locale does not offer.
 
 Good fixtures to add, in rough order of usefulness:
 
-- a Keynote presentation — the format is currently unverified for Keynote
-- a document with tables, charts or embedded media
-- a document in a language that is not English, to exercise text indexing
+- **a Pages document with a footnote, an endnote or a bookmark.** There is no
+  such thing anywhere here: not in the corpus, not in any of the 901 templates
+  the three apps ship, and no dictionary can author one. Everything this crate
+  says about footnote containment and bookmark anchors is read off the schema
+  and marked Unverified.
+- a document with comments, replies or tracked changes — the same gap
+- a document with a table on a Keynote slide, which nothing here can produce
 - a document saved by an old version of Pages/Numbers/Keynote
