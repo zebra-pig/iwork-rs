@@ -108,6 +108,17 @@ iwork charts    Budget.numbers            # every chart: type, placement, the da
                                           # it carries, and the table ranges it
                                           # follows — the two are not the same
 
+iwork slides    Talk.key                  # every slide: layout, placeholders and
+                                          # their text, presenter notes, transition,
+                                          # build count
+iwork layouts   Talk.key                  # the theme's slide layouts, and which
+                                          # slides are built on each
+iwork set-notes Talk.key 2652498 "…" out.key
+iwork skip-slide   Talk.key 2652498 out.key   # leave it out of the show
+iwork unskip-slide Talk.key 2652498 out.key
+iwork move-slide Talk.key 2652498 0 out.key   # to position 0
+iwork duplicate-slide Talk.key 2652498 out.key
+
 iwork sections  Report.pages              # sections, their text ranges, page
                                           # numbering, headers and footers
 iwork structure Report.pages              # mode, paper, page templates, threads,
@@ -485,6 +496,24 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | Change tracking is off and its ten fields are at their defaults, everywhere | ✅ | — | — |
 | An edit through a tracked change is refused by name | ✅ | ✅ | ✅ |
 | Alt text (`accessibility_description`) read, in nine fixtures | ✅ | — | ✅ |
+| The show: theme, slide size, slide tree, layouts in the app's order | — | — | ✅ |
+| Every slide's layout is one the theme lists; every layout has a name | — | — | ✅ |
+| Placeholder kinds match the fields that name them (title/body/number/object) | — | — | ✅ |
+| Presenter notes are the kind-4 storages, and nothing else is | — | — | ✅ |
+| Text roles per slide: title, body, number, notes, text box | — | — | ✅ |
+| A skipped slide has no number and the rest count past it | — | — | ✅ |
+| "Title showing" is ownership — membership of `owned_drawables` | — | — | ✅ |
+| Transitions read by the identifier the app's dictionary lists (5 of them) | — | — | ✅ |
+| Builds: zero in four decks and in all 182 bundled themes, and nothing can make one | — | — | ✅ |
+| **The app agrees about every slide** — 47 records, both decks | — | — | ✅ |
+| Skip and unskip a slide; unskipping restores the bytes exactly | — | — | ✅ |
+| Reorder slides: a permutation of the slide tree, nothing else touched | — | — | ✅ |
+| Write presenter notes through the Phase 4 remapper | — | — | ✅ |
+| Duplicate a slide: a new component, stream, node, metadata entry and declaration | — | — | ✅ |
+| A copy shares no object with its original, and copying twice gives two slides | — | — | ✅ |
+| The same duplicate twice produces the same file, byte for byte | — | — | ✅ |
+| A copied image slide shares the media instead of growing the package | — | — | ✅ |
+| **Keynote reads back the copy's title and notes, and saves the deck itself** | — | — | ✅ |
 
 Keynote is the gap in that block for one reason only — neither AppleScript nor
 any bundled theme will put a table on a slide, so there is no fixture. The
@@ -498,24 +527,41 @@ four further Pages documents and one Keynote deck — 654 styles in all.
 
 ### Keynote status
 
-Keynote **is** verified now, against one deck: 1204 objects, 30 streams, 19
-masters, 5 slides. Layers 1–3 turned out to be exactly as predicted — same
-stored ZIP, same Snappy framing, same object stream, text in the same
-`TSWP.StorageArchive`, styles in the same attribute tables. Layer 4 held one
-surprise worth knowing about:
+Keynote is verified against four decks — 993 to 1466 objects, 1 to 19 slides,
+17 slide layouts each — and against its own scripting dictionary, which is the
+richest of the three: `scripts/slide-oracle.sh` asks the app for the slide
+count, the layouts by name, and every slide's number, base layout, skipped
+flag, title, body, presenter notes and transition, and every one of those is
+compared.
+
+Layers 1–3 are exactly as predicted — same stored ZIP, same Snappy framing,
+same object stream, text in the same `TSWP.StorageArchive`, styles in the same
+attribute tables. Layer 4 is a *show*, and it is [§13 of
+FORMAT.md](FORMAT.md#13-keynote-structure--kn). Four things there are worth
+repeating here.
 
 **Numbers and Keynote both number their document archive `1`.** The app-level
 archives are numbered per app, so the root object's type cannot tell those two
 apart, and a `.key` read by type alone came back as a spreadsheet. `Kind`
-detection now goes by components — `Index/Tables/` for Numbers, `Index/Slide*`
-for Keynote — and [`registry`](src/registry.rs) entries carry the app they
-belong to, so type 1 resolves to `TN.DocumentArchive` or `KN.DocumentArchive`
+detection goes by components — `Index/Tables/` for Numbers, `Index/Slide*` for
+Keynote — and [`registry`](src/registry.rs) entries carry the app they belong
+to, so type 1 resolves to `TN.DocumentArchive` or `KN.DocumentArchive`
 depending on the document, and to neither when the kind is unknown.
 
-The `KN.*` types derived from that deck are in the registry with their evidence:
-the show and its slide list, slide nodes, slides (which carry their transition),
-masters, the theme (which carries its name), and drop-cap styles. See
-[`FORMAT.md`](FORMAT.md#keynote).
+**Each slide is its own component**, whose identifier is the slide archive's
+own, and whose node lives with the show in `Index/Document.iwa`. Nothing else
+in the format splits one user-visible thing across two components, and it is
+why `iwork duplicate-slide` writes a stream, a metadata entry, a node, a slide
+tree entry and an external-reference declaration rather than one object.
+
+**"Title showing" and "slide numbers showing" are not the fields they sound
+like.** The first is whether the slide owns the placeholder; the second is a
+flag on every slide's node, not on the show.
+
+**There are no builds anywhere.** Not in the four decks, not in any of the 182
+bundled `.kth` themes, and nothing in Keynote's dictionary will make one — so
+the build count this crate reports is honestly zero and `KN.BuildArchive` stays
+Inferred.
 
 ## Testing
 
@@ -652,6 +698,22 @@ its own model. A header this crate invented badly does not survive that.
 - **Deleting a style is refused rather than forced.** If a reference this crate
   cannot account for would be left dangling, the delete fails and says which
   objects still hold one.
+- **A slide can be copied, added to, skipped and moved — but not created or
+  deleted.** `duplicate-slide` copies a slide that exists; there is no
+  `new-slide`, because a slide made from nothing is a component made from
+  nothing, and ground rule 3 says copy. There is no `delete-slide` either: the
+  slide tree entry, the node, the component, its metadata entry, its media
+  refcounts and its external-reference declarations all have to go together and
+  no probe has watched Keynote do it. A slide's *layout* cannot be changed and
+  cannot be copied — Keynote's own dictionary makes `slide layout` read-only.
+- **Builds and transition parameters are read, not written.** The transition's
+  effect, duration, delay and automatic flag are decoded and reported; the two
+  dozen `custom_*` fields beside them are named from the schema and unexercised,
+  and there is no build anywhere to decode. Nothing here writes an animation.
+- **A copied slide's thumbnail is the original's.** The node keeps the source's
+  `thumbnails` data reference and is marked `thumbnailsAreDirty`, which is what
+  Keynote's own duplicate leaves behind — so the navigator shows the right
+  picture only after the app redraws it.
 - **A reference that leaves its component has to be declared.** The document
   body and the stylesheet are separate components, so pointing text at a style
   is two edits: the run, and a `ComponentInfo.external_references` entry saying
