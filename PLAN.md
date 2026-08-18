@@ -231,24 +231,44 @@ Everything layered on top of the cells; depends only on Phase 1.
 
 ## Phase 4 — Text: finish the story
 
-- [ ] Fix the standing limitation, widened to its true scope: editing text
+- [x] Fix the standing limitation, widened to its true scope: editing text
       remaps **every range anchored into the storage**, not just style runs —
       paragraph/character/list attribute tables, and equally tracked-change
       ranges, comment anchors, smart-annotation anchors, bookmark anchors,
       footnote anchors and ruby (phonetic guide) runs. The current clamping
       silently damages all of these today; this is a correctness fix, not a
       feature.
-- [ ] Range operations: insert/delete text at a range, not just replace-all.
-- [ ] Hyperlinks and smart fields: read them; edit a link target;
-      app-verified.
-- [ ] Lists: read list styles/levels per paragraph; change a paragraph's
-      list level.
-- [ ] The style-override flag (`TSS`): know whether a run is "named style"
+      *(All twenty-two tables of the 15.3.1 schema, in four anchorings.
+      Attachment, footnote and section anchors are **refused** rather than
+      remapped — deleting the character an image hangs off is how Pages deletes
+      the image, and that reaches the z-order and the media registry. A
+      length-delimited field outside the inventory is refused too.)*
+- [x] Range operations: insert/delete text at a range, not just replace-all.
+      *(`insert_text`, `delete_text`, `replace_text`; `set_text` is a full-range
+      replace. `iwork insert-text` / `delete-text`.)*
+- [x] Hyperlinks and smart fields: read them; edit a link target;
+      app-verified. *(2032's field 2 is the URL; `smart_fields`, `set_link_url`,
+      `iwork links`. **The fixture is Apple's template bundle renamed** —
+      nothing can author a hyperlink here, and instantiating a template strips
+      them. Numbers opens the edited document and reads the linked words back;
+      no app's dictionary can report a URL, so the target itself is verified by
+      decoding.)*
+- [x] Lists: read list styles/levels per paragraph; change a paragraph's
+      list level. *(Read: field 6's `first` is the level, field 7 the style,
+      both sparse and both carried forward; `list_paragraphs`, `iwork
+      paragraphs`. **The write was not attempted** — no app here can be made to
+      change a list level, so there is nothing to verify a write against.)*
+- [x] The style-override flag (`TSS`): know whether a run is "named style"
       or "named style plus local overrides" — a prerequisite for preserving
       styling across edits, which this phase promises.
-- [ ] FORMAT.md: §Text updated with the full attribute-table inventory,
+      *(`style_of_run` → `ResolvedStyle`: the object, the named style it
+      descends from, whether it is a variation, `override_count` as found, and
+      the properties the variations set.)*
+- [x] FORMAT.md: §Text updated with the full attribute-table inventory,
       including bidi/vertical-text/ruby tables where the corpus can produce
-      them.
+      them. *(The corpus produces none of the last three, and neither does any
+      of the 901 bundled templates: fields 15, 16, 18, 20–23, 25 and 26 are
+      absent from all of them. Named from the schema, handled by shape.)*
 
 ## Phase 4b — Pages document structure
 
@@ -949,6 +969,13 @@ fixture, and what the app accepted.
   - `TP.DrawablesZOrderArchive` (10015) lists every drawable in the document in
     one order, the body storage included; it is depth, not placement.
 
+  What Phase 4 also wants from this phase, recorded here because it was found
+  while looking for something else:
+
+  - **A drawable already carries a hyperlink of its own**, at
+    `Drawable::hyperlink` — separate from the text smart fields, and read since
+    Phase 3.
+
   What Phase 8a (Keynote) should know:
 
   - **`KN.SlideArchive` field 7 is the slide's drawable list, in z-order back to
@@ -963,6 +990,176 @@ fixture, and what the app accepted.
     app's own replacement path was observed.
   - The theme carries live-video sources, and a slide-number placeholder that is
     referenced from field 20 rather than from the drawable list.
+
+- 2026-08-18 — **Phase 4 complete (text: the correctness fix).** The standing
+  limitation is gone: `insert_text`, `delete_text`, `replace_text` and a
+  `set_text` that is a full-range replace, all of which **remap** every table
+  anchored into the storage instead of clamping it. `text::TABLES` is the
+  twenty-two-table inventory, `iwork storages | links | insert-text |
+  delete-text` are the new verbs, `iwork paragraphs` grew list level and style,
+  `iwork check` gained four invariants, FORMAT.md §Text is rewritten and the
+  README's clamping bullet is removed. `cargo fmt --check` and `cargo clippy
+  --all-targets` clean; `cargo test --all-targets` green: 97 unit + 16 cell +
+  18 drawable + 15 fixture + 34 style + 22 table + **14 text** + 3 doc.
+  `IWORK_APP_CHECK=1` green over the whole suite, fifteen fixtures.
+
+  **The headline number: ten edits, ten byte-identical archives.** Every rule
+  below came from making Pages perform an edit and diffing the storage — the
+  Phase 2 method, unchanged — and the way they were checked is that the crate
+  was then asked to perform the same ten edits and its output compared with the
+  app's *byte for byte*. All ten match.
+
+  | # | Edit on `pages-styled` / a bolded copy | What the app did |
+  |---:|---|---|
+  | 1 | delete `[5, 20)`, across the first paragraph break | ¶ `0, 12, 74, 128` → `0, 59, 113` — the entry inside the range is **dropped** |
+  | 2 | insert 8 units at 21 | → `0, 12, 82, 136` — a plain shift |
+  | 3 | delete `[12, 20)`, beginning at a paragraph start | → `0, 12, 66, 120` — the entry **at** the start stays |
+  | 4 | delete `[12, 74)`, one whole paragraph, break included | → `0, 12, 66`: **red survived at 12 and italic vanished** |
+  | 5 | delete `[30, 90)`, middle of one paragraph to middle of the next | → `0, 12, 68` |
+  | 6 | insert `\rNEU` at 21 | → `0, 12, **22 with no style**, 78, 132` |
+  | 7 | delete `[19, 30)`, a character run's whole extent | the **character table field is removed** |
+  | 8 | delete `[15, 25)`, across a run's start | char `0, 19, 30` → `0, 15, 20` |
+  | 9 | delete `[24, 40)`, across a run's end | → `0, 19, 24` |
+  | 10 | replace `[18, 19)` with four units, at a run boundary | → `0, 22, 33` — the run's start **moved**, so typed text joins the run before it |
+
+  **Two different models, and that is the finding.** A *run* table behaves
+  exactly like an attributed string: surviving characters keep their attributes,
+  a run whose extent is wholly deleted disappears, and text arriving at a
+  boundary joins the run before it. A *paragraph* table does not — case 4 is the
+  proof, and it is counter-intuitive: deleting the whole of paragraph 2 left
+  paragraph 3's text wearing paragraph 2's style. Paragraph style is anchored to
+  the paragraph start, not carried by the characters. Getting this from a schema
+  was impossible; getting it from reasoning would have got it wrong.
+
+  **Two bugs the phase found in the crate, both in what a paragraph *is*.**
+
+  - **`\r` ends a paragraph**, and it is the separator these apps write most
+    often, because AppleScript's `return` is one. Four storages in the corpus —
+    `pages-styled`, `pages-unicode`, two Keynote decks — were being read as one
+    long paragraph. It hid behind the test that should have caught it, which
+    skips a storage it believes has fewer than two paragraphs: exactly the shape
+    the bug produced.
+  - **`U+000C` ends one too** — the page or column break from the Insert menu.
+    Found by running the new "a paragraph entry sits at a paragraph start"
+    invariant over **all 901 template bundles the three apps ship**, where 40
+    Pages templates put a run right after one in the shape `…\n\u{c}Text`.
+
+  With all five break characters counted (`\n \r \f U+0005 U+0004`), every
+  paragraph-anchored entry in all 901 bundles sits at a paragraph start or at
+  the end of the text, and so does every one of the 389 storages in this
+  repository's corpus. That sweep is the strongest evidence in the phase and
+  cost one shell loop.
+
+  **What is refused, and why refusing is the right answer.** Deleting the
+  `U+FFFC` an image is anchored to made Pages **delete the image**: the
+  `TSD.ImageArchive`, its mask and their places in the drawable list all went.
+  That reaches the z-order and the media registry, which this phase does not
+  touch, so `Error::AnchoredObject` names the object and leaves the document
+  alone. A section break (`U+0004`) is the same case one character away — a
+  section's entry sits on the character *after* its break, so what a delete
+  destroys is the break — and merging two `TP.SectionArchive`s is Phase 4b's.
+  Also refused: an index inside a surrogate pair, an index outside the text,
+  text containing `U+FFFC`/`U+0004`/`U+0005`, and **a storage carrying a
+  length-delimited field outside the inventory**, which is the boundary the
+  brief asked for: no storage in the corpus or in any of the 901 bundles has
+  one, and remapping a table nobody knows about is how an edit damages a
+  document in silence.
+
+  **`iwork check` learned four invariants**, all kept by the corpus and by all
+  901 bundles: entry indices increase and fit the text; a paragraph-anchored
+  entry sits at a paragraph start or at the end; a run or paragraph table begins
+  at 0; an overlapping-highlight range fits and covers something. The second one
+  caught `apply_text_style` writing a paragraph run inside a paragraph, which is
+  the shape Keynote's own parser is documented as rendering 2^16 points tall
+  before crashing; the range now grows to the paragraphs it touches.
+
+  **Two fixtures, and what it took to get them.**
+
+  - `pages-lists.pages`, from Apple's Real Estate Flyer: three named list styles
+    in one storage, two paragraphs one level in, and a `U+0005` inside a
+    paragraph. Pages' rich text carries `font`, `size` and `color` and no list
+    property at all, so no script can make a list — a new
+    `pages-from-template.applescript` builds it the way the Numbers fixtures are
+    built.
+  - `numbers-links.numbers` is **Apple's template bundle renamed**, and that is
+    a first for this corpus. All 901 bundles were scanned for
+    `TSWP.HyperlinkFieldArchive`: five objects, in three Numbers templates, none
+    in the 640 Pages templates or the 182 Keynote themes. No app's dictionary
+    has a link command (`sdef` over all three returns only `sourceURL`); setting
+    a Pages body text to a sentence containing a URL does not auto-link it; and
+    **instantiating any of the three templates strips the links**. A
+    `.nmbtemplate` is the same ZIP a `.numbers` is, Numbers opens the copy and
+    reads it back, and it carries the two run shapes a smart field comes in — a
+    link terminated by an entry with no field, and a link running to the end of
+    the text with no terminator at all.
+
+  **What the apps accepted.** `tests/text.rs::the_app_opens_an_edited_document_and_reads_the_new_words_back`
+  makes six round trips: text inserted into the middle of a styled paragraph and
+  read back by Pages; a delete across a paragraph boundary read back; a
+  replacement in `pages-report`, whose anchored photo and table are **still
+  there and still at the same coordinates** afterwards, drawable by drawable;
+  text replaced inside a Keynote shape and read back; a hyperlink repointed with
+  text inserted in front of it, opened by Numbers, its run still covering the
+  same words; and the edited deck decoded again with `check` clean.
+
+  **One harness fault, of the class the README warns about.** The three
+  `check-*.applescript` readers took `document 1`, which is the right document
+  only when nothing else is open — not true of an app restoring its session, and
+  not true when two test binaries drive the apps at once. The failure is a
+  complete, plausible reading of *another file*: an edited deck reported the
+  words it had before the edit, and only in the parallel run. They now wait for
+  the document **by name**, matching the name with and without its extension,
+  which is what `table-oracle.applescript` was taught in Phase 2 for the same
+  reason. The lesson keeps arriving in the same envelope.
+
+  **What resisted.**
+
+  - **Changing a paragraph's list level was not attempted.** The level is read
+    (field 6's `first`, confirmed against a Keynote theme whose five paragraphs
+    are levels 0 to 4), but nothing here can make an app perform that edit, so
+    there is nothing to check a write against. Ground rule 1 says that is not a
+    write.
+  - **Eight of the twenty-two tables were never seen**: bookmarks, footnotes,
+    ruby, dictation, tracked insertions and deletions, comment highlights and
+    pencil annotations are absent from the corpus *and* from all 901 bundled
+    templates. They are named from the schema and remapped by shape. The
+    overlapping-range remapping in particular has no document behind it and is
+    Unverified.
+  - **The character-style table is nearly untouched by the corpus**: two
+    storages, in a Numbers pivot template. The rules for it come from the probe
+    documents, which is why the probe documents were made.
+  - **A link's target cannot be verified through an app.** No dictionary reports
+    a URL. The app proves the document opens and the linked words are still
+    there; the URL is checked by decoding.
+
+  What Phase 4b (Pages structure) should know:
+
+  - **A section's entry is at a paragraph start, not on the break character.**
+    `pages-report` has entries at 0 and 146, reading `…\n\u{4}Company Name`,
+    with the entry on the `C`. Deleting a `U+0004` is refused here precisely
+    because merging the two `TP.SectionArchive`s is 4b's job.
+  - **A footnote body is a storage of `kind = 2`,** and there is not one
+    anywhere: not in the corpus, not in any of the 901 bundles. A footnote
+    fixture has to be authored by hand or not at all. The same is true of
+    comments and of tracked changes.
+  - `iwork storages` prints every storage with its `kind` and its tables, which
+    is the tool for finding headers (kind 1), notes (4) and cells (5).
+  - **`U+000C` is a page or column break** and a document with columns will have
+    them; `TSWP.ColumnStyleArchive` (2024) hangs off `table_layout_style`
+    (field 12), which four storages in the corpus carry.
+
+  What Phase 7 (comments, metadata) should know:
+
+  - **Comment anchors come in two tables and only one of them is a run table.**
+    `table_highlight` (23) is the non-overlapping form; `table_overlapping_highlight`
+    (25) carries explicit `TSP.Range`s so two comments may cover the same
+    characters. This crate remaps both, and has never seen either.
+  - **Tracked deletions leave their characters in the text.** A reader that
+    ignores `table_deletion` (22) shows deleted text as live text, and an edit
+    that ignores it moves a deletion marker onto text nobody deleted.
+  - `TSWP.ChangeArchive` (2060) has no zero value for its kind — insertion is 1
+    and deletion is 2 — so a default-zero enum there is an invalid archive
+    rather than the first variant.
 
 ## Execution notes
 

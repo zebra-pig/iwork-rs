@@ -16,11 +16,24 @@ on run argv
 
 	do shell script "open -g -b com.apple.Keynote " & quoted form of target
 
+	-- Wait for *this* document, not for any document. `document 1` is only the
+	-- right one when nothing else is open, which is not true of an app that
+	-- restores its last session, and not true when two test binaries are driving
+	-- the apps at once. The failure it produces is the bad kind: a complete,
+	-- plausible reading of another file. Seen here as an edited deck reporting
+	-- the words it had before the edit.
+	set wanted to my basename(target)
+	set alsoWanted to my stem(wanted)
 	set doc to missing value
 	repeat 60 times
 		tell application id "com.apple.Keynote"
 			try
-				if (count of documents) > 0 then set doc to document 1
+				repeat with d in documents
+					if (name of d) is wanted or (name of d) is alsoWanted then
+						set doc to d
+						exit repeat
+					end if
+				end repeat
 			end try
 		end tell
 		if doc is not missing value then exit repeat
@@ -70,3 +83,23 @@ on run argv
 	set AppleScript's text item delimiters to ""
 	return answer
 end run
+
+-- The name of the document that was asked for, and the same without its
+-- extension: the Finder's hide-extension flag decides which of the two the app
+-- answers, and it differs between a document an app wrote itself and one this
+-- crate wrote.
+on basename(path)
+	set AppleScript's text item delimiters to "/"
+	set base to last text item of path
+	set AppleScript's text item delimiters to ""
+	return base
+end basename
+
+on stem(base)
+	set AppleScript's text item delimiters to "."
+	set pieces to text items of base
+	if (count of pieces) > 1 then set pieces to items 1 thru -2 of pieces
+	set base to pieces as text
+	set AppleScript's text item delimiters to ""
+	return base
+end stem

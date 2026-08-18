@@ -624,7 +624,34 @@ fn the_app_opens_an_edited_document_and_reads_the_new_words_back() {
     doc.save(&out).unwrap();
     app_check(&out, "Neuer Formtext");
 
-    // 5. And the app's own save of an edited document still decodes here — the
+    // 5. A hyperlink repointed, and text inserted in front of it. Numbers has
+    //    no way to report a link's target — no app's dictionary has one, which
+    //    is why the fixture had to be a template — so what the app can say is
+    //    that it opens the document and reads the words the link covers. The
+    //    URL itself is checked by decoding the result, above.
+    let path = fixture!("numbers-links.numbers");
+    let mut doc = Document::open(&path).unwrap();
+    let link = doc
+        .smart_fields()
+        .into_iter()
+        .find(|f| f.message_type == iwork::document::TYPE_HYPERLINK_FIELD)
+        .unwrap();
+    doc.set_link_url(link.object, "mailto:leonce@zebrapig.com")
+        .unwrap();
+    doc.insert_text(link.storage, 0, "Kontakt\n").unwrap();
+    let out = std::env::temp_dir().join("iwork-link.numbers");
+    doc.save(&out).unwrap();
+    let after = Document::open(&out).unwrap();
+    let moved = after
+        .smart_fields()
+        .into_iter()
+        .find(|f| f.object == link.object)
+        .unwrap();
+    assert_eq!(moved.payload.as_deref(), Some("mailto:leonce@zebrapig.com"));
+    assert_eq!(moved.text, link.text);
+    app_check(&out, &link.text);
+
+    // 6. And the app's own save of an edited document still decodes here — the
     //    strongest statement available without a screen: whatever Keynote made
     //    of what this crate wrote, it is something this crate reads back.
     let resaved = Document::open(&out).unwrap();
