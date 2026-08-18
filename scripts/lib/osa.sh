@@ -33,6 +33,15 @@
 # hour for a process that is gone.
 osa_acquire() {
 	local dir=${TMPDIR:-/tmp}/iwork-osa.lock waited=0 holder
+	# **Re-entrant, and it has to be.** `app-check.sh --self-test` calls
+	# `check` twice in one process, and the release only happens on EXIT — so
+	# the second call met a lock held by its own pid, decided the holder was
+	# alive, and waited the full half-hour timeout before stealing it from
+	# itself. Thirty minutes of a script sleeping, and the run afterwards was
+	# green, which is the worst way for a bug to behave.
+	if [ -n "${OSA_LOCK:-}" ]; then
+		return 0
+	fi
 	while ! mkdir "$dir" 2>/dev/null; do
 		holder=$(cat "$dir/pid" 2>/dev/null)
 		if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then

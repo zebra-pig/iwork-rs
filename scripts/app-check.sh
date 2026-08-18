@@ -87,12 +87,35 @@ check() {
 	# the wrong thing to say about a document nobody has looked at yet.
 	osa_warm "$extension"
 
-	osa_run "$timeout" "$script" "$document"
-	case $? in
+	# Two attempts, from a killed app the second time.
+	#
+	# A timeout here means "no answer in $timeout seconds", and there are two
+	# reasons for that: the app is showing a dialog about a document it will
+	# not open, which is what this script is for; or the app is simply busy,
+	# which on a machine running six test binaries at once it repeatedly was —
+	# a different fixture each run, each of them opening perfectly well on its
+	# own. Reporting the second as the first is exactly the failure the README
+	# warns about, in the direction that wastes an afternoon. A document the
+	# app genuinely refuses is refused twice; a busy app is not busy from a
+	# cold start. `make-fixtures.sh` has retried for the same reason since
+	# Phase 1b.
+	local attempt outcome=0
+	for attempt in 1 2; do
+		osa_run "$timeout" "$script" "$document"
+		outcome=$?
+		[ "$outcome" -eq 0 ] && break
+		if [ "$attempt" = 1 ]; then
+			printf 'app-check: no answer for %s — killing %s and trying once more\n' \
+				"$(basename "$document")" "$bundle" >&2
+			osa_kill "$extension"
+			osa_warm "$extension"
+		fi
+	done
+	case $outcome in
 	0) ;;
 	124)
 		printf 'REFUSED (timeout): %s\n' "$document" >&2
-		printf '  %s never answered. A modal dialog is the usual reason.\n' "$bundle" >&2
+		printf '  %s never answered, twice. A modal dialog is the usual reason.\n' "$bundle" >&2
 		osa_kill "$extension"
 		return 124
 		;;
