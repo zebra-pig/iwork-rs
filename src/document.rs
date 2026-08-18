@@ -2697,6 +2697,11 @@ impl Document {
             ));
         }
 
+        // The Pages spine checks itself: sections that begin on a break,
+        // section templates with their three zones each, threads whose boxes
+        // exist. See `structure_problems`.
+        problems.extend(self.structure_problems());
+
         // Tables check themselves: keys that resolve, refcounts that match the
         // cells, cell counts that match the records. See `Table::audit` for why
         // each of those is a rule.
@@ -2708,6 +2713,120 @@ impl Document {
                 ));
             }
             problems.extend(table.audit());
+        }
+        problems
+    }
+
+    /// Everything about a Pages document's structure that looks wrong.
+    ///
+    /// Four rules, each kept by every Pages document in the corpus **and by
+    /// all 640 bundled Pages templates**, and each one breakable by an edit
+    /// that moves text without thinking about what is anchored to it:
+    ///
+    /// * **A section that does not begin at 0 begins after a `U+0004`.** The
+    ///   break is what makes the section, and an entry that has drifted off one
+    ///   is a section boundary the app will not draw.
+    /// * **A section's template pages are section templates.** Field 23, 24
+    ///   and 25 of `TP.SectionArchive` reach `TP.SectionTemplateArchive`s, and
+    ///   a section with none has no headers, footers or page background at all.
+    /// * **A section template has three headers and three footers, and every
+    ///   one is a storage of kind 1.** Never any other count: 1734 of them
+    ///   across the bundled templates and 306 in this corpus.
+    /// * **A thread's storage and boxes exist.** A linked-text-box thread that
+    ///   names a missing box is a flow with a hole in it.
+    fn structure_problems(&self) -> Vec<String> {
+        let mut problems = Vec::new();
+        let Some(structure) = self.structure() else {
+            return problems;
+        };
+        let body: Vec<u16> = structure
+            .body_storage
+            .and_then(|id| self.storage_text(id).ok())
+            .unwrap_or_default()
+            .encode_utf16()
+            .collect();
+
+        for section in &structure.sections {
+            if section.start > 0 {
+                let before = body.get(section.start as usize - 1).copied();
+                if before != Some(0x0004) {
+                    problems.push(format!(
+                        "section {} begins at character {} and the character before it \
+                         is not the U+0004 that starts a section",
+                        section.identifier, section.start
+                    ));
+                }
+            }
+            if section.templates.iter().all(Option::is_none) {
+                problems.push(format!(
+                    "section {} has no first, even or odd section template",
+                    section.identifier
+                ));
+            }
+            for template in section.templates.iter().flatten() {
+                match self.object(*template) {
+                    Some((_, object))
+                        if object.message_type() == crate::pages::TYPE_SECTION_TEMPLATE => {}
+                    Some((_, object)) => problems.push(format!(
+                        "section {}: page template {template} is type {}, not a \
+                         TP.SectionTemplateArchive",
+                        section.identifier,
+                        object.message_type()
+                    )),
+                    None => problems.push(format!(
+                        "section {}: page template {template} does not exist",
+                        section.identifier
+                    )),
+                }
+            }
+        }
+
+        let mut zones: BTreeMap<(u64, bool), usize> = BTreeMap::new();
+        for entry in &structure.header_footers {
+            *zones
+                .entry((entry.section_template, entry.footer))
+                .or_default() += 1;
+            match self.object(entry.storage) {
+                Some((_, object)) if object.message_type() == crate::TYPE_STORAGE => {
+                    let kind = Message::decode(object.payload())
+                        .ok()
+                        .and_then(|m| m.varint(1));
+                    if kind != Some(1) {
+                        problems.push(format!(
+                            "{} {} of section template {} is a storage of kind {}, not 1",
+                            entry.kind(),
+                            entry.storage,
+                            entry.section_template,
+                            kind.map(|k| k.to_string()).unwrap_or_else(|| "none".into())
+                        ));
+                    }
+                }
+                _ => problems.push(format!(
+                    "{} {} of section template {} is not a text storage",
+                    entry.kind(),
+                    entry.storage,
+                    entry.section_template
+                )),
+            }
+        }
+        for ((template, footer), count) in zones {
+            if count != 3 {
+                problems.push(format!(
+                    "section template {template} has {count} {}(s), not three",
+                    if footer { "footer" } else { "header" }
+                ));
+            }
+        }
+
+        for thread in &structure.threads {
+            for object in thread.storage.iter().chain(thread.boxes.iter()) {
+                if self.object(*object).is_none() {
+                    problems.push(format!(
+                        "linked-text-box thread {} names missing object {object}",
+                        thread.identifier
+                    ));
+                }
+            }
         }
         problems
     }
