@@ -520,6 +520,10 @@ you give it one, and closes without saving. `--self-test` corrupts a copy of a
 document it has just accepted and checks that the app refuses it, because a
 harness that always says yes is worse than none.
 
+Every one of these gives the app two attempts, killing it in between: a failure
+from an app means either "it will not do this" or "it was busy", the two look
+identical, and a busy app is not busy from a cold start.
+
 `resave.sh` is the harder test, for the parts of a document no dictionary will
 report. Pages has no header, footer, footnote or column property at all, so
 "the app read it back" has to be arranged: the app is made to open the edited

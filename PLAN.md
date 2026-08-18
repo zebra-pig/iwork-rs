@@ -1373,6 +1373,12 @@ fixture, and what the app accepted.
   and watch the clock. `osa_acquire` now returns at once if `OSA_LOCK` is
   already set.
 
+  The retry then went into the shared library as **`osa_try`**, and all five
+  entry points that drive the apps use it — `app-check.sh`, the three oracles
+  and `resave.sh`. It was needed: on one run Pages stopped answering during
+  `section-oracle.sh` and took the section comparison down with it, on a
+  document it had read correctly two minutes earlier.
+
   `--self-test` still refuses the corrupted copy, which is the check that the
   check is looking.
 
