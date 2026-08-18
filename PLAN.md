@@ -2779,9 +2779,14 @@ fixture, and what the app accepted.
 
   Recommendation: the supported case is app-verified and every unsupported case
   is a named refusal that leaves the document byte-identical, so this is safe to
-  merge on its own terms. The one judgement call worth a human's eye before it
-  lands on main is the **formula allowance** — permitting an insert when the
-  references provably shift with their host (the `Zweite Tabelle` case) is
-  correct by construction but is *not* app-verified, only the no-formula case is;
-  a reviewer who prefers strictly-verified-only could tighten it to refuse any
-  table with a formula that references it at all.
+  merge on its own terms. The one judgement call the agent flagged — the
+  **formula allowance** — is now **app-verified too**: inserting a row at index 1
+  of `Zweite Tabelle` (above the operands of `B4 = SUM(B2:B3)`), then opening the
+  result in Numbers, comes back as `B5 = SUM(B3:B4) = 750` — the app itself
+  shifted the relative references and recomputed to the right answer, the new
+  row 2 empty, Schrauben/Muttern shifted to rows 3/4. So the allowance is not
+  merely correct-by-construction; the app confirms it. The whole feature is
+  app-verified for what it supports.
+  *(Verified 2026-08-19 via `scripts/table-oracle.sh` on the inserted document;
+  the oracle TSV shows `Zweite Tabelle` at 5 rows with `B5 … =SUM(B3:B4)`
+  evaluating to `750`.)*
