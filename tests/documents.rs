@@ -470,6 +470,44 @@ fn a_template_from_anywhere_else_claims_no_identifier() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A new document's on-disk shape is not the template's. A directory-form
+/// template must still yield a single-file document — the directory form is a
+/// choice a user makes for a document grown large (`Change File Type`), never
+/// something inherited from whatever shape a template bundle sat in on disk.
+#[test]
+fn a_document_from_a_template_defaults_to_the_single_file_form() {
+    // Any package will do; a template bundle is the natural source, a corpus
+    // fixture the fallback so this runs on a machine without the apps.
+    let Some(source) = templates()
+        .into_iter()
+        .next()
+        .or_else(|| corpus().into_iter().next())
+    else {
+        eprintln!("no template or fixture — skipping");
+        return;
+    };
+
+    let dir = scratch("template-form");
+    let as_directory = dir.join(source.file_name().unwrap());
+    Package::read(&source)
+        .unwrap()
+        .write_as(&as_directory, Form::Directory)
+        .unwrap();
+    assert_eq!(
+        Package::read(&as_directory).unwrap().form,
+        Form::Directory,
+        "the template was not written in the directory form to begin with"
+    );
+
+    let document = Document::from_template(&as_directory).unwrap();
+    assert_eq!(
+        document.package().form,
+        Form::SingleFile,
+        "a directory-form template yielded a directory-form document"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The acceptance test: the app opens what `from_template` wrote, reads it,
 /// and saves it back from its own model — and leaves the identity alone,
 /// which is what says the document is properly a new one rather than a copy

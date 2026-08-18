@@ -339,6 +339,11 @@ impl Document {
         let path = path.as_ref();
         let mut package = Package::read(path)?;
         crate::metadata::assign_identity(&mut package, crate::metadata::Lineage::Fresh)?;
+        // A new document starts in the single-file form, whatever shape the
+        // template happened to be stored in. The directory form is a thing a
+        // user chooses for a document that has grown large (`Change File Type`),
+        // not something a template's on-disk layout should decide for them.
+        package.form = crate::package::Form::SingleFile;
         let mut document = Document::from_package(package)?;
         let by_extension = Kind::from_extension(path);
         if by_extension != Kind::Unknown {
