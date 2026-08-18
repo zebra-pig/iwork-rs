@@ -70,6 +70,23 @@ on run argv
 							set end of harvest to "cells unavailable (" & cellCode & "): " & cellError
 						end try
 					end repeat
+					-- Text on a sheet that is not in a table. A Numbers sheet
+					-- holds shapes and text items like any other iWork
+					-- container, and the templates put addresses, notes and —
+					-- the only hyperlinks in the whole install — in them. A
+					-- reader that stops at the tables cannot see an edit to any
+					-- of that, and answers "not found" about a document that
+					-- contains it.
+					repeat with i in text items of s
+						try
+							set end of harvest to (object text of i) as text
+						end try
+					end repeat
+					repeat with i in shapes of s
+						try
+							set end of harvest to (object text of i) as text
+						end try
+					end repeat
 				end repeat
 			on error message number code
 				try

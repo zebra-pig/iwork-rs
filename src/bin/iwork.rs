@@ -26,6 +26,12 @@ iwork — inspect and edit Apple iWork documents (.pages, .numbers, .key)
   iwork extract   <file> <dir>             write embedded media to a directory
   iwork roundtrip <file> <out>             decode and re-encode every object
 
+Character indices — <at>, <from>, <to> — are UTF-16 code units, the unit iWork
+counts text in, so an emoji is two, and ranges are half-open. An edit that
+would land inside a surrogate pair, or delete the character an image, a
+footnote or a section break is anchored to, is refused by name rather than
+performed badly.
+
 drawables and media
 
   iwork drawables <file>                   every placed object: geometry, style,

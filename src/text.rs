@@ -14,11 +14,12 @@
 //!  anchor                     ↑ 9 = U+FFFC, an image lives here
 //! ```
 //!
-//! Delete `[5, 20)` from that and three different things have to happen: the
-//! paragraph entry at 12 disappears because its paragraph merged into the one
-//! before it, the character entries at 8 and 17 collapse onto 5 with the run
-//! that was wholly inside the range vanishing, and the anchor at 9 is not
-//! remappable at all — its character is gone, and with it the image.
+//! Delete `[5, 20)` from that and three different things have to happen. The
+//! paragraph entry at 12 disappears, because its paragraph merged into the one
+//! before it and 5 is no longer a paragraph start. The character entries at 8
+//! and 17 both come back to 5, and the run that was wholly inside the range
+//! loses to the one that outlived it. And the anchor at 9 is not remappable at
+//! all — its character is gone, and with it the image.
 //!
 //! Everything in this module below [`length`] exists to get that right. What it
 //! does was **measured**, by having Pages perform each edit and diffing the
@@ -54,10 +55,9 @@ pub enum Anchoring {
     /// A run of characters, reaching from this entry's index to the next
     /// entry's, or to the end of the text.
     Run,
-    /// A single character: the `U+FFFC` an attachment stands in for, the
-    /// `U+0004` a section begins after. Delete that character and the thing it
-    /// anchors has to go too — which is a document-wide operation, so this
-    /// crate refuses instead.
+    /// A single character — the `U+FFFC` an attachment stands in for. Delete
+    /// that character and the thing it anchors has to go too, which is a
+    /// document-wide operation, so this crate refuses instead.
     Character,
     /// An explicit `{location, length}` range, so two entries may cover the
     /// same characters. Only the two comment/annotation tables use it.
@@ -1391,6 +1391,56 @@ mod tests {
             .collect();
         assert_eq!(kept, vec![None, Some(42)]);
         assert_eq!(shape(&s, 8), vec![(0, None), (12, Some(700))]);
+    }
+
+    /// A run table's first entry stays at 0 however the text is edited: it is
+    /// where the first run begins, and text inserted at the start of a storage
+    /// has no earlier run to take its attributes from.
+    #[test]
+    fn a_run_table_keeps_its_first_entry_at_zero() {
+        let mut s = storage(
+            &"x".repeat(40),
+            vec![(8, vec![entry(0, Some(100)), entry(10, Some(200))])],
+        );
+        edit(&mut s, 0, 0, "neu");
+        assert_eq!(shape(&s, 8), vec![(0, Some(100)), (13, Some(200))]);
+
+        // And a delete from the very start: the characters that survive keep
+        // what they had, so the second run reaches 0.
+        let mut s = storage(
+            &"x".repeat(40),
+            vec![(8, vec![entry(0, Some(100)), entry(10, Some(200))])],
+        );
+        edit(&mut s, 0, 10, "");
+        assert_eq!(shape(&s, 8), vec![(0, Some(200))]);
+    }
+
+    /// Replacing the whole text is `set_text`, and it keeps the storage's first
+    /// paragraph style over everything: the paragraphs the new text has get an
+    /// entry each where the table had one per paragraph before.
+    #[test]
+    fn a_full_replace_keeps_the_first_style_and_repopulates() {
+        let mut s = styled();
+        edit(&mut s, 0, 171, "Eins\rZwei\rDrei");
+        assert_eq!(
+            shape(&s, 5),
+            vec![(0, Some(1732648)), (5, None), (10, None)]
+        );
+        assert_eq!(read(&s), "Eins\rZwei\rDrei");
+    }
+
+    /// An astral character counts as two, and an edit that lands after one is
+    /// still an edit at the index the table counts in.
+    #[test]
+    fn an_edit_past_an_emoji_counts_in_code_units() {
+        let mut s = storage(
+            "a\u{1F600}bcdef",
+            vec![(8, vec![entry(0, Some(100)), entry(5, Some(200))])],
+        );
+        assert_eq!(length(&read(&s)), 8);
+        edit(&mut s, 3, 0, "XY");
+        assert_eq!(read(&s), "a\u{1F600}XYbcdef");
+        assert_eq!(shape(&s, 8), vec![(0, Some(100)), (7, Some(200))]);
     }
 
     /// An edit that changes nothing leaves every table byte for byte.
