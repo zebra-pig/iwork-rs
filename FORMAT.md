@@ -267,24 +267,81 @@ persisted in the document.
 
 ### Text — `TSWP.StorageArchive` (type 2001)
 
-The same in all three apps. Text and formatting are stored separately.
+The same in all three apps. Text and formatting are stored separately: field 3
+is the text, and everything else that says anything about it is an **attribute
+table** — a list of entries anchored to character indices.
 
-| Field | Contents |
-|---|---|
-| 2 | reference to the owning stylesheet |
-| 3 | the text, UTF-8, **repeated** — long text is split into several runs |
-| 5 | **paragraph**-style table |
-| 6 | packed paragraph/bidi flags |
-| 7 | list-style table |
-| 8 | **character**-attribute table |
+| Field | Contents | Wire |
+|---|---|---|
+| 1 | `kind`: 0 body, 1 header, 2 footnote, 3 text box, 4 note, 5 cell, 6 unclassified, 7 TOC, 8 undefined. Default 3 | varint |
+| 2 | reference to the owning stylesheet | message |
+| 3 | the text, UTF-8, **repeated** — in practice always one element | bytes |
+| 4 | `has_itext` — the storage holds fields or attachments | varint |
+| 10 | `in_document` — reachable from the body, as against the pasteboard | varint |
+| 13 | a gap in every version of the schema | — |
 
-Every attribute table has the same shape: repeated entries of
-`{1: character_index, 2: reference to a style object}`, strictly increasing by
-index. A run starts at its index and continues until the next entry.
+#### The full attribute-table inventory
 
-Paragraphs are `\n` within a single storage; there is no per-paragraph object.
-Each shape on the page owns its own storage — the Pages sample has 62 of them
-for the body, headline, pull quotes, captions, chart labels and credits.
+Twenty-two of them. The list is Apple's, read off the `TSWPArchives.proto`
+descriptor carved from the installed 15.3.1 binaries; the **anchoring** column
+is this repository's, and is what decides what an edit does to each one.
+
+| Field | Apple's name | Anchoring | Entries point at | In the corpus |
+|---:|---|---|---|---|
+| 5 | `table_para_style` | paragraph | `TSWP.ParagraphStyleArchive` (2022) | 389 storages |
+| 6 | `table_para_data` | paragraph | `{first, second}` — **`first` is the list level** | 389 |
+| 7 | `table_list_style` | paragraph | `TSWP.ListStyleArchive` (2023) | 389 |
+| 8 | `table_char_style` | run | `TSWP.CharacterStyleArchive` (2021) | 2 |
+| 9 | `table_attachment` | character | `TSWP.DrawableAttachmentArchive` (2003), `TSWP.NumberAttachmentArchive` (2043) | 18 |
+| 11 | `table_smartfield` | run | the smart fields, 2031–2042 — **2032 is the hyperlink** | 7 |
+| 12 | `table_layout_style` | paragraph | `TSWP.ColumnStyleArchive` (2024) | 4 |
+| 14 | `table_para_starts` | paragraph | `{first, second}`, both 0 | 389 |
+| 15 | `table_bookmark` | run | `TSWP.BookmarkFieldArchive` (2035) | — |
+| 16 | `table_footnote` | character | `TSWP.FootnoteReferenceAttachmentArchive` (2008) | — |
+| 17 | `table_section` | paragraph | `TP.SectionArchive` / `TSWP.SectionPlaceholderArchive` (10011) | 4 |
+| 18 | `table_rubyfield` | run | `TSWP.RubyFieldArchive` (2042) | — |
+| 19 | `table_language` | run | a BCP-47 string | 1 |
+| 20 | `table_dictation` | run | a dictation metadata string | — |
+| 21 | `table_insertion` | run | `TSWP.ChangeArchive` (2060), insertion | — |
+| 22 | `table_deletion` | run | `TSWP.ChangeArchive` (2060), deletion | — |
+| 23 | `table_highlight` | run | `TSWP.HighlightArchive` (2013) — a comment anchor | — |
+| 24 | `table_para_bidi` | paragraph | `{first, second}` — writing direction | 389 |
+| 25 | `table_overlapping_highlight` | range | `TSWP.HighlightArchive` (2013), as explicit ranges | — |
+| 26 | `table_pencil_annotation` | range | `TSWP.PencilAnnotationArchive` (2016) | — |
+| 27 | `table_tatechuyoko` | run | `TSWP.TateChuYokoFieldArchive` (10023) | — |
+| 28 | `table_drop_cap_style` | paragraph | `TSWP.DropCapStyleArchive` (10024) | 208 |
+
+The counts are over the thirteen generated fixtures, 389 storages. The eight
+tables with no count were never seen: no bundled template has a footnote, a
+tracked change, a comment, a bookmark or ruby text either — all 901 template
+bundles were scanned and every one of fields 15, 16, 18, 20–23, 25 and 26 is
+absent from all of them. They are named here from the schema, and this crate
+handles them by shape rather than by having met one.
+
+**A field outside this list, and outside the plain ones, is an error.** No
+storage in the corpus or in any of the 901 bundles has one, and `iwork check`
+says so if one turns up, because a table nobody knows about is a table a
+remapping breaks in silence.
+
+#### Four entry shapes
+
+```
+ObjectAttributeTable            1 repeated { 1 character_index, 2 → object }
+StringAttributeTable            1 repeated { 1 character_index, 2 string }
+ParaDataAttributeTable          1 repeated { 1 character_index, 2 first, 3 second }
+OverlappingFieldAttributeTable  1 repeated { 1 TSP.Range{1 location, 2 length}, 2 → object }
+```
+
+The first three are keyed by a single index and are strictly increasing. Only
+the last carries an explicit range, which is what lets two comment highlights
+cover the same characters.
+
+**An entry with no object is meaningful, not corrupt.** It terminates the run
+before it — a hyperlink that stops short of the end of the text has one — or
+asserts that there is deliberately nothing here (the drop-cap table's `{0}`), or
+says that a paragraph takes whatever was in force, which is exactly what Pages
+writes when it splits one. 177 of the 589 paragraph-style entries in the corpus
+have no object.
 
 > **Fields 5 and 8 are the other way round from what the order suggests.** The
 > evidence is right here: the run indices of field 5 "are exactly the paragraph
@@ -295,12 +352,27 @@ for the body, headline, pull quotes, captions, chart labels and credits.
 > the one from field 8.
 >
 > A paragraph table may also carry a final entry at the *end* of the text, which
-> is where the style of a paragraph not yet typed comes from.
+> is where the style of a paragraph not yet typed comes from — 276 of the 389
+> storages in the corpus have one.
 
-Paragraphs end at `\n` — and at **`\r` `U+000D`**, at **`U+0005`**, which appears
-where a document changes layout mid-storage, and at **`U+0004`**, which marks a
-section boundary. The paragraph table puts a run immediately after any of them,
-so reading one as ordinary text splits the paragraphs one character wrong.
+Paragraphs are `\n` within a single storage; there is no per-paragraph object.
+Each shape on the page owns its own storage — the Pages sample has 62 of them
+for the body, headline, pull quotes, captions, chart labels and credits.
+
+#### Where a paragraph ends
+
+Five characters end one: `\n`, **`\r` `U+000D`**, **`U+000C`** (the page or
+column break from the Insert menu), **`U+0005`** (a layout change mid-storage)
+and **`U+0004`** (a section boundary). The paragraph table puts a run
+immediately after any of them, so reading one as ordinary text splits the
+paragraphs one character wrong — which is enough to make a paragraph style land
+on the wrong words, and enough to make an edit remap onto them.
+
+The list is not guesswork: with all five counted, **every paragraph-anchored
+entry of every storage in all 901 bundled templates sits on a paragraph start**
+(or at the end of the text). With `\r` uncounted, four storages in this
+repository's own corpus failed; with `U+000C` uncounted, 40 Pages templates
+did.
 
 **`\r` is the separator the apps write most often.** AppleScript's `return` is a
 carriage return, so every document built by script has them: `pages-styled`'s
@@ -318,19 +390,186 @@ its two section breaks, with a paragraph run on the `C`. It is the same
 character that turns up *alone* as the whole of a body storage in a document
 whose text lives in shapes — a section marker with nothing either side of it.
 
-**Run indices are character offsets, not byte offsets.** In a storage reading
-`"Von Benjamin Keller\nVeröffentlicht am 07.09.2017\nim Magazin …"` the
-character-attribute table holds `[0, 20, 49]`, which is exactly the paragraph
-starts counted in characters; counted in UTF-8 bytes they would be
-`[0, 20, 50]`. Three further storages agree. The samples are entirely BMP, so
-they cannot separate UTF-16 code units from Unicode scalars — this crate assumes
-UTF-16, since the text model is NSString-backed.
-
 Two placeholder characters show up as the entire contents of a storage:
 `U+FFFC OBJECT REPLACEMENT CHARACTER` stands in for an embedded drawable (it is
 what every Numbers table storage contains), and `U+0004` — the section marker
 above — appears alone in the Pages body storage of a document whose text all
 lives in shapes.
+
+### Editing text — what moves with it
+
+Ten probes, each one Pages performing an edit on a fixture, saving, and the
+storage archive diffed. `pages-styled`'s body is
+`Überschrift\rEin roter Absatz…\rEin kursiver Absatz…\rEin ganz…` — 171 code
+units with paragraph runs at 0, 12, 74 and 128 pointing at four different
+styles. A second fixture was made by having Pages set a bold 22pt font over
+characters 19–29, which gave it a character table of `[0 nil, 19 bold, 30 nil]`.
+
+| # | Edit | Paragraph table before → after | Character table before → after |
+|---:|---|---|---|
+| 1 | delete `[5, 20)`, across the first break | `0, 12, 74, 128` → `0, 59, 113` | |
+| 2 | insert 8 units at 21 | → `0, 12, 82, 136` | |
+| 3 | delete `[12, 20)`, from a paragraph start | → `0, 12, 66, 120` | |
+| 4 | delete `[12, 74)`, one paragraph whole | → `0, 12, 66` | |
+| 5 | delete `[30, 90)`, spanning a break | → `0, 12, 68` | |
+| 6 | insert `\rNEU` at 21 | → `0, 12, **22 nil**, 78, 132` | |
+| 7 | delete `[19, 30)`, a run's whole extent | | `0, 19, 30` → **the field is removed** |
+| 8 | delete `[15, 25)`, across a run's start | | → `0, 15, 20` |
+| 9 | delete `[24, 40)`, across a run's end | | → `0, 19, 24` |
+| 10 | replace `[18, 19)` with four units | | → `0, 22, 33` |
+
+Three rules come out of that, and they are not the same rule:
+
+**A run table behaves exactly like an attributed string.** A character that
+survives keeps its attributes (8, 9); a run whose whole extent goes, goes with
+it (7); and text arriving at a boundary joins the run *before* it (10 — the
+run's start moved from 19 to 22 rather than staying to cover the new text). So
+an index inside the removed range lands on the far side of whatever replaced it,
+and two entries landing on the same index resolve in favour of the **later**
+one. The only exception is the entry at index 0, which stays at 0: it is where
+the first run begins, and text inserted at the very start of a storage has no
+earlier run to take its attributes from.
+
+**A paragraph table does not.** Told to delete a whole paragraph, break
+included (4), Pages kept the *deleted* paragraph's style on the boundary and
+dropped the style of the paragraph that moved up into it — red survived at 12
+and italic vanished. Paragraph style is anchored to the paragraph start, not
+carried by the characters, so an entry at the edit's own index stays put and a
+collision resolves in favour of the **earlier** one. An entry that lands
+anywhere that is no longer a paragraph start is dropped (1, 5).
+
+**A new paragraph gets an entry with no object** (6). Pages wrote `{1: 22}` and
+nothing else for the paragraph its insertion created — a nil attribute, meaning
+"whatever was in force here". It did that only in the paragraph-style table,
+which had an entry per paragraph already; the list-style, paragraph-data, bidi
+and drop-cap tables of the same storage were sparse and it added nothing to
+them.
+
+Pages also **removes a run table that has stopped saying anything** (7): after
+the only styled run was deleted the character table would have read "nothing,
+from 0", and the field is simply not there in what Pages wrote.
+
+> `Document::replace_text` reproduces all ten. Given the same fixture and the
+> same edit it writes a **byte-identical `TSWP.StorageArchive`** in every one of
+> the ten cases — which is a stronger statement than "the app opens it", and the
+> only reason to believe the rules above rather than a plausible reading of them.
+
+#### What cannot be remapped
+
+An **attachment** entry names a single character, and that character *is* the
+attachment: `U+FFFC`, with the drawable, footnote or number hanging off it.
+Delete it and Pages deletes the object — told to delete a range covering the
+photo's `U+FFFC` in `pages-report`, it removed the `TSD.ImageArchive`, its mask,
+and their entries in the drawable list. That is a document-wide operation
+touching the z-order and the media registry, so this crate refuses the edit by
+name instead (`Error::AnchoredObject`) and leaves the document untouched.
+
+A **section break** is the same case seen from one character away: a section's
+entry sits on the character *after* its `U+0004` — `pages-report` has entries at
+0 and 146, reading `…123-4567\n\u{4}Company Name`, with the entry on the `C` —
+so what a delete destroys is the break, not the entry. Deleting one merges two
+`TP.SectionArchive`s, and is refused for the same reason.
+
+`U+FFFC`, `U+0004` and `U+0005` are equally refused as *input*: each stands for
+an object rather than for itself, and a section break with no section behind it
+is a document that claims a section it does not have.
+
+#### Indices are UTF-16 code units
+
+Everywhere: in the tables, in this crate's API, in the paragraph ranges. **Run
+indices are character offsets, not byte offsets.** In a storage reading
+`"Von Benjamin Keller\nVeröffentlicht am 07.09.2017\nim Magazin …"` the
+character-attribute table holds `[0, 20, 49]`, which is exactly the paragraph
+starts counted in characters; counted in UTF-8 bytes they would be
+`[0, 20, 50]`. Three further storages agree. Those samples are entirely BMP, so
+they cannot separate UTF-16 code units from Unicode scalars — UTF-16 is what the
+text model uses, being NSString-backed, and an emoji therefore counts as two.
+
+An edit may not land between the halves of a surrogate pair; the result would be
+two unpaired surrogates, which is not a string. `Error::SplitSurrogate` says so.
+
+### Smart fields and hyperlinks — `table_smartfield` (field 11)
+
+Every smart field wraps a `TSWP.SmartFieldArchive`, which in 15.3.1 is one
+field: `{1: uuid string}`. What is around it says which kind it is.
+
+```
+TSWP.HyperlinkFieldArchive        2032   1 → SmartFieldArchive, 2 string url
+TSWP.PlaceholderSmartFieldArchive 2031   1 → SmartFieldArchive, 2 bool localizable
+TSWP.DateTimeSmartFieldArchive    2034   format, locale, styles, TSP.Date
+TSWP.MergeSmartFieldArchive       2036   1 → Placeholder, 2 contacts property, …
+```
+
+A link's target is field 2 of the 2032 archive and nothing else — one string.
+The *text* is separate and does not follow it, which is how a link reading
+"example.com" can point somewhere else, and is a shape the app writes happily.
+
+Field 11 is a **run** table, and the runs come in two shapes. In
+`46_Business_Modern_Invoice_PM`, one storage reading
+`123-456-7890\nno_reply@example.com\nexample.com` carries
+
+```
+{0}                  no field: plain text
+{13, → mailto:…}     the address, 13..32
+{33}                 no field: the run ends at the newline
+{34, → http://…}     the second link, 34.. and no terminator at all
+```
+
+so a run ends at the next entry, terminated or not, and a field running to the
+end of the text simply has no entry after it.
+
+**Nothing in this repository can author one.** All 901 bundled templates were
+scanned: five 2032 objects, in three Numbers templates, and none at all in the
+640 Pages templates or the 182 Keynote themes. None of the three apps'
+scripting dictionaries has a link command — `sdef` over all three returns
+nothing but `sourceURL`. Setting a Pages body text to a sentence containing a
+URL and an e-mail address does not auto-link either. And **instantiating a
+template strips the links**: all three of the templates that have them write the
+document out with the text and without the smart fields. The fixture is
+therefore Apple's bundle renamed, which Numbers opens and reads back.
+
+### Lists — `table_para_data` (6) and `table_list_style` (7)
+
+Two tables keyed on the same paragraph starts, and both sparse: a paragraph with
+no entry keeps what the paragraph before it had.
+
+* Field 6 is `{character_index, first, second}` and **`first` is the indent
+  level**, counted from 0. Keynote's `60_Academic_Modern_PM` theme has a storage
+  whose five paragraphs read "Body Level One" to "Body Level Five" with `first`
+  0, 1, 2, 3, 4 — and `table_list_style` naming a style override at each of the
+  same five indices. `second` is 0 everywhere in the corpus.
+* Field 7 points at a `TSWP.ListStyleArchive` (2023), whose per-level arrays are
+  parallel repeated fields: field 11 the label kind per level (0 none, 2 glyph,
+  3 number), field 13 the indent in points per level, and **field 16 the literal
+  bullet string per level** — `"-", "•", "-", "•", …` in Apple's "Note Taking"
+  style, and no field 16 at all in the one named "None".
+
+`pages-lists`, from the Real Estate Flyer template, has fourteen paragraphs
+across three named list styles with two of them one level in. Changing a
+paragraph's level is **not implemented**: it would mean writing field 6, and
+nothing available here can make an app perform the edit to check the result
+against — Pages' rich text carries `font`, `size` and `color` and no list
+property at all, and the menu item needs a window. Read-only until a probe can
+prove a write.
+
+### Named style, or named style plus overrides
+
+Most runs in a real document do not point at a named style. They point at a
+**variation**: an anonymous archive with no `1.1`, a parent at `1.3.1`, the flag
+at `1.4`, and a property bag holding only what differs. `pages-styled`'s four
+paragraphs are one named style and three variations of it.
+
+The distinction is what makes "I edited the Title style and nothing happened"
+happen, and it is what an edit has to preserve, so it is worth reading directly:
+`Document::style_of_run` walks from the run to the first ancestor with a name
+and reports both — the object the run points at, the named style it descends
+from, and the properties set in between. Only the variations' bags count. A
+named style's bags carry every property it has, defaults included, so counting
+those would report a paragraph as overriding sixty things when it overrides one.
+
+`override_count` (field 10) is the archive's own claim about how many it
+overrides. It is read and reported, never maintained: the Real Estate Flyer's
+named styles all say 57.
 
 ### Text styles — `TSWP.*StyleArchive` (types 2021–2023)
 
@@ -1505,10 +1744,17 @@ Rules a writer must respect:
    that field.
 4. **Register every new `Data/` file** in the `DataInfo` table; drawables refer
    to media by id.
-5. **Fix attribute-run tables** whenever text length changes.
+5. **Remap attribute tables whenever the text changes**, and remap them
+   according to what each one is anchored to. Clamping every index into the new
+   length keeps the tables well formed and moves every style, hyperlink,
+   anchored image and comment anchor onto the wrong characters. §Text has the
+   three rules and the probes behind them.
 6. **Keep run tables strictly increasing**, and free of entries that repeat the
    entry before them — an entry that draws no boundary is not what iWork writes,
-   and editing accumulates them.
+   and editing accumulates them. A paragraph-anchored entry must additionally
+   sit at a paragraph start, or at the end of the text; Keynote's own parser is
+   documented as rendering a text box 2^16 points tall and then crashing on one
+   that does not.
 7. **Never leave a dangling reference.** Removing a style means removing every
    reference to it: the runs that use it, the stylesheet entries that list it,
    *and* its place in its parent's family entry.
@@ -1540,6 +1786,12 @@ Rules a writer must respect:
     nothing had been done.
 15. **Refuse an edit whose consequences are outside the file you were given.**
     Replacing an image's bytes cannot recompute the crop, the mask, the Instant
-    Alpha path or the adjustments that were derived from the old pixels. The
-    only honest options are to refuse or to redo the whole non-destructive
-    stack; this crate refuses, by name.
+    Alpha path or the adjustments that were derived from the old pixels.
+    Deleting the character an image is anchored to cannot remove the image from
+    the drawable list, the z-order and the media registry. The only honest
+    options are to refuse or to do the whole job; this crate refuses, by name.
+16. **A field you cannot place is not a field to skip.** A storage's attribute
+    tables are told apart by field number and by nothing else, and an
+    unrecognised one is far more likely to be a table than not. Refusing the
+    edit is the safe answer; carrying it through unchanged while every other
+    table moves is the unsafe one.

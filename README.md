@@ -15,7 +15,13 @@ for storage in doc.text_storages() {
     println!("{}: {}", storage.identifier, storage.text);
 }
 
-doc.set_text(6083, "A new headline")?;
+// Editing text remaps everything anchored into the storage: style runs,
+// hyperlinks, list levels, anchored drawables, comment anchors. Indices are
+// UTF-16 code units, and an edit that would split a surrogate pair or delete
+// the character an object hangs off is refused by name.
+doc.insert_text(6083, 12, "eingeschoben ")?;
+doc.delete_text(6083, 40..55)?;
+doc.set_text(6083, "A new headline")?;                                 // a full-range replace
 
 // Text styles, by copy-and-adjust
 for style in doc.text_styles() {
@@ -50,7 +56,11 @@ cargo install --path .
 
 iwork inspect   Report.pages              # package, components, media, object census
 iwork text      Report.pages              # every text storage, with its object id
+iwork storages  Report.pages              # …and every attribute table each one carries
+iwork links     Report.pages              # hyperlinks and smart fields, with their text
 iwork set-text  Report.pages 6083 "…" out.pages
+iwork insert-text Report.pages 6083 12 "…" out.pages   # at character 12
+iwork delete-text Report.pages 6083 12 30 out.pages    # characters 12..30
 iwork objects   Budget.numbers 2001       # every object of one message type
 iwork dump      Talk.key 1                # one object, field by field
 iwork check     Report.pages              # look for a broken object graph
@@ -79,7 +89,7 @@ iwork set-style    Report.pages 3801 font-size=f32:18 out.pages
 iwork set-style    Report.pages 3801 11.3=f32:18       out.pages   # the same field
 iwork apply-style  Report.pages 6083 0 8 3801 out.pages
 iwork delete-style Report.pages 3801 3712 out.pages    # 3712 replaces it
-iwork paragraphs   Report.pages 6083      # paragraph ranges, for apply-style
+iwork paragraphs   Report.pages 6083      # ranges, list level, style and bullet
 iwork properties                          # every named style property, and its evidence
 ```
 
@@ -134,7 +144,10 @@ that line:
 | **Apply** | point a character range at a style, splitting the run table and restoring what followed |
 
 Everything that decides *which text gets which style* works on the attribute
-tables, whose shape is asserted by the test suite.
+tables, whose shape is asserted by the test suite. There are twenty-two of them
+and they are not all alike — `iwork storages` lists what a document has, and
+[FORMAT.md](FORMAT.md) has the inventory with what each one is anchored to,
+which is what decides where its entries go when the text under them changes.
 
 What is *inside* a style is a weaker kind of knowledge, and the split matters:
 a wrong name in the registry only prints wrong, while a wrong field number
@@ -340,7 +353,19 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | Media registry resolves | ✅ | — (no media in samples) | ✅ (33) |
 | Text extraction | ✅ | ✅ | ✅ |
 | Edit text, leave every other object alone | ✅ | ✅ | ✅ |
+| All 22 attribute tables inventoried; an unknown field refuses the edit | ✅ | ✅ | ✅ |
 | Attribute tables point at styles of the matching kind | ✅ | ✅ | ✅ |
+| Entries increase, fit the text, and start at 0 | ✅ | ✅ | ✅ |
+| Paragraph entries sit at paragraph starts — over all 901 bundled templates | ✅ | ✅ | ✅ |
+| Insert, delete and replace a range; everything anchored moves with it | ✅ | ✅ | ✅ |
+| **Ten edits reproduce Pages' own archive byte for byte** | ✅ | — | — |
+| A paragraph created or destroyed keeps the bookkeeping exact | ✅ | ✅ | ✅ |
+| An edit inside a surrogate pair, or over an anchor, is refused by name | ✅ | ✅ | ✅ |
+| **The app reads back inserted, deleted and replaced text** | ✅ | — | ✅ |
+| Hyperlinks: read, and their target changed | — | ✅ | — |
+| Smart fields: run extents, terminated and unterminated | ✅ | ✅ | — |
+| List level and list style per paragraph | ✅ | ✅ | ✅ |
+| A run resolved to its named style plus its local overrides | ✅ | ✅ | ✅ |
 | Copy a style: one new object, text untouched | ✅ | ✅ | ✅ |
 | Apply a style, leave every other stream alone | ✅ | ✅ | ✅ |
 | A copy keeps the template's kind (named vs variation) | ✅ | ✅ | ✅ |
@@ -481,9 +506,15 @@ harness that always says yes is worse than none.
   the Finder and iCloud will show the old first page until iWork re-saves the
   document. Regenerating them means rendering the layout, which is a far larger
   project than reading and writing the file.
-- **Editing text truncates styling past the edit.** Attribute runs are clamped
-  into the new length, not remapped onto the new wording. See
-  [`text::write`](src/text.rs).
+- **A text edit that would delete an anchored object is refused.** Deleting the
+  `U+FFFC` an image, a footnote mark or a table hangs off means deleting that
+  object from the drawable list, the z-order and the media registry, and
+  deleting a `U+0004` merges two sections. Pages does all of that; this crate
+  does none of it, and says so by name instead of quietly detaching the object.
+- **Changing a paragraph's list level is not implemented.** The level is read —
+  `iwork paragraphs` prints it — but nothing here can make an app perform that
+  edit to check a write against: Pages' rich text carries `font`, `size` and
+  `color` and no list property, and the menu item needs a window.
 - **Most style fields have no name.** Ten are named; the rest of the property
   bag is addressed by number, because the meaning is not published and
   [`style`](src/style.rs) will not guess. Read the tree with `iwork style`,

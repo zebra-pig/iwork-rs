@@ -599,11 +599,24 @@ fn the_app_opens_an_edited_document_and_reads_the_new_words_back() {
     // 4. Text inside a Keynote shape — a storage that is not the body.
     let path = fixture!("keynote-shapes.key");
     let mut doc = Document::open(&path).unwrap();
+    // Not simply the first shape with a storage. A Keynote drawable's caption
+    // is a storage whose whole contents are the `U+FFFC` of an attachment, and
+    // replacing that is refused, correctly; and most of the deck's shapes are
+    // on *layouts* (`TemplateSlide-*`), which the app does not enumerate, so an
+    // edit to one would come back as "the app did not read it" when the app was
+    // never going to.
     let shape = doc
         .drawables()
         .into_iter()
-        .find_map(|d| d.text)
-        .expect("a shape with text");
+        .filter(|d| d.stream.contains("/Slide-"))
+        .filter_map(|d| d.text)
+        .find(|storage| {
+            Document::open(&path)
+                .unwrap()
+                .set_text(*storage, "x")
+                .is_ok()
+        })
+        .expect("a shape on a slide whose text can be replaced");
     let length = iwork::text::length(&doc.storage_text(shape).unwrap());
     doc.replace_text(shape, 0..length, "Neuer Formtext")
         .unwrap();

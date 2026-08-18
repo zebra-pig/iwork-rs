@@ -21,6 +21,11 @@
 //! for storage in doc.text_storages() {
 //!     println!("{}: {}", storage.identifier, storage.text);
 //! }
+//! // Editing text remaps everything anchored into the storage — style runs,
+//! // hyperlinks, list levels, anchored drawables ([`text`]). Indices are
+//! // UTF-16 code units.
+//! doc.insert_text(6083, 12, "eingeschoben ")?;
+//! doc.delete_text(6083, 40..55)?;
 //! doc.set_text(6083, "A new headline")?;
 //!
 //! // Text styles are shared objects a range of text points at ([`style`]).
