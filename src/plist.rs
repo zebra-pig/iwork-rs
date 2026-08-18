@@ -549,9 +549,8 @@ mod xml {
             if c == b'=' || c.is_ascii_whitespace() {
                 continue;
             }
-            let value = sextet(c).ok_or_else(|| {
-                Error::Format("XML property list: <data> is not base64".into())
-            })?;
+            let value = sextet(c)
+                .ok_or_else(|| Error::Format("XML property list: <data> is not base64".into()))?;
             acc = (acc << 6) | value;
             bits += 6;
             if bits >= 8 {
@@ -898,7 +897,11 @@ mod tests {
         bytes.extend_from_slice(&(offsets.len() as u64).to_be_bytes());
         bytes.extend_from_slice(&0u64.to_be_bytes()); // root
         bytes.extend_from_slice(&(table_at as u64).to_be_bytes());
-        assert!(bytes.len() < 200, "the bomb is small: {} bytes", bytes.len());
+        assert!(
+            bytes.len() < 200,
+            "the bomb is small: {} bytes",
+            bytes.len()
+        );
 
         let start = std::time::Instant::now();
         let error = parse(&bytes).unwrap_err();
