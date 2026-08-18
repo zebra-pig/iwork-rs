@@ -775,15 +775,17 @@ fuzzing story rather than half of it.
   a window, and setting a section's body text to the empty string leaves the
   break where it was with a zero-length section behind it. Rather than guess,
   `Error::SectionBreak` says which break, which section, and what is unknown.
-- **A footnote, an endnote and a bookmark have no source anywhere.** All 901
-  templates the three apps ship were scanned for a storage of kind 2, a
-  `TSWP.FootnoteReferenceAttachmentArchive` and a `TSWP.BookmarkFieldArchive`:
-  zero, zero and zero. No scripting dictionary can author one, and no document
-  from a real user is available here. The settings a footnote obeys
-  are read and are the defaults; the containment — a `U+FFFC` in the text, a
-  `TSWP.FootnoteReferenceAttachmentArchive` and the note's own storage — is
-  written down in `FORMAT.md` from the 15.3.1 schema and marked Unverified. The
-  reader reports what it finds and never fails.
+- **No template ships a footnote, an endnote or a bookmark, and no script can
+  make one.** All 901 templates the three apps ship were scanned for a storage
+  of kind 2, a `TSWP.FootnoteReferenceAttachmentArchive` and a
+  `TSWP.BookmarkFieldArchive`: zero, zero and zero, and no scripting dictionary
+  has a command for any of them. `pages-footnotes.pages` and
+  `pages-bookmarks.pages` exist because the Insert menu was clickable on an
+  unlocked screen, and they are what turned the containment from Inferred into
+  Confirmed: a `U+000E` mark in the text, a
+  `TSWP.FootnoteReferenceAttachmentArchive`, and the note's own storage of kind
+  2. What stays Unverified is what the fixtures do not reach — endnote modes,
+  custom marks, restarting numbering — and nothing here writes a footnote.
 - **Rewriting a header replaces whatever the header was.** The date in a
   newsletter's header is a smart field and the storage holds the string it last
   rendered to, so setting the text removes the field and freezes the date. The

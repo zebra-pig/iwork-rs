@@ -416,38 +416,44 @@ is this repository's, and is what decides what an edit does to each one.
 
 | Field | Apple's name | Anchoring | Entries point at | In the corpus |
 |---:|---|---|---|---|
-| 5 | `table_para_style` | paragraph | `TSWP.ParagraphStyleArchive` (2022) | 389 storages |
-| 6 | `table_para_data` | paragraph | `{first, second}` — **`first` is the list level** | 389 |
-| 7 | `table_list_style` | paragraph | `TSWP.ListStyleArchive` (2023) | 389 |
-| 8 | `table_char_style` | run | `TSWP.CharacterStyleArchive` (2021) | 2 |
-| 9 | `table_attachment` | character | `TSWP.DrawableAttachmentArchive` (2003), `TSWP.NumberAttachmentArchive` (2043) | 18 |
-| 11 | `table_smartfield` | run | the smart fields, 2031–2042 — **2032 is the hyperlink** | 7 |
-| 12 | `table_layout_style` | paragraph | `TSWP.ColumnStyleArchive` (2024) | 4 |
-| 14 | `table_para_starts` | paragraph | `{first, second}`, both 0 | 389 |
-| 15 | `table_bookmark` | run | `TSWP.BookmarkFieldArchive` (2035) | — |
-| 16 | `table_footnote` | character | `TSWP.FootnoteReferenceAttachmentArchive` (2008) | — |
-| 17 | `table_section` | paragraph | `TP.SectionArchive` / `TSWP.SectionPlaceholderArchive` (10011) | 4 |
+| 5 | `table_para_style` | paragraph | `TSWP.ParagraphStyleArchive` (2022) | 1,622 storages |
+| 6 | `table_para_data` | paragraph | `{first, second}` — **`first` is the list level** | 1,622 |
+| 7 | `table_list_style` | paragraph | `TSWP.ListStyleArchive` (2023) | 1,622 |
+| 8 | `table_char_style` | run | `TSWP.CharacterStyleArchive` (2021) | 21 |
+| 9 | `table_attachment` | character | `TSWP.DrawableAttachmentArchive` (2003), `TSWP.NumberAttachmentArchive` (2043) | 117 |
+| 11 | `table_smartfield` | run | the smart fields, 2031–2042 — **2032 is the hyperlink** | 43 |
+| 12 | `table_layout_style` | paragraph | `TSWP.ColumnStyleArchive` (2024) | 14 |
+| 14 | `table_para_starts` | paragraph | `{first, second}`, both 0 | 1,622 |
+| 15 | `table_bookmark` | run | `TSWP.BookmarkFieldArchive` (2035) | 1 |
+| 16 | `table_footnote` | character | `TSWP.FootnoteReferenceAttachmentArchive` (2008) | 1 |
+| 17 | `table_section` | paragraph | `TP.SectionArchive` / `TSWP.SectionPlaceholderArchive` (10011) | 14 |
 | 18 | `table_rubyfield` | run | `TSWP.RubyFieldArchive` (2042) | — |
-| 19 | `table_language` | run | a BCP-47 string | 1 |
+| 19 | `table_language` | run | a BCP-47 string | 8 |
 | 20 | `table_dictation` | run | a dictation metadata string | — |
-| 21 | `table_insertion` | run | `TSWP.ChangeArchive` (2060), insertion | — |
-| 22 | `table_deletion` | run | `TSWP.ChangeArchive` (2060), deletion | — |
-| 23 | `table_highlight` | run | `TSWP.HighlightArchive` (2013) — a comment anchor | — |
-| 24 | `table_para_bidi` | paragraph | `{first, second}` — writing direction | 389 |
+| 21 | `table_insertion` | run | `TSWP.ChangeArchive` (2060), insertion | 1 |
+| 22 | `table_deletion` | run | `TSWP.ChangeArchive` (2060), deletion | 1 |
+| 23 | `table_highlight` | run | `TSWP.HighlightArchive` (2013) — a comment anchor | 1 |
+| 24 | `table_para_bidi` | paragraph | `{first, second}` — writing direction | 1,622 |
 | 25 | `table_overlapping_highlight` | range | `TSWP.HighlightArchive` (2013), as explicit ranges | — |
 | 26 | `table_pencil_annotation` | range | `TSWP.PencilAnnotationArchive` (2016) | — |
 | 27 | `table_tatechuyoko` | run | `TSWP.TateChuYokoFieldArchive` (10023) | — |
-| 28 | `table_drop_cap_style` | paragraph | `TSWP.DropCapStyleArchive` (10024) | 208 |
+| 28 | `table_drop_cap_style` | paragraph | `TSWP.DropCapStyleArchive` (10024) | 930 |
 
-The counts are over the thirteen generated fixtures this table was measured
-against, 389 storages; the corpus is 26 documents and 1,454 storages now, and
-no table outside this list has appeared in it —
-`no_storage_in_the_corpus_carries_an_unknown_table` is what says so. The eight
-tables with no count were never seen: no bundled template has a footnote, a
-tracked change, a comment, a bookmark or ruby text either — all 901 template
-bundles were scanned and every one of fields 15, 16, 18, 20–23, 25 and 26 is
-absent from all of them. They are named here from the schema, and this crate
-handles them by shape rather than by having met one.
+The counts are over the whole generated corpus as it stands — the 32 fixtures
+that are not password-protected, 1,622 storages — and no table outside this
+list has appeared in it;
+`no_storage_in_the_corpus_carries_an_unknown_table` is what says so.
+
+**Five of the counts arrived with the UI-made fixtures**, and they are the
+reason the "never seen" column is shorter than it was. Bookmarks (15) come from
+`pages-bookmarks`, the footnote table (16) from `pages-footnotes`, the two
+change tables (21, 22) and the comment highlights (23) from `pages-tracked` and
+`pages-comments` — all four made through menus no scripting dictionary
+exposes, on an unlocked screen. What is still unseen is ruby text (18),
+dictation metadata (20), overlapping comment highlights (25), Pencil
+annotations (26) and tatechuyoko (27): no bundled template has one either — all
+901 were scanned — so they are named here from the schema and handled by shape
+rather than by having been met.
 
 **A field outside this list, and outside the plain ones, is an error.** No
 storage in the corpus or in any of the 901 bundles has one, and `iwork check`
@@ -471,7 +477,7 @@ cover the same characters.
 before it — a hyperlink that stops short of the end of the text has one — or
 asserts that there is deliberately nothing here (the drop-cap table's `{0}`), or
 says that a paragraph takes whatever was in force, which is exactly what Pages
-writes when it splits one. 177 of the 589 paragraph-style entries in the corpus
+writes when it splits one. 612 of the 2,304 paragraph-style entries in the corpus
 have no object.
 
 > **Fields 5 and 8 are the other way round from what the order suggests.** The
@@ -511,10 +517,10 @@ carriage return, so every document built by script has them: `pages-styled`'s
 body reads `Überschrift\rEin roter Absatz…` and its paragraph table holds
 `[0, 12, 74, 128]` — the character after each `\r`. Reading `\r` as ordinary
 text makes a four-paragraph storage look like one paragraph of 171 characters,
-which is what this crate did until the paragraph tables of all 389 storages in
-the corpus were checked against the paragraph starts. With `\r` counted, every
-one of them is *exactly* the paragraph starts, plus in 276 cases a trailing
-entry at the end of the text.
+which is what this crate did until the paragraph tables of every storage in the
+corpus were checked against the paragraph starts. With `\r` counted, every one
+of them is *exactly* the paragraph starts, plus in 1,168 of 1,622 cases a
+trailing entry at the end of the text.
 
 `U+0004` was found in a document Pages built from its "Project Proposal"
 template, whose body storage reads `…123-4567\n\u{4}Company Name\n` at each of
