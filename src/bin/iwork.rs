@@ -97,6 +97,9 @@ tables
   iwork set-cell  <file> <table> <cell> <value> <out>
   iwork set-cell  <file> <table> <row> <col> <value> <out>
                                            write one value into one cell
+  iwork insert-row <file> <table> <at> <out>
+                                           insert an empty row before index
+                                           <at> (<at> == row count appends)
 
 charts
 
@@ -252,6 +255,9 @@ fn main() -> ExitCode {
         ["set-cell", file, table, row, column, value, out] => index(row)
             .and_then(|row| Ok((row, index(column)?)))
             .and_then(|(row, column)| set_cell(file, table, row, column, value, out)),
+        ["insert-row", file, table, at, out] => {
+            index(at).and_then(|at| insert_row(file, table, at, out))
+        }
         ["metadata", file] => metadata(file),
         ["annotations", file] => annotations(file),
         ["duplicate", file, out] => duplicate(file, out),
@@ -2535,6 +2541,29 @@ fn set_cell(
         describe_value(&value)
     );
     save(&doc, out)
+}
+
+fn insert_row(path: &str, table: &str, at: usize, out: &str) -> Result<(), Error> {
+    let mut doc = Document::open(path)?;
+    let before = find_table_rows(&doc, table)?;
+    doc.insert_row(table, at)?;
+    println!(
+        "table {table}: inserted an empty row at index {at} ({} -> {} rows); rewrote {}",
+        before,
+        before + 1,
+        doc.changed_streams().join(", ")
+    );
+    save(&doc, out)
+}
+
+/// Row count of a table named for a write, so the CLI can report the delta.
+fn find_table_rows(doc: &Document, wanted: &str) -> Result<usize, Error> {
+    let by_id: Option<u64> = wanted.parse().ok();
+    doc.tables()
+        .into_iter()
+        .find(|t| Some(t.identifier) == by_id || t.name == wanted)
+        .map(|t| t.rows)
+        .ok_or_else(|| Error::Format(format!("no table called '{wanted}'")))
 }
 
 /// A cell value as the command line spells it — text unless it says otherwise.

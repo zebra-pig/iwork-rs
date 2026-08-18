@@ -211,6 +211,110 @@ struct StagedRow {
     has: bool,
 }
 
+/// A planned row insert: the objects it rewrites, each with its new archive, so
+/// the whole write is proven before any of it is applied.
+struct RowInsertPlan {
+    touched: Vec<u64>,
+    model: u64,
+    model_archive: Message,
+    tile: u64,
+    tile_archive: Message,
+    row_bucket: u64,
+    bucket_archive: Message,
+    uid_map: u64,
+    uid_map_archive: Message,
+}
+
+/// The node kinds that name cells — the ones a row insert has to reason about.
+fn is_reference_node(kind: u32) -> bool {
+    use crate::formula::node;
+    matches!(
+        kind,
+        node::LOCAL_CELL_REFERENCE
+            | node::CROSS_TABLE_CELL_REFERENCE
+            | node::COLON
+            | node::REFERENCE_ERROR
+            | node::CELL_REFERENCE
+            | node::COLON_WITH_UIDS
+            | node::REFERENCE_ERROR_WITH_UIDS
+            | node::UID_REFERENCE
+            | node::LINKED_CELL_REF
+            | node::LINKED_COLUMN_REF
+            | node::LINKED_ROW_REF
+            | node::CATEGORY_REF
+            | node::COLON_TRACT
+            | node::VIEW_TRACT_REF
+            | node::INTERSECTION
+            | node::SPILL_RANGE
+    )
+}
+
+/// Of those, the ones that can carry a table id and so reach another table.
+fn is_cross_table_node(kind: u32) -> bool {
+    use crate::formula::node;
+    matches!(
+        kind,
+        node::CROSS_TABLE_CELL_REFERENCE
+            | node::COLON_WITH_UIDS
+            | node::REFERENCE_ERROR_WITH_UIDS
+            | node::UID_REFERENCE
+            | node::LINKED_CELL_REF
+            | node::LINKED_COLUMN_REF
+            | node::LINKED_ROW_REF
+            | node::CATEGORY_REF
+            | node::COLON_TRACT
+            | node::VIEW_TRACT_REF
+    )
+}
+
+/// Encode a `TSP.UUID` as `{1: lower, 2: upper}`.
+fn encode_uuid(uuid: crate::table::Uuid) -> Vec<u8> {
+    let mut message = Message::default();
+    message.set_in_order(1, Value::Varint(uuid.lower));
+    message.set_in_order(2, Value::Varint(uuid.upper));
+    message.encode()
+}
+
+/// Mint a row UUID unique among the table's existing row UUIDs.
+///
+/// Row UUIDs collide across tables, so uniqueness is only ever needed within the
+/// one table; the value is never verified against the app, which exposes no row
+/// UUID, so any high-entropy value the table does not already hold will do. It is
+/// derived deterministically from the table's identity and the insertion index
+/// so a given insert reproduces the same document, and bumped until it does not
+/// collide.
+fn mint_row_uuid(
+    existing: &BTreeSet<crate::table::Uuid>,
+    table: &crate::table::Table,
+    at: usize,
+) -> crate::table::Uuid {
+    // splitmix64 seeded from the table id and the insertion point.
+    let mut state = 0x9E37_79B9_7F4A_7C15u64
+        ^ (at as u64).wrapping_mul(0xD1B5_4A32_D192_ED03)
+        ^ table.identifier.wrapping_mul(0x2545_F491_4F6C_DD1D);
+    for byte in table.table_id.bytes() {
+        state = state
+            .wrapping_mul(0x0000_0100_0000_01B3)
+            .wrapping_add(u64::from(byte));
+    }
+    let mut next = move || {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    };
+    loop {
+        let candidate = crate::table::Uuid {
+            lower: next(),
+            upper: next(),
+        };
+        if candidate != crate::table::Uuid::default() && !existing.contains(&candidate) {
+            return candidate;
+        }
+    }
+}
+
 /// `TSWP.HyperlinkFieldArchive` — `{1: {1: uuid}, 2: url}`.
 pub const TYPE_HYPERLINK_FIELD: u32 = 2032;
 
@@ -1726,6 +1830,470 @@ impl Document {
             archive.fields.remove(at);
         }
         self.set_archive(list, &archive)
+    }
+
+    // -- inserting a row -----------------------------------------------------
+
+    /// Insert an empty row before index `at`; `at == rows` appends.
+    ///
+    /// Transactional in the same way as [`Document::set_cell`]: the whole write
+    /// is planned — and every case this crate cannot maintain safely is refused
+    /// by name — before a single byte moves, so a refused insert leaves the
+    /// document byte for byte as it was.
+    ///
+    /// **What it supports.** A plain rectangular table held in a single tile:
+    /// the row count is bumped, the tile's `TileRowInfo`s at or below the
+    /// insertion have their `tile_row_index` shifted down, the row header
+    /// bucket's per-row entries are shifted and one is added for the new empty
+    /// row, and the `ColumnRowUIDMapArchive` gains a fresh per-table-unique row
+    /// UUID at the new index (rebuilt sorted by UUID, the way the app keeps it).
+    /// The new row has no `TileRowInfo` and no cells — an empty row has none —
+    /// so [`Document::set_cell`] is what fills it afterwards.
+    ///
+    /// **What it refuses, by name**, because no corpus fixture proves the
+    /// bookkeeping and a wrong guess corrupts silently:
+    ///
+    /// * a table spread over more than one tile (the tile math is unproven);
+    /// * a categorised, pivoted or filtered table, or one with hidden or
+    ///   collapsed rows — the group nodes address rows by index and the hidden
+    ///   state by UUID, two schemes that must stay in step, and nothing here has
+    ///   both to verify against;
+    /// * a table carrying conditional highlighting (its rule ranges are row
+    ///   addressed);
+    /// * a merge at or straddling the insertion point — a merge is stored as an
+    ///   absolute-row formula that nothing here rewrites;
+    /// * any table whose formulas reference this table at or below the insertion
+    ///   point — inserting a row shifts what those references mean, and rewriting
+    ///   a `TSCE` AST is a phase of its own;
+    /// * an object the write would touch that carries version patches.
+    pub fn insert_row(&mut self, wanted: &str, at: usize) -> Result<(), Error> {
+        let table = self.table_for_write(wanted)?;
+        let where_ = format!("{}: insert row at {at}", table.name);
+
+        if at > table.rows {
+            return Err(Error::Format(format!(
+                "{where_}: the table has {} row(s), so a row goes in at 0..={}",
+                table.rows, table.rows
+            )));
+        }
+
+        // Everything unproven is refused here, before a byte moves.
+        if !table.categories.is_empty() {
+            return Err(Error::Format(format!(
+                "{where_}: the table is categorised, and a category's group nodes address \
+                 rows by index — maintaining them across an insert is unverified here"
+            )));
+        }
+        if table.pivot.is_some() {
+            return Err(Error::Format(format!(
+                "{where_}: the table is a pivot table, whose rows the app builds from its source"
+            )));
+        }
+        if table.filter.is_some() {
+            return Err(Error::Format(format!(
+                "{where_}: the table is filtered, and a filter's hidden state addresses rows \
+                 by UUID — maintaining it across an insert is unverified here"
+            )));
+        }
+        if !table.conditional_styles.is_empty() {
+            return Err(Error::Format(format!(
+                "{where_}: the table carries conditional highlighting, whose rule ranges are \
+                 row addressed"
+            )));
+        }
+        if table.footer_rows > 0 {
+            return Err(Error::Format(format!(
+                "{where_}: the table has {} footer row(s), and where an inserted row falls \
+                 relative to a footer is not something any fixture here can verify",
+                table.footer_rows
+            )));
+        }
+        if !table.row_states.user_hidden.is_empty()
+            || !table.row_states.filtered.is_empty()
+            || !table.row_states.collapsed_groups.is_empty()
+            || table.row_extents.iter().any(|extent| extent.hidden())
+        {
+            return Err(Error::Format(format!(
+                "{where_}: the table has hidden or collapsed rows, addressed by UUID"
+            )));
+        }
+        if let Some(merge) = table.merges.iter().find(|m| m.row + m.rows > at) {
+            return Err(Error::Format(format!(
+                "{where_}: a merge at row {} column {} would shift or straddle the new row, \
+                 and a merge is stored as an absolute-row formula this crate does not rewrite",
+                merge.row, merge.column
+            )));
+        }
+        if let Some(reason) = self.row_insert_would_break_a_formula(&table, at) {
+            return Err(Error::Format(format!("{where_}: {reason}")));
+        }
+
+        let plan = self.plan_row_insert(&table, at, &where_)?;
+        self.refuse_if_patched(&plan.touched, &where_)?;
+
+        // Commit: every object was decoded during planning, so nothing below
+        // refuses a write already committed to.
+        self.set_archive(plan.model, &plan.model_archive)?;
+        self.set_archive(plan.tile, &plan.tile_archive)?;
+        self.set_archive(plan.row_bucket, &plan.bucket_archive)?;
+        self.set_archive(plan.uid_map, &plan.uid_map_archive)?;
+        Ok(())
+    }
+
+    /// Would inserting a row at `at` shift what a formula refers to?
+    ///
+    /// A formula's cell references are stored as indexes (absolute) or offsets
+    /// from the host cell (relative), and nothing here rewrites a `TSCE` AST. So
+    /// every formula that could name a row of the target table is examined:
+    ///
+    /// * a whole-column reference (the row axis is `Unbounded`) is unaffected;
+    /// * a stored `#REF!` is already broken and stays so;
+    /// * an **absolute** row `r` is safe only when `r < at` — otherwise the cell
+    ///   it names moves out from under it;
+    /// * a **relative** row is safe only when host and referent fall on the same
+    ///   side of `at`, so that both shift together or neither does.
+    ///
+    /// Anything this crate cannot classify — a reference node whose shape it does
+    /// not read — is treated as unsafe rather than assumed harmless.
+    fn row_insert_would_break_a_formula(
+        &self,
+        target: &crate::table::Table,
+        at: usize,
+    ) -> Option<String> {
+        use crate::formula::Axis;
+        let at = at as i64;
+        let target_base = target.base_uid;
+        for t in self.tables() {
+            let same_table = t.model == target.model;
+            for (row, _column, formula) in t.formula_cells() {
+                let host_row = row as i64;
+                for node in &formula.ast.nodes {
+                    if !is_reference_node(node.kind) {
+                        continue;
+                    }
+                    let Some(reference) = node.reference() else {
+                        // A reference this crate does not read. In the target
+                        // table it may name a target row; in another table, only
+                        // a cross-table-capable node could reach the target.
+                        if same_table || is_cross_table_node(node.kind) {
+                            return Some(format!(
+                                "table {} holds a formula with a reference this crate cannot \
+                                 analyse ({}), so an inserted row might silently break it",
+                                t.name,
+                                crate::formula::node::name(node.kind)
+                            ));
+                        }
+                        continue;
+                    };
+                    if reference.is_error {
+                        continue;
+                    }
+                    let (into_target, cross) = match reference.table {
+                        None => (same_table, false),
+                        Some(uid) => (
+                            uid == target_base && target_base != crate::table::Uuid::default(),
+                            true,
+                        ),
+                    };
+                    if !into_target {
+                        continue;
+                    }
+                    for axis in [reference.row, reference.row_end] {
+                        let unsafe_reason = match axis {
+                            Axis::Unbounded => None,
+                            Axis::Absolute(r) => (r >= at).then_some("names a row at or below it"),
+                            Axis::Relative(_) if cross => {
+                                Some("is a relative cross-table reference")
+                            }
+                            Axis::Relative(offset) => {
+                                let referent = host_row + offset;
+                                ((host_row < at) != (referent < at))
+                                    .then_some("would shift relative to the row it names")
+                            }
+                        };
+                        if let Some(reason) = unsafe_reason {
+                            return Some(format!(
+                                "table {} has a formula whose reference to this table {reason}",
+                                t.name
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Locate every object a row insert rewrites and build each one's new form.
+    ///
+    /// Pure: it reads the document and returns the archives to store, so
+    /// [`Document::insert_row`] can prove the whole write before applying any of
+    /// it. Every fallible step — a multi-tile table, a missing UUID map, a
+    /// hidden-state extent that keys rows — refuses here.
+    fn plan_row_insert(
+        &self,
+        table: &crate::table::Table,
+        at: usize,
+        where_: &str,
+    ) -> Result<RowInsertPlan, Error> {
+        use crate::pb::decode_nested;
+        let model = table.model;
+        let mut model_archive = self.archive_of(model)?;
+        let store = model_archive
+            .bytes(4)
+            .and_then(decode_nested)
+            .ok_or_else(|| Error::Format(format!("{where_}: the model has no data store")))?;
+
+        // One tile, covering row 0 up, with room for one more row.
+        let tiles = store
+            .bytes(3)
+            .and_then(decode_nested)
+            .ok_or_else(|| Error::Format(format!("{where_}: the data store has no tiles")))?;
+        let tile_size = tiles.varint(2).unwrap_or(256) as usize;
+        let tile_entries: Vec<(u64, u64)> = tiles
+            .all(1)
+            .filter_map(|value| match value {
+                Value::Bytes(raw) => decode_nested(raw),
+                _ => None,
+            })
+            .filter_map(|entry| {
+                let id = entry.varint(1)?;
+                let reference = entry.bytes(2).and_then(crate::table::reference)?;
+                Some((id, reference))
+            })
+            .collect();
+        if tile_entries.len() != 1 {
+            return Err(Error::Format(format!(
+                "{where_}: the table spans {} tiles, and rebalancing a row across tiles is \
+                 unverified here",
+                tile_entries.len()
+            )));
+        }
+        let (tile_id, tile) = tile_entries[0];
+        if tile_id != 0 {
+            return Err(Error::Format(format!(
+                "{where_}: its one tile is numbered {tile_id}, not 0"
+            )));
+        }
+        if table.rows >= tile_size {
+            return Err(Error::Format(format!(
+                "{where_}: the table already fills its {tile_size}-row tile, so a new row would \
+                 have to open a second one"
+            )));
+        }
+
+        // One row-header bucket.
+        let header_storage = store
+            .bytes(1)
+            .and_then(decode_nested)
+            .ok_or_else(|| Error::Format(format!("{where_}: the data store has no row headers")))?;
+        let buckets: Vec<u64> = header_storage
+            .all(2)
+            .filter_map(|value| match value {
+                Value::Bytes(raw) => crate::table::reference(raw),
+                _ => None,
+            })
+            .collect();
+        if buckets.len() != 1 {
+            return Err(Error::Format(format!(
+                "{where_}: the row headers span {} buckets, not one",
+                buckets.len()
+            )));
+        }
+        let row_bucket = buckets[0];
+
+        // The UUID map, and the check that the hidden-state extent keys no rows.
+        let uid_map = model_archive
+            .bytes(46)
+            .and_then(crate::table::reference)
+            .ok_or_else(|| {
+                Error::Format(format!(
+                "{where_}: the model has no ColumnRowUIDMap, so a new row cannot be given a UUID"
+            ))
+            })?;
+        self.refuse_if_row_extent_keys_rows(&model_archive, where_)?;
+
+        let tile_archive = self.tile_with_inserted_row(tile, at, where_)?;
+        let bucket_archive = self.bucket_with_inserted_row(row_bucket, at, where_)?;
+        let uid_map_archive = self.uid_map_with_inserted_row(uid_map, at, table, where_)?;
+        model_archive.set(6, Value::Varint((table.rows + 1) as u64));
+
+        Ok(RowInsertPlan {
+            touched: vec![model, tile, row_bucket, uid_map],
+            model,
+            model_archive,
+            tile,
+            tile_archive,
+            row_bucket,
+            bucket_archive,
+            uid_map,
+            uid_map_archive,
+        })
+    }
+
+    /// Refuse if the row hidden-state extent (model field 70) carries any
+    /// `base_hidden_states` entries.
+    ///
+    /// A plain table's extent has none; a filtered or hand-hidden one carries an
+    /// entry per row, each keyed by a row UUID, and inserting a row would mean
+    /// minting an entry there too — which no corpus fixture proves.
+    fn refuse_if_row_extent_keys_rows(&self, model: &Message, where_: &str) -> Result<(), Error> {
+        use crate::pb::decode_nested;
+        let Some(owner) = model.bytes(70).and_then(decode_nested) else {
+            return Ok(());
+        };
+        for states in owner.all(2) {
+            let Value::Bytes(raw) = states else { continue };
+            let Some(states) = decode_nested(raw) else {
+                continue;
+            };
+            // Field 3 is the row extent; field 2 within it is base_hidden_states.
+            if let Some(extent) = states.bytes(3).and_then(decode_nested) {
+                if extent.get(2).is_some() {
+                    return Err(Error::Format(format!(
+                        "{where_}: the row hidden-state extent keys rows by UUID, and updating \
+                         it across an insert is unverified here"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The tile with every `TileRowInfo` at or below `at` shifted down one row.
+    ///
+    /// The inserted row is empty, so it gets no `TileRowInfo` — and `numrows`
+    /// (field 4), which counts them, does not change.
+    fn tile_with_inserted_row(&self, tile: u64, at: usize, where_: &str) -> Result<Message, Error> {
+        use crate::pb::decode_nested;
+        let mut archive = self.archive_of(tile)?;
+        for field in archive.fields.iter_mut() {
+            if field.number != 5 {
+                continue;
+            }
+            let Value::Bytes(raw) = &field.value else {
+                continue;
+            };
+            let mut info = decode_nested(raw)
+                .ok_or_else(|| Error::Format(format!("{where_}: a tile row does not decode")))?;
+            let index = info.varint(1).unwrap_or(0) as usize;
+            if index >= at {
+                info.set(1, Value::Varint((index + 1) as u64));
+                field.value = Value::Bytes(info.encode());
+            }
+        }
+        Ok(archive)
+    }
+
+    /// The row-header bucket with entries at or below `at` shifted down, and a
+    /// zero-cell entry added for the inserted row.
+    fn bucket_with_inserted_row(
+        &self,
+        bucket: u64,
+        at: usize,
+        where_: &str,
+    ) -> Result<Message, Error> {
+        use crate::pb::decode_nested;
+        let mut archive = self.archive_of(bucket)?;
+        for field in archive.fields.iter_mut() {
+            if field.number != 2 {
+                continue;
+            }
+            let Value::Bytes(raw) = &field.value else {
+                continue;
+            };
+            let mut entry = decode_nested(raw).ok_or_else(|| {
+                Error::Format(format!("{where_}: a row-header entry does not decode"))
+            })?;
+            let index = entry.varint(1).unwrap_or(0) as usize;
+            if index >= at {
+                entry.set(1, Value::Varint((index + 1) as u64));
+                field.value = Value::Bytes(entry.encode());
+            }
+        }
+        // The new empty row: default height, visible, no cells — the same shape
+        // `set_cell` writes when it first gives a row an entry.
+        let mut entry = Message::default();
+        entry.set_in_order(1, Value::Varint(at as u64));
+        entry.set_in_order(2, Value::Fixed32(0f32.to_le_bytes()));
+        entry.set_in_order(3, Value::Varint(0));
+        entry.set_in_order(4, Value::Varint(0));
+        archive.append_in_order(2, Value::Bytes(entry.encode()));
+        Ok(archive)
+    }
+
+    /// The `ColumnRowUIDMapArchive` with a fresh row UUID at index `at`.
+    ///
+    /// The row half (fields 4/5/6) is rebuilt from scratch: every existing row's
+    /// index is shifted down past `at`, a new per-table-unique UUID is minted for
+    /// the new row, and the three arrays are re-emitted sorted by UUID — the
+    /// order the app keeps them in. The column half (fields 1/2/3) is untouched.
+    fn uid_map_with_inserted_row(
+        &self,
+        uid_map: u64,
+        at: usize,
+        table: &crate::table::Table,
+        where_: &str,
+    ) -> Result<Message, Error> {
+        use crate::table::Uuid;
+        let mut archive = self.archive_of(uid_map)?;
+
+        let uuids: Vec<Uuid> = archive
+            .all(4)
+            .filter_map(|value| match value {
+                Value::Bytes(raw) => crate::pb::decode_nested(raw).map(|m| Uuid::decode(&m)),
+                _ => None,
+            })
+            .collect();
+        let indices: Vec<u64> = archive
+            .all(5)
+            .filter_map(|value| match value {
+                Value::Varint(n) => Some(*n),
+                _ => None,
+            })
+            .collect();
+        if uuids.len() != indices.len() {
+            return Err(Error::Format(format!(
+                "{where_}: the UUID map has {} row UUID(s) and {} index(es); a shape this crate \
+                 did not write is not safe to rebuild",
+                uuids.len(),
+                indices.len()
+            )));
+        }
+
+        let mut pairs: Vec<(Uuid, usize)> = uuids
+            .iter()
+            .zip(&indices)
+            .map(|(&uuid, &index)| {
+                let index = index as usize;
+                (uuid, if index >= at { index + 1 } else { index })
+            })
+            .collect();
+        let existing: BTreeSet<Uuid> = pairs.iter().map(|(uuid, _)| *uuid).collect();
+        let new_uuid = mint_row_uuid(&existing, table, at);
+        pairs.push((new_uuid, at));
+        // The app sorts by the 128-bit value, high half first.
+        pairs.sort_by_key(|(uuid, _)| (uuid.upper, uuid.lower));
+
+        let count = pairs.len();
+        let mut uid_for_index = vec![0u32; count];
+        for (position, (_, index)) in pairs.iter().enumerate() {
+            uid_for_index[*index] = position as u32;
+        }
+
+        archive.clear(4);
+        archive.clear(5);
+        archive.clear(6);
+        for (uuid, _) in &pairs {
+            archive.append_in_order(4, Value::Bytes(encode_uuid(*uuid)));
+        }
+        for (_, index) in &pairs {
+            archive.append_in_order(5, Value::Varint(*index as u64));
+        }
+        for &position in &uid_for_index {
+            archive.append_in_order(6, Value::Varint(u64::from(position)));
+        }
+        Ok(archive)
     }
 
     // -- drawables -----------------------------------------------------------
