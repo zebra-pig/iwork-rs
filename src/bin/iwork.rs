@@ -26,6 +26,25 @@ iwork — inspect and edit Apple iWork documents (.pages, .numbers, .key)
   iwork extract   <file> <dir>             write embedded media to a directory
   iwork roundtrip <file> <out>             decode and re-encode every object
 
+metadata, identity and the review layer
+
+  iwork metadata  <file>                   Properties.plist, DocumentIdentifier,
+                                           build history, locale, template,
+                                           custom-format list, encryption
+  iwork annotations <file>                 annotation authors, comments and
+                                           their anchors, tracked changes
+  iwork duplicate <file> <out>             save a copy with a *new* document
+                                           identity, so the two do not collide
+
+`iwork duplicate` gives the copy fresh documentUUID, shareUUID, privateUUID and
+versionUUID values and a revision to match — what Pages' own Save As was
+measured doing — and keeps stableDocumentUUID, which is what says the copy came
+from this document. A plain save keeps every one of them.
+
+Nothing in this repository's corpus has a comment or a tracked change and no
+app's scripting dictionary will make one, so `iwork annotations` reports the
+author storage every document has, and would report the rest if it ever met it.
+
 Character indices — <at>, <from>, <to> — are UTF-16 code units, the unit iWork
 counts text in, so an emoji is two, and ranges are half-open. An edit that
 would land inside a surrogate pair, or delete the character an image, a
@@ -191,6 +210,9 @@ fn main() -> ExitCode {
         ["set-cell", file, table, row, column, value, out] => index(row)
             .and_then(|row| Ok((row, index(column)?)))
             .and_then(|(row, column)| set_cell(file, table, row, column, value, out)),
+        ["metadata", file] => metadata(file),
+        ["annotations", file] => annotations(file),
+        ["duplicate", file, out] => duplicate(file, out),
         ["sections", file] => sections(file),
         ["structure", file] => structure(file),
         ["properties"] => properties(),
@@ -235,6 +257,44 @@ fn inspect(path: &str) -> Result<(), Error> {
             }
         );
     }
+
+    // Who this document is, where it came from and what it says it speaks —
+    // the things a reader wants before any object census.
+    let metadata = doc.metadata()?;
+    if let Some(properties) = &metadata.properties {
+        println!(
+            "identity  {} (version {})",
+            properties.document_uuid.as_deref().unwrap_or("no UUID"),
+            properties.version_uuid.as_deref().unwrap_or("—")
+        );
+        if properties.stable_document_uuid != properties.document_uuid {
+            println!(
+                "          a copy of {}",
+                properties.stable_document_uuid.as_deref().unwrap_or("—")
+            );
+        }
+    }
+    let mut origin = Vec::new();
+    if let Some(template) = &metadata.template_identifier {
+        origin.push(format!("from {template}"));
+    }
+    if let Some(locale) = &metadata.locale {
+        origin.push(format!("locale {locale}"));
+    }
+    if let Some(first) = metadata.build_versions.first() {
+        origin.push(first.clone());
+    }
+    if let Some(last) = metadata.build_versions.last() {
+        if metadata.build_versions.len() > 1 {
+            origin.push(format!("last written by {last}"));
+        }
+    }
+    if !origin.is_empty() {
+        println!("origin    {}", origin.join(", "));
+    }
+
+    // The review layer, always — "no comments" is a fact about the document.
+    println!("review    {}", doc.annotations().summary());
 
     println!("\n== package entries ==");
     for (name, data) in &doc.package().entries {
@@ -290,6 +350,206 @@ fn inspect(path: &str) -> Result<(), Error> {
         "\n{} objects across {} streams; names ending in ? are inferred, ?? unverified",
         census.values().sum::<usize>(),
         doc.stream_names().count()
+    );
+    Ok(())
+}
+
+fn metadata(path: &str) -> Result<(), Error> {
+    let doc = Document::open(path)?;
+    let metadata = doc.metadata()?;
+
+    if let Some(properties) = &metadata.properties {
+        println!("== {} ==", iwork::metadata::PROPERTIES);
+        let show = |name: &str, value: &Option<String>| {
+            println!("  {name:<34} {}", value.as_deref().unwrap_or("—"));
+        };
+        show("documentUUID", &properties.document_uuid);
+        show("shareUUID", &properties.share_uuid);
+        show("stableDocumentUUID", &properties.stable_document_uuid);
+        show("privateUUID", &properties.private_uuid);
+        show("versionUUID", &properties.version_uuid);
+        show("revision", &properties.revision);
+        show("fileFormatVersion", &properties.file_format_version);
+        for (name, value) in [
+            ("isMultiPage", properties.is_multi_page),
+            (
+                "hasExternalReferenceOrMissingData",
+                properties.has_external_reference_or_missing_data,
+            ),
+            (
+                "hasUnmaterializedRemoteData",
+                properties.has_unmaterialized_remote_data,
+            ),
+        ] {
+            match value {
+                Some(value) => println!("  {name:<34} {value}"),
+                None => println!("  {name:<34} —"),
+            }
+        }
+        for key in &properties.other {
+            println!("  {key:<34} (not named by this crate, carried through)");
+        }
+        if properties.document_uuid == properties.stable_document_uuid {
+            println!("  — this document has never been copied: the lineage is itself");
+        }
+    } else {
+        println!("no {}", iwork::metadata::PROPERTIES);
+    }
+
+    println!(
+        "\n{:<36} {}",
+        iwork::metadata::DOCUMENT_IDENTIFIER,
+        metadata.document_identifier.as_deref().unwrap_or("—")
+    );
+
+    if metadata.build_versions.is_empty() {
+        println!("{:<36} —", iwork::metadata::BUILD_VERSION_HISTORY);
+    } else {
+        println!("\n== {} ==", iwork::metadata::BUILD_VERSION_HISTORY);
+        for (i, line) in metadata.build_versions.iter().enumerate() {
+            println!("  {i}  {line}");
+        }
+    }
+
+    println!("\n== document archive ==");
+    for (name, value) in [
+        ("locale (TSK)", &metadata.locale),
+        ("creation locale (TSK)", &metadata.creation_locale),
+        ("document language (TSA)", &metadata.document_language),
+        ("template (TSA)", &metadata.template_identifier),
+    ] {
+        println!("  {name:<26} {}", value.as_deref().unwrap_or("—"));
+    }
+    match metadata.custom_format_list {
+        Some(list) => println!(
+            "  {:<26} object {list}, {} custom format(s)",
+            "custom format list",
+            doc.custom_formats().len()
+        ),
+        None => println!("  {:<26} —", "custom format list"),
+    }
+    if let Some(list) = metadata.tables_custom_format_list {
+        println!("  {:<26} object {list}", "tables custom formats");
+    }
+    match metadata.annotation_author_storage {
+        Some(storage) => println!("  {:<26} object {storage}", "annotation authors"),
+        None => println!("  {:<26} —", "annotation authors"),
+    }
+    Ok(())
+}
+
+fn annotations(path: &str) -> Result<(), Error> {
+    let doc = Document::open(path)?;
+    let annotations = doc.annotations();
+
+    match &annotations.author_storage {
+        Some((identifier, stream)) => println!(
+            "author storage: object {identifier} in {stream}, {} author(s)",
+            annotations.authors.len()
+        ),
+        None => println!("no annotation author storage — every iWork document has one"),
+    }
+    for author in &annotations.authors {
+        println!(
+            "  {:<8} {:<28} {}{}",
+            author.identifier,
+            author.name.as_deref().unwrap_or("(unnamed)"),
+            author
+                .color
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "no colour".into()),
+            if author.is_public_author {
+                ", shared"
+            } else {
+                ""
+            }
+        );
+    }
+
+    if annotations.comments.is_empty() {
+        println!("\nno comments");
+    } else {
+        println!("\n== comments ({}) ==", annotations.comments.len());
+        for comment in &annotations.comments {
+            println!(
+                "  {:<8} {:<44} {}",
+                comment.identifier,
+                comment.anchor.as_str(),
+                comment
+                    .created
+                    .map(iwork::table::format_date)
+                    .unwrap_or_else(|| "no date".into())
+            );
+            if let Some(text) = &comment.text {
+                println!("      {text}");
+            }
+            if !comment.replies.is_empty() {
+                let listed: Vec<String> = comment.replies.iter().map(u64::to_string).collect();
+                println!(
+                    "      {} repl(y|ies): {}",
+                    comment.replies.len(),
+                    listed.join(", ")
+                );
+            }
+        }
+    }
+
+    if annotations.changes.is_empty() {
+        println!("\nno tracked changes");
+    } else {
+        println!("\n== tracked changes ({}) ==", annotations.changes.len());
+        for change in &annotations.changes {
+            println!(
+                "  {:<8} {:<12} {}",
+                change.identifier,
+                change.kind.as_str(),
+                match change.anchor {
+                    Some((storage, field, index)) => format!(
+                        "storage {storage} at {index} ({})",
+                        iwork::text::table(field).map(|t| t.name).unwrap_or("?")
+                    ),
+                    None => "not anchored anywhere this crate walks".to_string(),
+                }
+            );
+        }
+        println!("  {} change session(s)", annotations.sessions.len());
+    }
+
+    if !annotations.tracked_storages.is_empty() {
+        let listed: Vec<String> = annotations
+            .tracked_storages
+            .iter()
+            .map(u64::to_string)
+            .collect();
+        println!(
+            "\nstorages carrying tracked changes, which this crate will not edit: {}",
+            listed.join(", ")
+        );
+    }
+    if !annotations.unreached.is_empty() {
+        println!("\nannotation objects nothing here points at:");
+        for (identifier, message_type) in &annotations.unreached {
+            println!(
+                "  {identifier:<8} type {message_type} {}",
+                registry::describe_in(doc.kind(), *message_type)
+            );
+        }
+    }
+    Ok(())
+}
+
+fn duplicate(path: &str, out: &str) -> Result<(), Error> {
+    let doc = Document::open(path)?;
+    let identity = doc.save_as_new(out)?;
+    println!("wrote {out}");
+    println!("  documentUUID       {}", identity.document_uuid);
+    println!("  shareUUID          {}", identity.share_uuid);
+    println!("  privateUUID        {}", identity.private_uuid);
+    println!("  versionUUID        {}", identity.version_uuid);
+    println!("  revision           {}", identity.revision);
+    println!(
+        "  stableDocumentUUID {} (kept — this is what says where the copy came from)",
+        identity.stable_document_uuid.as_deref().unwrap_or("—")
     );
     Ok(())
 }
