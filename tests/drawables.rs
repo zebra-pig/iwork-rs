@@ -663,6 +663,46 @@ fn a_window_that_is_the_whole_picture_does_not_crop() {
     );
 }
 
+/// A thumbnail (field 12, surfaced as `Media::poster`) is a separately stored
+/// downscale of the *old* picture. It is one of the derived renderings the
+/// method exists to refuse — 65 of the 69 corpus images carry it — and
+/// replacing the bytes under it leaves it lying.
+#[test]
+fn replacing_media_refuses_an_image_with_a_thumbnail() {
+    let path = fixture!("pages-layout.pages");
+    let mut doc = Document::open(&path).unwrap();
+    let image = doc
+        .drawables()
+        .into_iter()
+        .find(|d| {
+            d.kind == Kind::Image
+                && d.media.as_ref().and_then(|m| m.poster).is_some()
+                && d.mask().is_none()
+        })
+        .expect("pages-layout has an image with a thumbnail");
+    assert!(
+        image
+            .edit_state
+            .as_ref()
+            .unwrap()
+            .derived
+            .contains(&"thumbnailImageData"),
+        "the thumbnail is one of the derived renderings"
+    );
+    let error = doc
+        .replace_media(image.identifier, &tiny_png(4, 4), "tiny.png", None)
+        .unwrap_err();
+    match &error {
+        iwork::Error::NonDestructiveEdit { reasons, .. } => {
+            assert!(
+                reasons.iter().any(|r| r.contains("thumbnailImageData")),
+                "{reasons:?}"
+            );
+        }
+        other => panic!("expected a refusal by name, got {other}"),
+    }
+}
+
 /// Media that lives in the app's theme bundle has no bytes in the document, so
 /// there is nothing to replace and saying so is better than inventing an entry.
 #[test]

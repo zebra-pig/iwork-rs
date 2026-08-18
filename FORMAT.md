@@ -1877,7 +1877,7 @@ stored pixels and what is drawn sit:
 | `ImageArchive.mask` (5) → `MaskArchive` (3006) | the crop, or a mask shaped like something other than a rectangle |
 | `ImageArchive.instantAlphaPath` (10) | the Instant Alpha knockout path |
 | `ImageArchive.imageAdjustments` (14) | exposure, saturation, contrast, highlights, shadows, sharpness, denoise, temperature, tint, levels, gamma, enhance — `top_level` defaults to **1**, the rest to 0 |
-| `ImageArchive.originalData` (13), `adjustedImageData` (15), `thumbnailAdjustedImageData` (16), `enhancedImageData` (17) | renderings **derived from the old pixels** |
+| `ImageArchive.thumbnailImageData` (12), `originalData` (13), `adjustedImageData` (15), `thumbnailAdjustedImageData` (16), `enhancedImageData` (17) | renderings **derived from the old pixels**. Field 12 is a separately stored downscale of the picture — 65 of the 69 corpus images carry one — surfaced as `Media::poster` |
 | `ImageArchive.traced_path` (19) | an outline of the content |
 | `ImageArchive.background_removed` (22) | |
 

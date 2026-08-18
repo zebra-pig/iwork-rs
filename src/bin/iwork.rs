@@ -1916,6 +1916,12 @@ fn replace_media(path: &str, target: &str, image: &str, out: &str) -> Result<(),
     if let Some(note) = replacement.aspect_note() {
         println!("  warning: {note}");
     }
+    if !replacement.pixel_size_recorded {
+        println!(
+            "  warning: the registry entry carries no image attributes, so the new pixel \
+             size could not be recorded there"
+        );
+    }
     save(&doc, out)
 }
 

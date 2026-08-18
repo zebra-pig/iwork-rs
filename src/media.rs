@@ -176,8 +176,17 @@ pub struct MediaReplacement {
     pub now: String,
     pub digest: [u8; 20],
     pub bytes: usize,
-    pub old_pixel_size: Option<(f32, f32)>,
+    /// The old picture's size: the registry's recorded pixel size when it has
+    /// one, otherwise the drawable's `naturalSize`. Only four of the corpus's
+    /// 203 stored files record a pixel size, so the `naturalSize` fallback is
+    /// what lets the stretched-aspect check see the old shape at all.
+    pub old_size: Option<(f32, f32)>,
     pub new_pixel_size: (f32, f32),
+    /// Whether the new pixel size could be written into the registry entry. It
+    /// cannot be when the `DataInfo` carries no image attributes to hold it —
+    /// this crate does not invent the message — and a caller that relied on the
+    /// recorded size being current should be told.
+    pub pixel_size_recorded: bool,
     /// Drawables whose `naturalSize` and traced outline were brought into step.
     pub drawables: Vec<u64>,
     /// True when the new picture is a different shape from the old one, so it
@@ -190,7 +199,7 @@ impl MediaReplacement {
         if !self.aspect_changed {
             return None;
         }
-        let (ow, oh) = self.old_pixel_size?;
+        let (ow, oh) = self.old_size?;
         Some(format!(
             "the picture was {ow:.0} × {oh:.0} and is now {:.0} × {:.0}: the frame did not \
              change, so it is drawn stretched. `iwork set-geometry` fixes the frame.",

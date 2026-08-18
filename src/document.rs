@@ -2046,9 +2046,20 @@ impl Document {
         let digest = media::sha1(bytes);
         let now = format!("Data/{}", media::stored_name(preferred_name, data));
 
+        // The old picture's size, for the stretched-aspect warning. The
+        // `DataInfo`'s recorded pixel size is the first choice, but only four
+        // of the corpus's 203 stored files carry one; the drawable's
+        // `naturalSize` carries it on every one of the 69 images, so it is the
+        // fallback that makes the warning fire at all.
+        let old_natural = users
+            .iter()
+            .filter_map(|d| d.media.as_ref().and_then(|m| m.natural_size))
+            .next();
+
         // The registry entry first: if the metadata cannot be rewritten,
         // nothing has been touched.
         let mut old_pixel_size = None;
+        let mut pixel_size_recorded = false;
         let metadata = self
             .objects()
             .find(|(_, object)| object.message_type() == crate::TYPE_PACKAGE_METADATA)
@@ -2090,7 +2101,8 @@ impl Document {
                     Value::Varint(bytes.len() as u64),
                 );
             }
-            media::set_attribute_pixel_size(&mut info, new_size.0, new_size.1);
+            pixel_size_recorded =
+                media::set_attribute_pixel_size(&mut info, new_size.0, new_size.1);
             field.value = Value::Bytes(info.encode());
             found = true;
             break;
@@ -2165,7 +2177,11 @@ impl Document {
             updated.push(drawable.identifier);
         }
 
-        let aspect_changed = old_pixel_size.is_some_and(|(w, h)| {
+        // Prefer the registry's recorded size, fall back to the drawable's
+        // naturalSize, so the comparison is made on all but the images that
+        // carry neither.
+        let old_size = old_pixel_size.or(old_natural);
+        let aspect_changed = old_size.is_some_and(|(w, h)| {
             w > 0.0
                 && h > 0.0
                 && ((w / h) - (new_size.0 / new_size.1)).abs() > 0.01 * (w / h).max(0.01)
@@ -2176,8 +2192,9 @@ impl Document {
             now,
             digest,
             bytes: bytes.len(),
-            old_pixel_size,
+            old_size,
             new_pixel_size: new_size,
+            pixel_size_recorded,
             drawables: updated,
             aspect_changed,
         })

@@ -614,9 +614,9 @@ pub struct EditState {
     /// Tone and colour adjustments that are not at their default.
     pub adjustments: Vec<(&'static str, f32)>,
     /// Data references to renderings derived from the original pixels —
-    /// `originalData`, `adjustedImageData`, `thumbnailAdjustedImageData`,
-    /// `enhancedImageData`. Their presence means the displayed image is not
-    /// simply the stored one.
+    /// `thumbnailImageData`, `originalData`, `adjustedImageData`,
+    /// `thumbnailAdjustedImageData`, `enhancedImageData`. Their presence means
+    /// the displayed image is not simply the stored one.
     pub derived: Vec<&'static str>,
     /// A traced path that is not the plain rectangle of the picture's natural
     /// size — a real trace of PDF content.
@@ -1277,6 +1277,10 @@ fn edit_state(document: &crate::Document, image: &Message) -> EditState {
     };
 
     for (field, name) in [
+        // A separately stored downscale of the *old* picture. 65 of the 69
+        // corpus images carry it, and replacing the bytes leaves it lying —
+        // the same objection as the other derived renderings.
+        (image_field::THUMBNAIL_DATA, "thumbnailImageData"),
         (image_field::ORIGINAL_DATA, "originalData"),
         (image_field::ADJUSTED_DATA, "adjustedImageData"),
         (
