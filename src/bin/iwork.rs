@@ -37,11 +37,20 @@ metadata, identity and the review layer
                                            identity, so the two do not collide
   iwork new       <template> <out>         make a document from a template
                                            bundle (.template/.nmbtemplate/.kth)
+  iwork strip-previews <file> <out>        drop the preview images
 
 `iwork duplicate` gives the copy fresh documentUUID, shareUUID, privateUUID and
 versionUUID values and a revision to match — what Pages' own Save As was
 measured doing — and keeps stableDocumentUUID, which is what says the copy came
 from this document. A plain save keeps every one of them.
+
+A document carries three `preview*.jpg` — the picture the Finder shows — and an
+edit makes them a picture of the document as it was. They are left alone
+anyway, because a no-op save reproduces every byte and because the app draws
+them again the next time it saves; `iwork check` says nothing about them.
+`iwork strip-previews` is for the caller who would rather have no thumbnail
+than a wrong one: every template bundle Apple ships has none, and all three
+apps open a document without them.
 
 `iwork new` does the same and takes stableDocumentUUID with it, because a
 document made from a template is a new document rather than a copy of the
@@ -247,6 +256,7 @@ fn main() -> ExitCode {
         ["annotations", file] => annotations(file),
         ["duplicate", file, out] => duplicate(file, out),
         ["new", template, out] => new_document(template, out),
+        ["strip-previews", file, out] => strip_previews(file, out),
         ["sections", file] => sections(file),
         ["structure", file] => structure(file),
         ["slides", file] => slides(file),
@@ -349,6 +359,10 @@ fn inspect(path: &str) -> Result<(), Error> {
 
     // The review layer, always — "no comments" is a fact about the document.
     println!("review    {}", doc.annotations().summary());
+    match doc.previews().len() {
+        0 => println!("previews  none (the app draws them when it saves)"),
+        n => println!("previews  {n}, drawn by the app and stale after an edit"),
+    }
 
     println!("\n== package entries ==");
     for (name, data) in &doc.package().entries {
@@ -610,6 +624,20 @@ fn new_document(template: &str, out: &str) -> Result<(), Error> {
     match &metadata.template_identifier {
         Some(identifier) => println!("  template           {identifier}"),
         None => println!("  template           — (not one of the app's own, so nothing claimed)"),
+    }
+    Ok(())
+}
+
+fn strip_previews(path: &str, out: &str) -> Result<(), Error> {
+    let mut doc = Document::open(path)?;
+    let gone = doc.strip_previews();
+    doc.save(out)?;
+    println!("wrote {out} ({gone} preview image(s) removed)");
+    if gone > 0 {
+        println!(
+            "  the app draws them again the next time it saves; nothing in the \n  \
+             document refers to them"
+        );
     }
     Ok(())
 }
@@ -2627,7 +2655,10 @@ fn extract(path: &str, dir: &str) -> Result<(), Error> {
             .package()
             .get(&name)
             .expect("name came from the package");
-        let file = name.trim_start_matches("Data/");
+        // The name comes out of a ZIP a stranger wrote, and this is where it
+        // becomes a path on this machine: `Data/../../../evil` would otherwise
+        // be written wherever it says. Checked, and refused by name.
+        let file = iwork::package::entry_path(name.trim_start_matches("Data/"))?;
         let target = std::path::Path::new(dir).join(file);
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)?;

@@ -266,12 +266,16 @@ impl Package {
 /// The path an entry name stands for below the package root, refusing any name
 /// that would leave it.
 ///
+/// Public because it is not only the package writer that turns an entry name
+/// into a path on this machine: `iwork extract` does the same with the names
+/// under `Data/`.
+///
 /// An entry name arrives from a ZIP a stranger wrote and is used to build a
 /// path on this machine, which is the whole of the zip-slip problem: a package
 /// holding `../../../../Library/LaunchAgents/x.plist` would otherwise write
 /// there. Names are relative, `/`-separated and contain no `..`, in every
 /// document and every template here; anything else is refused by name.
-fn entry_path(name: &str) -> Result<std::path::PathBuf, Error> {
+pub fn entry_path(name: &str) -> Result<std::path::PathBuf, Error> {
     let refuse = |why: &str| {
         Err(Error::Format(format!(
             "package entry {name:?} {why}, and this crate will not write it to disk"
