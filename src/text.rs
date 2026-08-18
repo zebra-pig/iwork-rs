@@ -409,10 +409,25 @@ pub fn utf16_offset(text: &str, index: u64) -> Option<usize> {
 /// the thing.
 ///
 /// `U+FFFC` is what an attachment table's entry points *at*: a lone one is an
-/// attachment with nothing attached. `U+0004` and `U+0005` are the section and
-/// layout breaks, and a section break with no `TP.SectionArchive` behind it is a
-/// document that says it has a section it does not have.
-pub const UNWRITABLE: &[char] = &['\u{FFFC}', '\u{0004}', '\u{0005}'];
+/// attachment with nothing attached. `U+000E` is the same case one table along —
+/// a **footnote mark**, whose entry in `table_footnote` carries the
+/// `TSWP.FootnoteReferenceAttachmentArchive` and, through it, the note's own
+/// storage; written bare it is a mark with no note behind it. `U+0004` and
+/// `U+0005` are the section and layout breaks, and a section break with no
+/// `TP.SectionArchive` behind it is a document that says it has a section it
+/// does not have.
+pub const UNWRITABLE: &[char] = &['\u{FFFC}', '\u{000E}', '\u{0004}', '\u{0005}'];
+
+/// The characters a character-anchored entry has been seen sitting on:
+/// `U+FFFC OBJECT REPLACEMENT CHARACTER` for a drawable or a number attachment,
+/// `U+000E` for a footnote mark.
+///
+/// This is documentation, not a test: [`destroyed_anchors`] deliberately does
+/// **not** consult it, because an anchor on a character this list has not met is
+/// exactly the case where refusing matters most. It read `U+FFFC` and `U+0004`
+/// once, and the footnote mark it had never seen walked straight through the
+/// gap.
+pub const ANCHOR_CHARACTERS: &[u16] = &[0xFFFC, 0x000E];
 
 /// One edit to a storage's text: replace `removed` code units at `at` with
 /// `inserted` of them.
@@ -789,41 +804,56 @@ fn set_range(entry: &mut Message, location: u64, length: u64) {
 /// then also removes from the drawable list, the z-order and the media registry.
 /// This crate does none of that, so it refuses instead.
 ///
-/// An entry at index 0 of the section table is the exception, and not a
-/// destruction: the first section of a Pages body begins at character 0 with no
-/// break character in front of it, so the section still begins wherever the text
-/// now begins.
-pub fn destroyed_anchors(
-    storage: &Message,
-    text: &str,
-    edit: Edit,
-) -> Vec<(u32, u64, Option<u64>)> {
-    let breaks: Vec<u16> = text.encode_utf16().collect();
+/// **The character itself is not consulted, and that is the fix for a hole this
+/// had.** The check used to pass unless the character was `U+FFFC` or `U+0004`;
+/// a footnote mark is [`U+000E`](ANCHOR_CHARACTERS), so a delete across one
+/// exited cleanly, orphaned the `TSWP.FootnoteReferenceAttachmentArchive` and
+/// the kind-2 storage hanging off it, and left `iwork check` with nothing to
+/// find. A character-anchored entry whose character goes is a destroyed entry
+/// whatever the character was: if this crate does not recognise it, that is a
+/// reason to refuse rather than a licence to proceed. `U+0004` was in the list
+/// for no one: a section entry is paragraph-anchored, and
+/// [`destroyed_sections`] is what sees it.
+///
+/// Every occurrence of the field is read, because [`apply`] rewrites every one.
+pub fn destroyed_anchors(storage: &Message, edit: Edit) -> Vec<(u32, u64, Option<u64>)> {
     let mut out = Vec::new();
     for spec in TABLES
         .iter()
         .filter(|t| t.anchoring == Anchoring::Character)
     {
-        let Some(table) = storage.bytes(spec.field).and_then(crate::pb::decode_nested) else {
-            continue;
-        };
-        for entry in split(&table, Anchoring::Character).0 {
-            if edit.remap(entry.index, Anchoring::Character).is_some() {
-                continue;
+        for table in tables_at(storage, spec.field) {
+            for entry in split(&table, Anchoring::Character).0 {
+                if edit.remap(entry.index, Anchoring::Character).is_some() {
+                    continue;
+                }
+                let object = entry
+                    .message
+                    .bytes(2)
+                    .and_then(crate::pb::decode_nested)
+                    .and_then(|r| crate::style::reference_target(&r));
+                out.push((spec.field, entry.index, object));
             }
-            let character = breaks.get(entry.index as usize).copied().unwrap_or(0);
-            if character != 0xFFFC && character != 0x0004 {
-                continue;
-            }
-            let object = entry
-                .message
-                .bytes(2)
-                .and_then(crate::pb::decode_nested)
-                .and_then(|r| crate::style::reference_target(&r));
-            out.push((spec.field, entry.index, object));
         }
     }
     out
+}
+
+/// Every occurrence of one table field, decoded.
+///
+/// [`Message::bytes`](crate::pb::Message::bytes) answers with the *first*
+/// occurrence, which is the shape every storage in the corpus has; [`apply`]
+/// rewrites all of them, so everything that decides whether an edit is allowed
+/// has to read all of them too, or a second occurrence is remapped without ever
+/// having been checked.
+fn tables_at(storage: &Message, field: u32) -> Vec<Message> {
+    storage
+        .all(field)
+        .filter_map(|value| match value {
+            Value::Bytes(raw) => crate::pb::decode_nested(raw),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Every section the removed range would destroy, as `(index, section)`.
@@ -849,29 +879,26 @@ pub fn destroyed_anchors(
 /// their eighteen header and footer storages apiece, their guide storages and
 /// their background fills is not known, and this crate does not guess.
 pub fn destroyed_sections(storage: &Message, text: &str, edit: Edit) -> Vec<(u64, Option<u64>)> {
-    let Some(table) = storage
-        .bytes(SECTION_TABLE)
-        .and_then(crate::pb::decode_nested)
-    else {
-        return Vec::new();
-    };
     let units: Vec<u16> = text.encode_utf16().collect();
     let mut out = Vec::new();
-    for (index, object) in entry_indices(&table, Anchoring::Paragraph) {
-        if index == 0 {
-            continue;
-        }
-        let break_at = index - 1;
-        if units.get(break_at as usize).copied() != Some(0x0004) {
-            continue;
-        }
-        if break_at >= edit.at && break_at < edit.end() {
-            out.push((index, object));
+    for table in tables_at(storage, SECTION_TABLE) {
+        for (index, object) in entry_indices(&table, Anchoring::Paragraph) {
+            if index == 0 {
+                continue;
+            }
+            let break_at = index - 1;
+            if units.get(break_at as usize).copied() != Some(0x0004) {
+                continue;
+            }
+            if break_at >= edit.at && break_at < edit.end() {
+                out.push((index, object));
+            }
         }
     }
     out
 }
 
+/// Why an edit to a storage is refused — everything [`apply`] requires of its
 /// Apply `edit` to a storage archive, remapping every attribute table it
 /// carries.
 ///
@@ -1401,16 +1428,87 @@ mod tests {
             removed: 6,
             inserted: 0,
         };
-        assert_eq!(
-            destroyed_anchors(&s, text, covered),
-            vec![(9, 12, Some(57435))]
-        );
+        assert_eq!(destroyed_anchors(&s, covered), vec![(9, 12, Some(57435))]);
         let clear = Edit {
             at: 0,
             removed: 5,
             inserted: 0,
         };
-        assert!(destroyed_anchors(&s, text, clear).is_empty());
+        assert!(destroyed_anchors(&s, clear).is_empty());
+    }
+
+    /// A footnote mark is a `U+000E`, and the character is just as much the
+    /// object as an attachment's `U+FFFC` is. The check that read the character
+    /// and let anything else through is the hole this closes: it knew `U+FFFC`
+    /// and `U+0004` — and `U+0004` was never reachable from a character-anchored
+    /// table in the first place, the section table being paragraph-anchored.
+    #[test]
+    fn a_deleted_footnote_mark_is_reported() {
+        let text = "Ein Absatz mit einer\u{E} Fussnote.";
+        let s = storage(text, vec![(FOOTNOTE_TABLE, vec![entry(20, Some(1732790))])]);
+        let covered = Edit {
+            at: 18,
+            removed: 6,
+            inserted: 0,
+        };
+        assert_eq!(
+            destroyed_anchors(&s, covered),
+            vec![(FOOTNOTE_TABLE, 20, Some(1732790))]
+        );
+        // And an entry on a character this crate has never seen an anchor on is
+        // refused too: not recognising it is the reason to stop, not a reason
+        // to carry on.
+        let odd = storage(
+            "Ein ganz gewöhnlicher Satz.",
+            vec![(9, vec![entry(4, Some(7))])],
+        );
+        let over_it = Edit {
+            at: 3,
+            removed: 3,
+            inserted: 0,
+        };
+        assert_eq!(destroyed_anchors(&odd, over_it), vec![(9, 4, Some(7))]);
+    }
+
+    /// A table field may occur more than once — the storage archive's tables are
+    /// singular in every document in the corpus, but [`apply`] rewrites every
+    /// occurrence, so everything that decides whether an edit is allowed reads
+    /// every occurrence too.
+    #[test]
+    fn every_occurrence_of_an_anchor_table_is_checked() {
+        let text = "Company Name\u{FFFC}\nProject";
+        let mut s = storage(text, vec![(9, vec![entry(3, Some(1))])]);
+        s.fields.push(Field {
+            number: 9,
+            value: table_of(vec![entry(12, Some(57435))]),
+        });
+        let covered = Edit {
+            at: 9,
+            removed: 6,
+            inserted: 0,
+        };
+        assert_eq!(
+            destroyed_anchors(&s, covered),
+            vec![(9, 12, Some(57435))],
+            "the second occurrence of field 9 is checked like the first"
+        );
+
+        // The section table, the same way round.
+        let text = "erste\u{4}zweite";
+        let mut s = storage(text, vec![(SECTION_TABLE, vec![entry(0, Some(900))])]);
+        s.fields.push(Field {
+            number: SECTION_TABLE,
+            value: table_of(vec![entry(6, Some(901))]),
+        });
+        let over_the_break = Edit {
+            at: 3,
+            removed: 4,
+            inserted: 0,
+        };
+        assert_eq!(
+            destroyed_sections(&s, text, over_the_break),
+            vec![(6, Some(901))]
+        );
     }
 
     /// Deleting the `U+0004` in front of a section is deleting the section,
@@ -1458,7 +1556,7 @@ mod tests {
         assert!(destroyed_sections(&s, text, short_of_it).is_empty());
         // And `destroyed_anchors` never sees any of this: the section table is
         // paragraph-anchored, and this is why the check is its own function.
-        assert!(destroyed_anchors(&s, text, over_the_break).is_empty());
+        assert!(destroyed_anchors(&s, over_the_break).is_empty());
     }
 
     /// The first section of a Pages body starts at character 0 with no break
@@ -1473,7 +1571,7 @@ mod tests {
             removed: 5,
             inserted: 0,
         };
-        assert!(destroyed_anchors(&s, text, edit).is_empty());
+        assert!(destroyed_anchors(&s, edit).is_empty());
     }
 
     // -- housekeeping --------------------------------------------------------

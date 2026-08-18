@@ -761,10 +761,11 @@ fuzzing story rather than half of it.
   have no thumbnail than a wrong one — every template Apple ships has none, and
   all three apps open a document without them. `FORMAT.md` §1 has the evidence.
 - **A text edit that would delete an anchored object is refused.** Deleting the
-  `U+FFFC` an image, a footnote mark or a table hangs off means deleting that
-  object from the drawable list, the z-order and the media registry. Pages does
-  all of that; this crate does none of it, and says so by name instead of
-  quietly detaching the object.
+  `U+FFFC` an image or a table hangs off — or the `U+000E` that *is* a footnote
+  mark — means deleting that object from the drawable list, the z-order and the
+  media registry, or orphaning a note nothing can reach. Pages does all of
+  that; this crate does none of it, and says so by name instead of quietly
+  detaching the object.
 - **Two sections cannot be merged, so deleting a section break is refused.**
   The `U+0004` is what makes the section; deleting it leaves two
   `TP.SectionArchive`s where one boundary is needed, and which of the two keeps

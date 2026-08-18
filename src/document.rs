@@ -644,7 +644,7 @@ impl Document {
                     inserted: text::length(new_text),
                 };
                 if let Some((field, index, target)) =
-                    text::destroyed_anchors(&storage, &old, edit).first()
+                    text::destroyed_anchors(&storage, edit).first()
                 {
                     return Err(Error::AnchoredObject {
                         storage: identifier,
@@ -3333,6 +3333,50 @@ impl Document {
                     problems.push(format!(
                         "linked-text-box thread {} names missing object {object}",
                         thread.identifier
+                    ));
+                }
+            }
+        }
+
+        // A footnote is a chain of three: a `table_footnote` entry on the
+        // `U+000E` mark, the `TSWP.FootnoteReferenceAttachmentArchive` it
+        // names, and the kind-2 storage that archive contains. **The mark is
+        // the only route in.** Delete its character and the other two stay in
+        // the document with nothing reaching them — which is exactly what
+        // `iwork delete-text` did while it believed a footnote mark was a
+        // `U+FFFC`, and which nothing here could see afterwards. Both halves
+        // are cheap to check and both are checked, because an orphan is the
+        // signature of that damage.
+        let anchored: BTreeSet<u64> = structure
+            .footnotes
+            .iter()
+            .filter_map(|note| note.attachment)
+            .collect();
+        let bodies: BTreeSet<u64> = structure
+            .footnotes
+            .iter()
+            .filter_map(|note| note.body)
+            .collect();
+        for (stream, object) in self.objects() {
+            if object.message_type() == crate::pages::TYPE_FOOTNOTE_REFERENCE
+                && !anchored.contains(&object.identifier)
+            {
+                problems.push(format!(
+                    "{stream} footnote attachment {} is not anchored in any text, so \
+                     the note it carries cannot be reached",
+                    object.identifier
+                ));
+            }
+            if object.message_type() == crate::TYPE_STORAGE && !bodies.contains(&object.identifier)
+            {
+                let kind = Message::decode(object.payload())
+                    .ok()
+                    .and_then(|m| m.varint(1));
+                if kind == Some(2) {
+                    problems.push(format!(
+                        "{stream} storage {} is a footnote body (kind 2) that no \
+                         footnote mark contains",
+                        object.identifier
                     ));
                 }
             }

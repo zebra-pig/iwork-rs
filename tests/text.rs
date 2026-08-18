@@ -59,6 +59,29 @@ fn every_fixture() -> Vec<PathBuf> {
     found
 }
 
+/// Rewrite one object of a fixture and hand back the document that results.
+///
+/// Some of what an edit must refuse cannot be produced by this crate at all —
+/// a storage whose text is not UTF-8, an attribute table whose bytes are not a
+/// message, a footnote whose mark has been cut out from under it. They are
+/// documents another tool could hand a caller, so they are built the way that
+/// tool would build them: through `Package`, `iwa::parse` and `iwa::serialize`,
+/// below every guard this crate has.
+fn forge(path: &Path, identifier: u64, edit: impl FnOnce(&mut iwork::pb::Message)) -> Document {
+    let mut package = iwork::Package::read(path).unwrap();
+    let stream = "Index/Document.iwa";
+    let mut objects = iwork::iwa::parse(package.get(stream).unwrap()).unwrap();
+    let object = objects
+        .iter_mut()
+        .find(|object| object.identifier == identifier)
+        .expect("the object is in the document stream");
+    let mut archive = iwork::pb::Message::decode(object.payload()).unwrap();
+    edit(&mut archive);
+    object.messages[0].payload = archive.encode();
+    package.set(stream, iwork::iwa::serialize(&objects));
+    Document::from_package(package).unwrap()
+}
+
 /// Write to a scratch file beside the fixtures and reopen it.
 fn reopen(doc: &Document, name: &str) -> Document {
     let out = std::env::temp_dir().join(format!("iwork-text-{name}"));
@@ -243,6 +266,77 @@ fn text_that_anchors_an_object_is_not_replaced() {
     assert_eq!(doc.problems(), Vec::<String>::new());
 }
 
+/// A footnote mark is an anchor like any other, and its character is a
+/// **`U+000E`** — not the `U+FFFC` an attachment sits on.
+///
+/// This is the hole `pages-footnotes.pages` opened up and closed. The check
+/// that decided whether an anchor was destroyed read the character first and
+/// let anything but `U+FFFC` and `U+0004` through, so
+/// `iwork delete-text pages-footnotes.pages 1732539 20 30` exited 0, orphaned a
+/// `TSWP.FootnoteReferenceAttachmentArchive` and the kind-2 storage hanging off
+/// it, and left `iwork check` with nothing to find.
+#[test]
+fn deleting_a_footnote_mark_is_refused() {
+    let path = fixture!("pages-footnotes.pages");
+    let structure = Document::open(&path).unwrap().structure().unwrap();
+    assert_eq!(
+        structure.footnotes.len(),
+        2,
+        "the fixture has two footnotes"
+    );
+    let note = structure.footnotes[0].clone();
+    let body = note.storage;
+
+    // The reviewer's range, and exactly the mark.
+    for range in [20..30, note.index..note.index + 1] {
+        let mut doc = Document::open(&path).unwrap();
+        match doc.delete_text(body, range.clone()) {
+            Err(Error::AnchoredObject {
+                storage,
+                index,
+                table,
+                object,
+            }) => {
+                assert_eq!(storage, body);
+                assert_eq!(index, note.index);
+                assert_eq!(table, "table_footnote");
+                assert_eq!(object, note.attachment);
+            }
+            other => panic!("{range:?} was not refused: {other:?}"),
+        }
+        assert!(doc.changed_streams().is_empty(), "{range:?}");
+    }
+
+    // And an edit that leaves both marks alone is still allowed: they move, the
+    // notes stay attached, and the document still checks out.
+    let mut doc = Document::open(&path).unwrap();
+    doc.insert_text(body, 0, "Neu ").unwrap();
+    assert_eq!(doc.problems(), Vec::<String>::new());
+    let after = doc.structure().unwrap();
+    assert_eq!(
+        after
+            .footnotes
+            .iter()
+            .map(|n| n.index)
+            .collect::<Vec<u64>>(),
+        structure
+            .footnotes
+            .iter()
+            .map(|n| n.index + 4)
+            .collect::<Vec<u64>>(),
+        "the marks moved with the text"
+    );
+    assert_eq!(
+        after.footnotes.iter().map(|n| n.body).collect::<Vec<_>>(),
+        structure
+            .footnotes
+            .iter()
+            .map(|n| n.body)
+            .collect::<Vec<_>>(),
+        "and still contain their notes"
+    );
+}
+
 /// Indices are UTF-16 code units, and an edit may not land inside a pair.
 #[test]
 fn an_edit_inside_a_surrogate_pair_is_refused() {
@@ -286,6 +380,43 @@ fn a_placeholder_character_is_not_writable() {
             other => panic!("expected a named refusal for {character:?}, got {other:?}"),
         }
     }
+}
+
+/// And the damage that refusal prevents is damage `iwork check` can now see.
+///
+/// A footnote is a chain of three — the mark's `table_footnote` entry, the
+/// `TSWP.FootnoteReferenceAttachmentArchive` it names, and the kind-2 storage
+/// that archive contains — and the mark is the only route in. Cut it out and
+/// nothing pointed at the other two, which is exactly the state
+/// `delete-text … 20 30` used to leave behind and exactly what `check` had
+/// nothing to say about.
+#[test]
+fn a_footnote_whose_mark_is_gone_is_a_problem() {
+    let path = fixture!("pages-footnotes.pages");
+    let doc = Document::open(&path).unwrap();
+    assert_eq!(doc.problems(), Vec::<String>::new());
+    let body = doc.structure().unwrap().footnotes[0].storage;
+
+    let forged = forge(&path, body, |archive| {
+        archive.clear(iwork::text::FOOTNOTE_TABLE);
+    });
+    let problems = forged.problems();
+    assert_eq!(
+        problems
+            .iter()
+            .filter(|p| p.contains("footnote attachment"))
+            .count(),
+        2,
+        "{problems:?}"
+    );
+    assert_eq!(
+        problems
+            .iter()
+            .filter(|p| p.contains("footnote body"))
+            .count(),
+        2,
+        "{problems:?}"
+    );
 }
 
 // -- what a storage carries --------------------------------------------------
@@ -488,8 +619,12 @@ fn a_run_reports_its_named_style_and_its_overrides() {
 
 /// The anchoring of a table is what decides what an edit does to it, so it is
 /// worth asserting that the corpus's tables are anchored the way this crate
-/// believes: every entry of a character-anchored table sits on a `U+FFFC` or a
-/// `U+0004`, which is what makes them unremappable.
+/// believes: every entry of a character-anchored table sits on a `U+FFFC`, or
+/// on the `U+000E` of a footnote mark, which is what makes them unremappable.
+///
+/// The refusal itself does *not* consult this — an anchor on a character the
+/// list has not met is the case where refusing matters most — so this is the
+/// tripwire for the day a third placeholder turns up, not the check.
 #[test]
 fn a_character_anchored_entry_sits_on_a_placeholder() {
     let mut checked = 0;
@@ -672,7 +807,31 @@ fn the_app_opens_an_edited_document_and_reads_the_new_words_back() {
     assert_eq!(moved.text, link.text);
     app_check(&out, &link.text);
 
-    // 6. And the app's own save of an edited document still decodes here — the
+    // 6. An edit beside a footnote — the one the crate now refuses to make
+    //    *across*. Deleting the `U+000E` mark is refused; typing in front of it
+    //    is ordinary, and the note must still be a note afterwards. Pages is
+    //    the only thing that can say so: a document whose footnote chain is
+    //    broken opens with the mark and no note, or does not open.
+    let path = fixture!("pages-footnotes.pages");
+    let mut doc = Document::open(&path).unwrap();
+    let before = doc.structure().unwrap();
+    let body = before.footnotes[0].storage;
+    doc.insert_text(body, 0, "FUSSNOTENNAH ").unwrap();
+    let out = std::env::temp_dir().join("iwork-footnote.pages");
+    doc.save(&out).unwrap();
+    app_check(&out, "FUSSNOTENNAH");
+    let after = Document::open(&out).unwrap();
+    let notes = after.structure().unwrap().footnotes;
+    assert_eq!(notes.len(), before.footnotes.len());
+    for (moved, was) in notes.iter().zip(&before.footnotes) {
+        assert_eq!(moved.index, was.index + 13);
+        assert_eq!(moved.attachment, was.attachment);
+        assert_eq!(moved.body, was.body);
+        assert_eq!(moved.text, was.text);
+    }
+    assert_eq!(after.problems(), Vec::<String>::new());
+
+    // 7. And the app's own save of an edited document still decodes here — the
     //    strongest statement available without a screen: whatever Keynote made
     //    of what this crate wrote, it is something this crate reads back.
     let resaved = Document::open(&out).unwrap();

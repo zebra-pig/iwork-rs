@@ -603,9 +603,11 @@ entry sits on the character *after* its `U+0004` — `pages-report` has entries 
 so what a delete destroys is the break, not the entry. Deleting one merges two
 `TP.SectionArchive`s, and is refused for the same reason.
 
-`U+FFFC`, `U+0004` and `U+0005` are equally refused as *input*: each stands for
-an object rather than for itself, and a section break with no section behind it
-is a document that claims a section it does not have.
+`U+FFFC`, `U+000E`, `U+0004` and `U+0005` are equally refused as *input*: each
+stands for an object rather than for itself. A footnote mark written bare is
+half an object — a mark with no `TSWP.FootnoteReferenceAttachmentArchive` and
+no note — and a section break with no section behind it is a document that
+claims a section it does not have.
 
 #### Indices are UTF-16 code units
 
@@ -2110,7 +2112,9 @@ the settings are Confirmed as fields and every non-default value is
 The containment, long Inferred-only, has now met a live example. The screen
 was unlocked, Insert > Footnote became clickable, and `pages-footnotes.pages`
 (recipe: `scripts/applescript/pages-footnotes-ui.applescript`) carries two —
-`table_footnote` entries at characters 26 and 77, each on a `U+FFFC`:
+`table_footnote` entries at characters 26 and 77, each on a **`U+000E`** — not
+the `U+FFFC` an ordinary attachment sits on, which is the whole reason the mark
+is worth a table of its own:
 
 ```
 body storage
@@ -2127,6 +2131,16 @@ entries, the attachments, and two storages of kind 2 holding the note text.
 Inferred — the fixture uses automatic marks and default settings.
 `tests/pages.rs::footnote_bodies_are_kind_2_storages_and_only_where_footnotes_are`
 pins both the presence here and the absence everywhere else.
+
+**The mark is the only route in, so deleting it is refused.** A range covering
+the `U+000E` would leave the 2008 archive and the kind-2 storage behind it with
+nothing pointing at them — a note the document still carries and no reader can
+reach. `Error::AnchoredObject` names it, exactly as it does for the `U+FFFC` an
+image hangs off, and `iwork check` reports an attachment or a kind-2 storage
+that no mark contains, so the damage is visible if it ever arrives from
+somewhere else. The check that decided this used to read the character and let
+everything but `U+FFFC` and `U+0004` through, which is how a footnote mark —
+never `U+FFFC` — walked past it; it no longer reads the character at all.
 
 ### Bookmarks — observed
 
