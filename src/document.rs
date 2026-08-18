@@ -2529,7 +2529,11 @@ impl Document {
             None => Message::default(),
         };
         style::apply(&mut table, range, style_identifier, length);
-        archive.set(table_field, Value::Bytes(table.encode()));
+        // In field order: a storage that had no table of this kind would
+        // otherwise get one appended after every other field, and iWork writes
+        // its fields ascending everywhere anyone has looked. Appending gave a
+        // storage the field order 1, …, 28, 8.
+        archive.set_in_order(table_field, Value::Bytes(table.encode()));
         self.set_archive(storage, &archive)?;
         // The style usually lives in the document stylesheet and the storage in
         // the document body — different components, so the reference has to be

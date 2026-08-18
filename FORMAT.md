@@ -628,6 +628,24 @@ tracking, a destroyed anchor, a destroyed section break — is one function,
 describing. A contract that lists three of its six checks is how the other three
 come to be skipped.
 
+#### A table's first entry is at 0
+
+A run or paragraph table describes the text from its first entry onward, so a
+table that begins late leaves the characters in front of it with no attribute at
+all. `iwork check` has always said so; two writers used to produce it anyway,
+and both now write what Pages writes — **an entry at 0 carrying nothing**:
+
+* styling a range in the middle of a storage that has no table of that kind
+  gives the new table a nil head entry. That is the shape the second probe
+  fixture above has: Pages, told to set a bold 22pt font over characters 19–29
+  of a storage with no character table, wrote `[0 nil, 19 bold, 30 nil]`;
+* deleting a style with no replacement lets the preceding run extend over the
+  runs that used it — except at 0, where there is no preceding run. The entry
+  stays and loses its object.
+
+A nil entry is not a hole: it is the format's "whatever was in force here", the
+same thing Pages writes for a paragraph its own edit created (probe 6).
+
 #### Indices are UTF-16 code units
 
 Everywhere: in the tables, in this crate's API, in the paragraph ranges. **Run

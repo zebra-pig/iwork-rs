@@ -828,6 +828,10 @@ fn rebuild(table: &mut Message, keep: Vec<Field>, entries: Vec<(u64, Message)>, 
 /// `text_len` is the length of the storage's text in UTF-16 code units; the
 /// range is clamped into it, and a range that reaches the end needs no
 /// re-establishing entry after it.
+///
+/// A table always comes back with an entry at 0, because a table that begins
+/// late leaves the characters in front of it with no attribute at all — see the
+/// nil head entry below.
 pub fn apply(table: &mut Message, range: Range<u64>, style: u64, text_len: u64) {
     let start = range.start.min(text_len);
     let end = range.end.min(text_len);
@@ -853,6 +857,21 @@ pub fn apply(table: &mut Message, range: Range<u64>, style: u64, text_len: u64) 
         .filter(|(index, _)| *index < start)
         .cloned()
         .collect();
+    // A run or paragraph table describes the text from its first entry onward,
+    // so a table whose first entry is at `start` leaves the characters before it
+    // with no attribute at all — which `iwork check` reports and which iWork
+    // never writes. Styling a range in the middle of a storage that had no table
+    // of this kind at all is exactly that case, and Pages answers it with a
+    // **head entry at 0 carrying nothing**: made to set a bold 22pt font over
+    // characters 19–29 of a storage with no character table, it wrote
+    // `[0 nil, 19 bold, 30 nil]` (FORMAT.md §Text, the second probe fixture). A
+    // nil entry is the format's "whatever was in force here", and it is what
+    // this crate writes for a new paragraph too.
+    if start > 0 && out.first().map(|(index, _)| *index) != Some(0) {
+        let mut nil = Message::default();
+        nil.set(1, Value::Varint(0));
+        out.insert(0, (0, nil));
+    }
     out.push((start, head));
     if end < text_len && !resumes_already {
         if let Some(mut tail) = tail {
@@ -868,6 +887,16 @@ pub fn apply(table: &mut Message, range: Range<u64>, style: u64, text_len: u64) 
 /// Point every run that uses `from` at `to`, or drop those runs when `to` is
 /// `None`, letting the preceding run extend over them.
 ///
+/// **The entry at index 0 is not dropped, it is emptied.** "Let the preceding
+/// run extend over it" has no meaning at the start of the text, where there is
+/// no preceding run: removing that entry leaves the table beginning at the next
+/// one, and the characters in front of it with no attribute at all — the
+/// invariant `iwork check` enforces, broken by the writer that is supposed to
+/// keep it (`delete-style pages-styled.pages 1732648` reported `0..12`
+/// uncovered). What the format has for "there is deliberately nothing here" is
+/// an entry carrying its index and no object, which is what Pages writes at 0
+/// for an unstyled first run and what this leaves behind.
+///
 /// Returns how many entries were touched.
 pub fn repoint(table: &mut Message, from: u64, to: Option<u64>) -> usize {
     let field = entry_field(table);
@@ -880,9 +909,16 @@ pub fn repoint(table: &mut Message, from: u64, to: Option<u64>) -> usize {
             continue;
         }
         touched += 1;
-        if let Some(to) = to {
-            entry.set(2, Value::Bytes(reference(to).encode()));
-            out.push((start, entry));
+        match to {
+            Some(to) => {
+                entry.set(2, Value::Bytes(reference(to).encode()));
+                out.push((start, entry));
+            }
+            None if start == 0 => {
+                entry.clear(2);
+                out.push((start, entry));
+            }
+            None => {}
         }
     }
     rebuild(table, keep, out, field);
@@ -1329,9 +1365,14 @@ mod tests {
             vec![(0, Some(999)), (10, Some(200)), (20, Some(999))]
         );
 
+        // Dropping lets the run before extend over the one that went — except
+        // at 0, where there is no run before and the table would begin late,
+        // leaving the first characters with no attribute at all. What is left
+        // there is the entry with its object taken off, which is the format's
+        // "whatever was in force here".
         let mut t = table(&[(0, 100), (10, 200), (20, 100)]);
         assert_eq!(repoint(&mut t, 100, None), 2);
-        assert_eq!(shape(&t), vec![(10, Some(200))]);
+        assert_eq!(shape(&t), vec![(0, None), (10, Some(200))]);
     }
 
     #[test]

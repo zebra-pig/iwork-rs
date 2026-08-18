@@ -477,6 +477,99 @@ fn a_storage_this_crate_cannot_read_faithfully_is_not_edited() {
     );
 }
 
+/// Styling a range in the middle of a storage that has no table of that kind
+/// leaves a table beginning at the range, and characters `0..start` with no
+/// attribute at all — which is the invariant `iwork check` enforces, broken by
+/// the writer that is supposed to keep it.
+///
+/// What Pages writes instead is a **head entry at 0 carrying nothing**: made to
+/// set a bold 22pt font over characters 19–29, it wrote `[0 nil, 19 bold,
+/// 30 nil]`. See `FORMAT.md` §Text.
+#[test]
+fn styling_from_the_middle_gives_the_table_a_head_entry_at_zero() {
+    let path = fixture!("pages-plain.pages");
+    let doc = Document::open(&path).unwrap();
+    let storage = doc.text_storages().into_iter().next().unwrap().identifier;
+    assert!(
+        doc.storages()
+            .iter()
+            .find(|s| s.identifier == storage)
+            .unwrap()
+            .tables
+            .iter()
+            .all(|t| t.field != 8),
+        "the fixture's body has no character table to begin with"
+    );
+    let mut character: Vec<u64> = doc
+        .text_styles()
+        .into_iter()
+        .filter(|s| s.kind == StyleKind::Character)
+        .map(|s| s.identifier)
+        .collect();
+    character.sort_unstable();
+    let style = character[0];
+
+    let mut doc = Document::open(&path).unwrap();
+    doc.apply_text_style(storage, 4..9, style).unwrap();
+    assert_eq!(doc.problems(), Vec::<String>::new());
+
+    let doc = reopen(&doc, "head-entry.pages");
+    let (_, object) = doc.object(storage).unwrap();
+    let archive = iwork::pb::Message::decode(object.payload()).unwrap();
+    let table = iwork::pb::decode_nested(archive.bytes(8).unwrap()).unwrap();
+    assert_eq!(
+        iwork::text::entry_indices(&table, Anchoring::Run),
+        vec![(0, None), (4, Some(style))],
+        "the head entry is at 0 and carries nothing"
+    );
+    // And the table went in in field order, where iWork puts its fields, rather
+    // than being appended after field 28.
+    let fields: Vec<u32> = archive.fields.iter().map(|f| f.number).collect();
+    let mut sorted = fields.clone();
+    sorted.sort_unstable();
+    assert_eq!(
+        fields, sorted,
+        "the new table field was appended, not placed"
+    );
+}
+
+/// Deleting a style with nothing to put in its place lets the run before it
+/// extend over its text — except at index 0, where there is no run before.
+///
+/// `iwork delete-style pages-styled.pages 1732648` removed the entry that
+/// covered the first paragraph and left `check` reporting `0..12` with no
+/// attribute at all. What stays behind is the entry with its object taken off,
+/// which is the format's "whatever was in force here" and what Pages writes for
+/// an unstyled first run.
+#[test]
+fn deleting_the_style_of_the_first_run_leaves_a_nil_entry_behind() {
+    let path = fixture!("pages-styled.pages");
+    let doc = Document::open(&path).unwrap();
+    let storage = doc.text_storages().into_iter().next().unwrap().identifier;
+    let first = doc
+        .style_of_run(storage, 0, StyleKind::Paragraph)
+        .unwrap()
+        .expect("the first paragraph has a style")
+        .style;
+
+    let mut doc = Document::open(&path).unwrap();
+    let deletion = doc.delete_text_style(first, None).unwrap();
+    assert_eq!(deletion.runs_dropped, 1);
+    assert_eq!(doc.problems(), Vec::<String>::new());
+
+    let doc = reopen(&doc, "delete-style.pages");
+    assert!(doc.text_style(first).is_none());
+    let (_, object) = doc.object(storage).unwrap();
+    let archive = iwork::pb::Message::decode(object.payload()).unwrap();
+    let table = iwork::pb::decode_nested(archive.bytes(5).unwrap()).unwrap();
+    let entries = iwork::text::entry_indices(&table, Anchoring::Paragraph);
+    assert_eq!(
+        entries[0],
+        (0, None),
+        "the run at 0 is emptied, not removed: {entries:?}"
+    );
+    assert_eq!(doc.problems(), Vec::<String>::new());
+}
 // -- what a storage carries --------------------------------------------------
 
 /// Every storage in the corpus is made of fields this crate can place. A field
