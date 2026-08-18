@@ -49,6 +49,26 @@ for table in doc.tables() {
 }
 ```
 
+A chart carries its data **twice**, and the two are different questions:
+
+```rust
+for chart in doc.charts() {
+    println!("{} on {}", chart.type_label(), chart.placement.as_str());
+    // The private copy — what the chart draws, and all a Pages or Keynote
+    // chart has.
+    for series in chart.series() {
+        println!("  {:?}: {:?}", series.name, series.values);
+    }
+    // The live references — Numbers only. The grid above is then a cache of
+    // what these last evaluated to.
+    if let Some(references) = &chart.references {
+        for reference in &references.data {
+            println!("  fed by {}", reference.to_text());   // Sales!B2:D2
+        }
+    }
+}
+```
+
 ## CLI
 
 ```
@@ -83,6 +103,10 @@ iwork organise  Budget.numbers            # sort rules, filters, categories,
 iwork formulas  Budget.numbers            # every formula: cell, text, cached value
 iwork set-cell  Budget.numbers Zellarten B3 n:43 out.numbers
 iwork set-cell  Budget.numbers Zellarten 2 1 n:43 out.numbers   # the same cell
+
+iwork charts    Budget.numbers            # every chart: type, placement, the data
+                                          # it carries, and the table ranges it
+                                          # follows — the two are not the same
 
 iwork sections  Report.pages              # sections, their text ranges, page
                                           # numbering, headers and footers
@@ -389,7 +413,7 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | Conditional highlighting rules; custom cell formats | — | ✅ | — |
 | A save leaves an organised document byte-identical | — | ✅ | — |
 | Every cell record re-encodes to the bytes it came from | ✅ | ✅ | — |
-| Only the view state carries version patches; no table archive does | ✅ | ✅ | ✅ |
+| Version patches: the view state and a too-new chart carry them; no table archive does | ✅ | ✅ | ✅ |
 | Every list key resolves, every refcount matches, every cell count adds up | ✅ | ✅ | — |
 | Write a cell: text, number, boolean, date, duration, empty | ✅ | ✅ | — |
 | A written cell keeps its styles, format and undecoded bytes | ✅ | ✅ | — |
@@ -432,6 +456,17 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | `LET`/`LAMBDA`: bindings, continuations, symbols — the 14.4 shape of fields 34–37 | — | ✅ | — |
 | Filter and conditional-highlighting conditions read as formulas | — | ✅ | — |
 | **Every formula matches the app's text, character for character** (273 of 273 outside pivots) | — | ✅ | — |
+| Charts: type, placement, rectangle, series direction, 33 of them | ✅ | ✅ | ✅ |
+| 23 of the 28 chart types, every 3-D family but the donut | — | ✅ | ✅ |
+| The chart model found at extension 10000 of every chart drawable | ✅ | ✅ | ✅ |
+| The private grid: row and column names, series, blank ≠ zero | ✅ | ✅ | ✅ |
+| **Every value of an 18-chart zoo is the number the app was told to plot** | — | — | ✅ |
+| Which table and which ranges feed a chart, through function 175 | — | ✅ | — |
+| A chart with no mediator has private data and nothing to follow | ✅ | — | ✅ |
+| Interactive chart: the data set it is showing, in the model not the view state | — | ✅ | — |
+| Sparse series arrays sized by `count`, not by their entries | ✅ | ✅ | ✅ |
+| A chart too new for an old reader carries a down-level type patch | — | ✅ | — |
+| Every chart-domain archive re-encodes to its bytes (2090 of them) | ✅ | ✅ | ✅ |
 
 Keynote is the gap in that block for one reason only — neither AppleScript nor
 any bundled theme will put a table on a slide, so there is no fixture. The
