@@ -111,6 +111,11 @@ struct ComponentIndex {
     by_object: BTreeMap<u64, u64>,
     /// Component identifiers, which are also their root objects' identifiers.
     roots: BTreeSet<u64>,
+    /// The two components every reader has open before it reads anything else:
+    /// `Document` and `DocumentMetadata`. References to *their* roots are the
+    /// only cross-component references iWork leaves undeclared, in all 23
+    /// documents of this corpus and in every one of the three apps.
+    always_loaded: BTreeSet<u64>,
     /// Objects each component declares in its `external_references`.
     declared: BTreeMap<u64, BTreeSet<u64>>,
 }
@@ -3263,9 +3268,23 @@ impl Document {
     /// simply unstyled, as though the edit had never been made. That silence is
     /// the reason to check rather than to trust the file opening.
     ///
-    /// A reference to a component's *root* object is not a cross-component
-    /// reference — the component identifier is the root object's identifier, and
-    /// naming a component is how a component is reached.
+    /// **A reference to a component's root object needs declaring too**, and
+    /// this used to say it did not. The component identifier *is* the root
+    /// object's identifier, so it looked like naming a component rather than
+    /// crossing into one — but Keynote's `Index/Document.iwa` declares
+    /// `{component_identifier: <slide>}` for every slide component its nodes
+    /// point at, 475 of them in a five-slide deck, and a slide component that
+    /// nothing declares does not load: the app opens the deck, counts the extra
+    /// slide, and answers `missing value` for its layout, its title and its
+    /// body. That is what a slide copied without the declaration looks like,
+    /// and it is how the rule was found.
+    ///
+    /// Two components are exempt, and only two: `Document` and
+    /// `DocumentMetadata`, whose roots are object 1 and object 71 and which
+    /// every reader has open before it reads anything else. With those two
+    /// excused the rule costs nothing on documents the apps wrote — over all 23
+    /// documents of this corpus it reports **zero** undeclared references,
+    /// because iWork already declares every one of the rest.
     pub fn undeclared_references(&self) -> Vec<(u64, u64, u64)> {
         let Some(index) = self.component_index() else {
             return Vec::new();
@@ -3287,7 +3306,7 @@ impl Document {
                 let Some(&to) = index.by_object.get(&target) else {
                     continue;
                 };
-                if to == from || index.roots.contains(&target) {
+                if to == from || index.always_loaded.contains(&target) {
                     continue;
                 }
                 if !index
@@ -3362,7 +3381,13 @@ impl Document {
             for target in wanted {
                 let mut entry = Message::default();
                 entry.set(1, Value::Varint(index.by_object[&target]));
-                entry.set(2, Value::Varint(target));
+                // A component's *root* is declared by naming the component and
+                // nothing else — `{component_identifier}` with no
+                // `object_identifier` — which is the form iWork writes for
+                // every one of them.
+                if !index.roots.contains(&target) {
+                    entry.set(2, Value::Varint(target));
+                }
                 info.append_in_order(6, Value::Bytes(entry.encode()));
                 added += 1;
             }
@@ -3383,6 +3408,12 @@ impl Document {
         let mut index = ComponentIndex::default();
         for component in self.components() {
             index.roots.insert(component.identifier);
+            if matches!(
+                component.preferred_name.as_str(),
+                "Document" | "DocumentMetadata"
+            ) {
+                index.always_loaded.insert(component.identifier);
+            }
             index
                 .by_stream
                 .insert(component.stream_name(), component.identifier);
@@ -3404,9 +3435,16 @@ impl Document {
             for value in info.all(6) {
                 let Value::Bytes(raw) = value else { continue };
                 if let Ok(entry) = Message::decode(raw) {
-                    if let Some(target) = entry.varint(2) {
-                        declared.insert(target);
-                    }
+                    // `{component_identifier, object_identifier}` declares one
+                    // object; `{component_identifier}` alone declares the
+                    // component's root, whose identifier is the component's.
+                    match entry.varint(2) {
+                        Some(target) => declared.insert(target),
+                        None => match entry.varint(1) {
+                            Some(component) => declared.insert(component),
+                            None => continue,
+                        },
+                    };
                 }
             }
         }
