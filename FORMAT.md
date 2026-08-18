@@ -2803,6 +2803,10 @@ that treatment: Pages gives it a new `documentUUID`, `shareUUID` and
 `save_as_new` does. So the identity this crate writes is the one Pages
 considers settled, and a plain copy is one Pages considers unsettled.
 
+Numbers reproduces it exactly on a `.numbers` copy — `documentUUID`,
+`shareUUID`, `privateUUID` and `stableDocumentUUID` all unmoved, only the
+version and the revision new — and all three apps open a copy this crate wrote.
+
 **What could not be shown.** Opening two documents at once does *not*
 distinguish them: Pages opens an original and a byte-identical copy
 simultaneously and reports two documents with two paths, exactly as it does for
