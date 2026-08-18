@@ -250,7 +250,44 @@ build pages-report pages 180
 # a layout break (`U+0005`) inside a paragraph for good measure.
 script_override=$here/applescript/pages-from-template.applescript
 build pages-lists pages 240 "Application/04_Real_Estate_Flyer/ISO"
+
+# The document *structure* Pages is the only app to have, and none of which a
+# script can create either: `make new section` is not in the dictionary,
+# `delete section` answers -10000, and there is no header, footer, footnote,
+# column or table-of-contents anywhere in it. All 640 bundled Pages templates
+# were scanned with this crate; these four are what the interesting numbers
+# picked out.
+#
+#   book        six sections and **facing pages** (`TP.SettingsArchive` field
+#               34), which only the eighteen novel-shaped templates have
+#   toc         the only table of contents in the whole install: two of the 640
+#               templates carry a `TSWP.TOCInfoArchive`, and this is one
+#   layout      a **page-layout** document — `TP.SettingsArchive.body` false,
+#               which is exactly the 388 templates that also carry a
+#               `TP.PageTemplateArchive` — with a linked-text-box thread
+#               (`TSWP.FlowInfoArchive`, 19 templates have one) and the only
+#               header and footer text in this corpus
+#   numbering   a section that restarts its page numbers at 2
+#               (`section_page_number_kind` 1, `section_page_number_start` 2),
+#               one that hides its header and footer on the first page, and a
+#               section background fill
+build pages-book pages 300 "Application/11B_Novel_Modern/ISO"
+build pages-toc pages 300 "Application/00C_Textbook_Portrait/ISO"
+build pages-layout pages 300 "Application/08_Journal_Newsletter/ISO"
+build pages-numbering pages 300 "Application/65_Sales_Bold_Report_PM/ISO"
 script_override=
+
+# Columns, which cannot be built the same way. Of the 640 templates exactly
+# **one** lays its body out in more than one column — `02_ResearchPaper_JP`,
+# which has both an equal two-column layout and a non-equal one — and Pages on
+# this machine does not offer it: `every template whose id is
+# "Application/02_ResearchPaper_JP/ISO"` comes back empty, because the
+# Japanese templates are not in this locale's list. So this fixture is the
+# bundle itself renamed, as `numbers-links` is; a `.template` is the same ZIP a
+# `.pages` is, and Pages opens the copy and reads its text back.
+copy_template pages-columns \
+	"Pages Creator Studio.app/Contents/SharedSupport/Templates/02_ResearchPaper_JP/ISO.template" \
+	pages
 
 osa_warm numbers
 build numbers-values numbers 180
