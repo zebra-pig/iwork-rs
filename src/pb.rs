@@ -70,7 +70,17 @@ impl<'a> Reader<'a> {
 
     pub fn field(&mut self) -> Result<Field, String> {
         let key = self.varint()?;
-        let number = (key >> 3) as u32;
+        // The field number is stored as a `u32` and re-encoded from it, so a
+        // number that does not fit — or field 0, which protobuf does not allow —
+        // would not come back as the bytes it went in as. Real archives never
+        // approach either (field numbers are at most 2^29-1), so refusing them
+        // costs no corpus and keeps `decode`/`encode` injective, the same
+        // discipline `decode_nested` leans on.
+        let raw_number = key >> 3;
+        if raw_number == 0 || raw_number > u64::from(u32::MAX) {
+            return Err(format!("field number {raw_number} out of range"));
+        }
+        let number = raw_number as u32;
         let value = match key & 7 {
             0 => Value::Varint(self.varint()?),
             1 => Value::Fixed64(self.take(8)?.try_into().unwrap()),
@@ -318,6 +328,28 @@ mod tests {
     #[test]
     fn group_wire_types_are_rejected() {
         assert!(Message::decode(&[0x0b]).is_err());
+    }
+
+    /// A field number is kept in a `u32` and re-encoded from it, so one that
+    /// does not round-trip is refused rather than silently truncated: field 0
+    /// (which protobuf forbids) and a number past `u32::MAX`. Both would break
+    /// the "unrecognised bytes come back unchanged" discipline.
+    #[test]
+    fn field_numbers_that_do_not_round_trip_are_refused() {
+        // key = number << 3 | wire type. Field 0, varint: key 0.
+        assert!(Message::decode(&[0x00, 0x00]).is_err());
+        // A field number of 2^32, varint: key = (1 << 32) << 3.
+        let mut key = Vec::new();
+        write_varint(&mut key, (1u64 << 32) << 3);
+        key.push(0x00); // its varint payload
+        assert!(Message::decode(&key).is_err());
+        // The largest number that still fits round-trips.
+        let mut ok = Vec::new();
+        write_varint(&mut ok, (u64::from(u32::MAX)) << 3);
+        ok.push(0x07);
+        let message = Message::decode(&ok).unwrap();
+        assert_eq!(message.fields[0].number, u32::MAX);
+        assert_eq!(message.encode(), ok);
     }
 
     #[test]

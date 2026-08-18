@@ -31,7 +31,7 @@ pub enum Confidence {
 /// 1**, so a table keyed on the number alone has to be wrong for one of them.
 /// A Keynote deck was reported as holding a `TN.DocumentArchive` until this
 /// existed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum App {
     /// The message type means the same thing in all three apps.
     Any,
@@ -931,15 +931,6 @@ const ENTRIES: &[Entry] = &[
         confidence: Inferred,
         app: App::Any,
     },
-    // The stylesheet a document's styles are actually listed in. Not in the TSS
-    // range, despite the name — verified in the Pages and Keynote samples, where
-    // it holds hundreds of style references (see `style::clone_registrations`).
-    Entry {
-        message_type: 401,
-        name: "TSS.StylesheetArchive",
-        confidence: Confirmed,
-        app: App::Any,
-    },
     // -- Pages ---------------------------------------------------------------
     //
     // This block was wrong in four of its six entries, and all four were the
@@ -1361,6 +1352,24 @@ mod tests {
         assert_eq!(describe(2024), "TSWP.ColumnStyleArchive?");
         assert_eq!(describe_in(Kind::Numbers, 2), "TN.SheetArchive??");
         assert_eq!(describe(999999), "? #999999");
+    }
+
+    /// No `(message_type, app)` pair is registered twice. A duplicate is dead
+    /// weight at best — `lookup_in` returns the first match — and a
+    /// contradiction at worst, which is exactly how type 401 came to be listed
+    /// once as "the 400s are where TSS lives" and again as "not in the TSS
+    /// range, despite the name".
+    #[test]
+    fn no_type_and_app_pair_is_registered_twice() {
+        let mut seen = std::collections::HashSet::new();
+        for entry in ENTRIES {
+            assert!(
+                seen.insert((entry.message_type, entry.app)),
+                "type {} is registered twice for app {:?}",
+                entry.message_type,
+                entry.app
+            );
+        }
     }
 
     /// A Pages type must not be offered for a Keynote document, and vice versa.

@@ -21,12 +21,19 @@
 //!
 //! | Level | What it feeds | What it reaches |
 //! |---|---|---|
-//! | `container` | mutated whole files | the ZIP layer, the package form, the encryption probe |
+//! | `container` | mutated whole files | the ZIP reader (single-file form), the encryption probe |
 //! | `entry` | a package with one entry mutated | IWA framing, Snappy, the object stream |
 //! | `object` | one object's payload mutated, the framing rebuilt | **every reader in the crate**, on a document that opens |
 //! | `iwa` | mutated `Index/*.iwa` bytes | framing and Snappy on their own |
 //! | `plist` | mutated `Metadata/*.plist` bytes | `plist.rs`, binary and XML |
 //! | `protobuf` | mutated object payloads | `pb.rs` and the nested-message walk |
+//!
+//! The `container` level reaches only the *single-file* reader:
+//! `Package::from_bytes` always yields a `SingleFile` package, and there is no
+//! ZIP-shaped mutation that turns into a directory. The directory reader and
+//! writer — `read_directory`, `write_directory` and its stale-stream sweep,
+//! where the filesystem-safety findings live — are fuzzed on their own by
+//! `the_directory_form_survives_hostile_bytes` below.
 //!
 //! The `object` level is where the value is, and it exists because the `entry`
 //! level turned out not to be: a mutation of the compressed bytes almost always
@@ -55,6 +62,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use iwork::package::Form;
 use iwork::{iwa, pb, plist, Document, Package};
 
 // -- the corpus --------------------------------------------------------------
@@ -654,8 +662,54 @@ fn a_plist_length_that_overflows_is_refused() {
     );
 }
 
+/// The directory form of a package never reaches the main loop: every seed is
+/// read with `Package::from_bytes`, which always yields the single-file form, so
+/// `read_directory`, `write_directory` and the stale-stream sweep — the code
+/// carrying the filesystem-safety findings — would otherwise see no hostile
+/// input at all. This drives them directly on mutated bytes: write a package to
+/// a directory, read it back, and write it again over itself (which is where the
+/// sweep runs, the target now being a recognisable package). Not one round trip
+/// may panic.
+#[test]
+fn the_directory_form_survives_hostile_bytes() {
+    let seeds = seeds();
+    let base = budget("IWORK_FUZZ_SEED", 0x1F02_6D0C);
+    let iterations = budget("IWORK_FUZZ_DIR_ITERATIONS", 200);
+    let root = std::env::temp_dir().join(format!("iwork-fuzz-dir-{}", std::process::id()));
+
+    for iteration in 0..iterations {
+        let seed = base.wrapping_add(iteration);
+        let mut rng = Rng(seed);
+        let picked = &seeds[rng.below(seeds.len())];
+        // Only the whole-package seeds carry the entries a directory needs.
+        let Some((package, _)) = &picked.package else {
+            continue;
+        };
+        let mut package = package.clone();
+        if !package.entries.is_empty() {
+            let which = rng.below(package.entries.len());
+            package.entries[which].1 = mutate(&package.entries[which].1, &mut rng);
+        }
+
+        let document = root.join("Probe.pages");
+        let _ = std::fs::remove_dir_all(&document);
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            if package.write_as(&document, Form::Directory).is_ok() {
+                if let Ok(reread) = Package::read_directory(&document) {
+                    let _ = reread.write_as(&document, Form::Directory);
+                }
+            }
+        }));
+        assert!(
+            outcome.is_ok(),
+            "IWORK_FUZZ_SEED={seed} — the directory round trip panicked"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// A ZIP entry's size in the central directory is a claim, not a measurement.
-/// Reserving room for the claim let a two-hundred-byte file ask for four
+/// Reserving room for the claim let a two-hundred-byte file ask for two
 /// gigabytes.
 #[test]
 fn a_zip_entry_size_is_not_an_allocation_request() {
@@ -667,7 +721,7 @@ fn a_zip_entry_size_is_not_an_allocation_request() {
     let _ = std::fs::remove_file(&path);
 
     // Both copies of the uncompressed size — local header and central
-    // directory — set to 0xFFFFFFFF, which is four gigabytes of nothing.
+    // directory — set to 0x7FFFFFFF, which is two gigabytes of nothing.
     let mut patched = 0;
     for at in 0..bytes.len().saturating_sub(4) {
         if bytes[at..at + 4] == [1, 0, 0, 0] {
@@ -676,7 +730,21 @@ fn a_zip_entry_size_is_not_an_allocation_request() {
         }
     }
     assert!(patched > 0, "the sizes should be in there to patch");
-    // Whatever it makes of it, it does not try to allocate two gigabytes per
-    // entry to find out.
-    let _ = Package::from_bytes(&bytes);
+
+    // The mitigation is in the *reservation*: capacity is capped at what is
+    // actually left in the archive, not the claimed size, so a two-gigabyte
+    // claim over a one-byte entry never reserves two gigabytes. Whatever the
+    // reader makes of the size mismatch, it returns rather than hanging, and
+    // every entry it hands back is bounded by the file it came out of — not a
+    // gigabyte of reserved nothing.
+    if let Ok(package) = Package::from_bytes(&bytes) {
+        for (name, data) in &package.entries {
+            assert!(
+                data.len() <= bytes.len(),
+                "entry {name} grew to {} bytes, past the {}-byte archive",
+                data.len(),
+                bytes.len()
+            );
+        }
+    }
 }
