@@ -30,13 +30,27 @@ on run argv
 	set target to item 1 of argv
 	set harvest to {}
 
+	set wanted to my basename(target)
+	set alsoWanted to my stem(wanted)
+
 	do shell script "open -g -b com.apple.Numbers " & quoted form of target
 
+	-- Wait for *this* document, not for any document. Numbers restores the
+	-- session it was quit with, and a restored spreadsheet can still be
+	-- arriving when the one that was asked for opens — after which
+	-- `document 1` is somebody else's, and the answer is a full, plausible,
+	-- entirely wrong reading of another file. Seen: an edited fixture
+	-- reporting the values it had before the edit.
 	set doc to missing value
 	repeat 60 times
 		tell application id "com.apple.Numbers"
 			try
-				if (count of documents) > 0 then set doc to document 1
+				repeat with d in documents
+					if (name of d) is wanted or (name of d) is alsoWanted then
+						set doc to d
+						exit repeat
+					end if
+				end repeat
 			end try
 		end tell
 		if doc is not missing value then exit repeat
@@ -105,6 +119,27 @@ on run argv
 	set AppleScript's text item delimiters to ""
 	return answer
 end run
+
+-- The name Numbers gives a document is one of two things, and which one is not
+-- ours to decide: a document the app itself wrote carries the Finder's
+-- hide-extension flag and answers "numbers-values", while a file this
+-- repository wrote answers "iwork-set-cell.numbers". Both are matched, because
+-- the alternative is a harness that works on fixtures and not on output.
+on basename(path)
+	set AppleScript's text item delimiters to "/"
+	set base to last text item of path
+	set AppleScript's text item delimiters to ""
+	return base
+end basename
+
+on stem(base)
+	set AppleScript's text item delimiters to "."
+	set pieces to text items of base
+	if (count of pieces) > 1 then set pieces to items 1 thru -2 of pieces
+	set base to pieces as text
+	set AppleScript's text item delimiters to ""
+	return base
+end stem
 
 -- `missing value` as the empty string, everything else as one line of text.
 on flatten(v)
