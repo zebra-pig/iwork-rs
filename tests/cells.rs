@@ -265,6 +265,25 @@ fn a_number_survives_the_decimal_it_is_stored_in() {
     assert!(Decimal::parse("").is_none());
     assert!(Decimal::parse("twelve").is_none());
     assert!(Decimal::parse("1.2.3").is_none());
+
+    // Hostile `iwork set-cell n:…` input: an exponent at the bottom of `i32`
+    // less a fraction length used to underflow. It must be refused, not wrapped
+    // or panicked on.
+    assert!(
+        Decimal::parse("1.5e-2147483648").is_none(),
+        "an exponent that underflows must be refused"
+    );
+}
+
+/// A `double` immediate keeps its fraction, rather than being cast to its
+/// integer part — the difference between a filter threshold of `2.5` reading
+/// back as `2.5` and as `2`.
+#[test]
+fn a_double_becomes_a_decimal_that_keeps_its_fraction() {
+    for (value, text) in [(2.5, "2.5"), (-0.9, "-0.9"), (0.0, "0"), (42.0, "42")] {
+        assert_eq!(Decimal::from_f64(value), Decimal::parse(text).unwrap());
+    }
+    assert_eq!(Decimal::from_f64(2.5).to_f64(), 2.5);
 }
 
 #[test]
@@ -281,6 +300,11 @@ fn a_date_survives_the_text_form_it_is_written_in() {
     assert_eq!(table::parse_date("2001-01-01"), Some(0.0));
     assert!(table::parse_date("2024-13-01").is_none());
     assert!(table::parse_date("tomorrow").is_none());
+
+    // A year wide enough to overflow the day arithmetic is nonsense, not a date;
+    // refused rather than multiplied into a panic or a wrap.
+    assert!(table::parse_date("25000000000000000-01-01").is_none());
+    assert!(table::parse_date("10000-01-01").is_none());
 }
 
 // -- the edit ----------------------------------------------------------------
@@ -586,6 +610,151 @@ fn set_cell_refuses_what_it_cannot_do_honestly() {
         .expect_err("a rich-text cell was not refused")
         .to_string();
     assert!(error.contains("rich text"), "{error}");
+}
+
+/// A refused write leaves the document byte for byte — and reference-count for
+/// reference-count — as it was.
+///
+/// `Spaltenformat` is an all-currency column, so turning its text header into a
+/// *number* can find no number format to copy and must fail. It used to fail
+/// only *after* releasing the header's string entry, leaving a record that
+/// still named a string the list no longer held: a dangling key `audit`
+/// complains about, in a document this crate wrote itself. Planning the whole
+/// write before applying any of it is what closes that.
+#[test]
+fn a_refused_write_changes_no_byte_and_no_reference_count() {
+    fixture!("numbers-formats.numbers");
+    let mut doc = open("numbers-formats.numbers").unwrap();
+    let before = doc.table("Spaltenformat").unwrap().value(0, 0);
+    let err = doc
+        .set_cell(
+            "Spaltenformat",
+            0,
+            0,
+            CellValue::Number(Decimal::parse("9").unwrap()),
+        )
+        .expect_err("a number with no donor format should be refused")
+        .to_string();
+    assert!(err.contains("format to copy"), "{err}");
+    assert!(
+        doc.changed_streams().is_empty(),
+        "a refused write rewrote {:?}",
+        doc.changed_streams()
+    );
+    let t = doc.table("Spaltenformat").unwrap();
+    assert_eq!(t.value(0, 0), before);
+    assert_eq!(t.value(0, 0), CellValue::Text("Betrag".into()));
+    assert!(
+        t.audit().is_empty(),
+        "audit after a refusal: {:?}",
+        t.audit()
+    );
+}
+
+/// Emptying a cell gives up *every* reference the deleted record held — a key
+/// in each format slot it carried, and its control spec — not just the one the
+/// format kind names.
+///
+/// The header of a currency column is a text cell holding both a text and a
+/// currency format key; dropping only the current one leaves the other's
+/// refcount too high, which `audit` — now watching the control list too —
+/// rejects.
+#[test]
+fn emptying_a_cell_gives_up_every_key_it_held() {
+    fixture!("numbers-formats.numbers");
+
+    // A text header carrying a second (currency) format slot.
+    let mut doc = open("numbers-formats.numbers").unwrap();
+    doc.set_cell("Spaltenformat", 0, 0, CellValue::Empty)
+        .unwrap();
+    let t = doc.table("Spaltenformat").unwrap();
+    assert_eq!(t.value(0, 0), CellValue::Empty);
+    assert!(
+        t.audit().is_empty(),
+        "audit after emptying the header: {:?}",
+        t.audit()
+    );
+
+    // A cell carrying a control spec, whose reference the audit now checks.
+    let mut doc = open("numbers-formats.numbers").unwrap();
+    doc.set_cell("Formate", 10, 1, CellValue::Empty).unwrap();
+    let t = doc.table("Formate").unwrap();
+    assert!(
+        t.audit().is_empty(),
+        "audit after emptying a control cell: {:?}",
+        t.audit()
+    );
+}
+
+/// An ambiguous table name is refused on a *write*, where a read may settle for
+/// the first match. Apple's pivot sample carries two tables called `Sales`, on
+/// different sheets; silently editing the first is how a caller writes into the
+/// wrong one.
+#[test]
+fn an_ambiguous_table_name_is_refused_on_write() {
+    fixture!("numbers-pivot.numbers");
+    let mut doc = open("numbers-pivot.numbers").unwrap();
+    let err = doc
+        .set_cell("Sales", 0, 0, CellValue::Text("x".into()))
+        .expect_err("two tables are called Sales")
+        .to_string();
+    assert!(err.contains("names 2 tables"), "{err}");
+    assert!(err.contains("904729") && err.contains("905059"), "{err}");
+    assert!(doc.changed_streams().is_empty());
+
+    // By identifier there is no ambiguity — whatever the write then does, it is
+    // not the refusal above.
+    if let Err(e) = doc.set_cell("904729", 0, 0, CellValue::Text("x".into())) {
+        assert!(!e.to_string().contains("names"), "{e}");
+    }
+}
+
+/// The patched-object refusal covers every object a write rewrites, not only
+/// the tile. A text edit rewrites the string list too, and a stale version
+/// patch left on *that* would describe it as it used to be.
+#[test]
+fn a_write_over_a_patched_side_table_is_refused() {
+    let Some(mut doc) = patch_every("numbers-values.numbers", iwork::table::TYPE_DATA_LIST) else {
+        return;
+    };
+    let err = doc
+        .set_cell("Zellarten", 2, 0, CellValue::Text("Ganzzahl".into()))
+        .expect_err("a write over a patched string list should be refused")
+        .to_string();
+    assert!(err.contains("version patches"), "{err}");
+    assert!(doc.changed_streams().is_empty());
+}
+
+/// Splice a `type == 0` version patch onto every object of one message type, so
+/// that [`Document::patched_objects`] reports them — the hostile shape a write
+/// must refuse to rewrite. Returns `None` when the corpus is absent.
+fn patch_every(name: &str, message_type: u32) -> Option<Document> {
+    use iwork::iwa::{self, ArchiveMessage};
+    let path = generated(name)?;
+    let mut package = iwork::Package::read(&path).unwrap();
+    let mut matched = false;
+    for stream in package.iwa_names() {
+        let mut objects = iwa::parse(package.get(&stream).unwrap()).unwrap();
+        let mut touched = false;
+        for object in objects.iter_mut() {
+            if object.message_type() != message_type {
+                continue;
+            }
+            object.messages.push(ArchiveMessage {
+                message_type: 0,
+                version: Vec::new(),
+                extra: Vec::new(),
+                payload: Vec::new(),
+            });
+            touched = true;
+            matched = true;
+        }
+        if touched {
+            package.set(&stream, iwa::serialize(&objects));
+        }
+    }
+    assert!(matched, "{name}: no object of type {message_type} to patch");
+    Some(Document::from_package(package).unwrap())
 }
 
 /// Every table in the corpus already keeps the invariants `iwork check` now
