@@ -563,6 +563,15 @@ impl Document {
                         object: *target,
                     });
                 }
+                if let Some((index, section)) =
+                    text::destroyed_sections(&storage, &old, edit).first()
+                {
+                    return Err(Error::SectionBreak {
+                        storage: identifier,
+                        index: index - 1,
+                        section: *section,
+                    });
+                }
 
                 let mut text = String::with_capacity(old.len() - (to - from) + new_text.len());
                 text.push_str(&old[..from]);

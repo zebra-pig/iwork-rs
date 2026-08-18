@@ -807,6 +807,52 @@ pub fn destroyed_anchors(
     out
 }
 
+/// Every section the removed range would destroy, as `(index, section)`.
+///
+/// A section is not anchored like an attachment — its entry sits at a
+/// paragraph start, on the character *after* the `U+0004` that begins it — so
+/// [`destroyed_anchors`] does not see it. What destroys a section is deleting
+/// **the break**, and the break is at `index - 1`.
+///
+/// The entry at index 0 is not at risk: the first section of a body begins at
+/// character 0 with no break in front of it, and still begins wherever the
+/// text now begins.
+///
+/// This is separate from [`destroyed_anchors`] because the answer is different
+/// in kind. Deleting the `U+FFFC` an image hangs off has an observed
+/// consequence — Pages deletes the image — and refusing is refusing to
+/// reproduce it. Deleting a section break has **no observed consequence at
+/// all**: Pages will not do it. `delete section 2` answers -10000, there is no
+/// `make new section`, the menu that would do it needs a window, and setting a
+/// section's body text to the empty string leaves the break exactly where it
+/// was with a zero-length section behind it. So what a merge should do to the
+/// two `TP.SectionArchive`s, their six `TP.SectionTemplateArchive`s, their
+/// eighteen header and footer storages, their guide storages and their
+/// background fills is not known, and this crate does not guess.
+pub fn destroyed_sections(storage: &Message, text: &str, edit: Edit) -> Vec<(u64, Option<u64>)> {
+    let Some(table) = storage
+        .bytes(SECTION_TABLE)
+        .and_then(crate::pb::decode_nested)
+    else {
+        return Vec::new();
+    };
+    let units: Vec<u16> = text.encode_utf16().collect();
+    let mut out = Vec::new();
+    for (index, object) in entry_indices(&table, Anchoring::Paragraph) {
+        if index == 0 {
+            continue;
+        }
+        let break_at = index - 1;
+        if units.get(break_at as usize).copied() != Some(0x0004) {
+            continue;
+        }
+        if break_at >= edit.at && break_at < edit.end() {
+            out.push((index, object));
+        }
+    }
+    out
+}
+
 /// Apply `edit` to a storage archive, remapping every attribute table it
 /// carries.
 ///
@@ -1346,6 +1392,54 @@ mod tests {
             inserted: 0,
         };
         assert!(destroyed_anchors(&s, text, clear).is_empty());
+    }
+
+    /// Deleting the `U+0004` in front of a section is deleting the section,
+    /// and it is not [`destroyed_anchors`] that sees it: the entry sits at a
+    /// paragraph start, one character *past* the break.
+    #[test]
+    fn deleting_a_section_break_is_reported_and_deleting_around_it_is_not() {
+        let text = "erste\u{4}zweite\u{4}dritte";
+        let s = storage(
+            text,
+            vec![(
+                17,
+                vec![
+                    entry(0, Some(900)),
+                    entry(6, Some(901)),
+                    entry(13, Some(902)),
+                ],
+            )],
+        );
+        let over_the_break = Edit {
+            at: 3,
+            removed: 4,
+            inserted: 0,
+        };
+        assert_eq!(
+            destroyed_sections(&s, text, over_the_break),
+            vec![(6, Some(901))]
+        );
+        // Exactly the break, and nothing else.
+        let just_the_break = Edit {
+            at: 12,
+            removed: 1,
+            inserted: 0,
+        };
+        assert_eq!(
+            destroyed_sections(&s, text, just_the_break),
+            vec![(13, Some(902))]
+        );
+        // Up to the break but not over it.
+        let short_of_it = Edit {
+            at: 1,
+            removed: 4,
+            inserted: 0,
+        };
+        assert!(destroyed_sections(&s, text, short_of_it).is_empty());
+        // And `destroyed_anchors` never sees any of this: the section table is
+        // paragraph-anchored, and this is why the check is its own function.
+        assert!(destroyed_anchors(&s, text, over_the_break).is_empty());
     }
 
     /// The first section of a Pages body starts at character 0 with no break

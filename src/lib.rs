@@ -116,6 +116,18 @@ pub enum Error {
         table: &'static str,
         object: Option<u64>,
     },
+    /// The deleted range covered the `U+0004` a section begins after, which
+    /// would merge two sections into one. Which of the two keeps its page
+    /// templates, headers, footers, background and guides is not something any
+    /// probe here could establish — Pages refuses to delete a section from a
+    /// script — so this crate refuses rather than choose.
+    SectionBreak {
+        storage: u64,
+        /// Character index of the break itself.
+        index: u64,
+        /// The `TP.SectionArchive` that begins after it.
+        section: Option<u64>,
+    },
     /// The storage carries a length-delimited field that is not one of the
     /// attribute tables this crate knows. It may well be one, and remapping it
     /// by guesswork is how an edit silently damages a document.
@@ -170,6 +182,21 @@ impl std::fmt::Display for Error {
                 match object {
                     Some(id) => format!("object {id}"),
                     None => "something".to_string(),
+                }
+            ),
+            Error::SectionBreak {
+                storage,
+                index,
+                section,
+            } => write!(
+                f,
+                "storage {storage}: character {index} is the U+0004 that begins {}, \
+                 and deleting it merges two sections — which of the two keeps its \
+                 page templates, headers, footers, background and guides is not \
+                 known, because Pages will not perform the edit for anyone to watch",
+                match section {
+                    Some(id) => format!("section {id}"),
+                    None => "a section".to_string(),
                 }
             ),
             Error::UnknownAttributeTable { storage, field } => write!(
