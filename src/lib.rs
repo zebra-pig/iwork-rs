@@ -44,6 +44,7 @@
 //! # Ok(()) }
 //! ```
 
+pub mod chart;
 pub mod document;
 pub mod drawable;
 pub mod formula;
@@ -57,6 +58,7 @@ pub mod style;
 pub mod table;
 pub mod text;
 
+pub use chart::{Chart, DataReferences, Grid, GridValue, Series};
 pub use document::{Component, DataFile, Document, Kind, TextEdit, TextStorage};
 pub use drawable::{Drawable, Geometry, Placement};
 pub use formula::{Ast, Formula, Node, Reference};
