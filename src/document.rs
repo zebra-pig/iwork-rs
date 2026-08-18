@@ -2481,6 +2481,11 @@ impl Document {
     /// Which attribute table is edited follows from the style's kind. Paragraph
     /// and list styles apply to whole paragraphs, so give them ranges from
     /// [`Document::paragraph_ranges`] rather than arbitrary offsets.
+    ///
+    /// A range reaching past the end of the text is [`Error::TextRange`], as it
+    /// is for [`Document::replace_text`]. Clamping it instead is how
+    /// `500..600` came to restyle the only paragraph of a 54-unit body and
+    /// report success.
     pub fn apply_text_style(
         &mut self,
         storage: u64,
@@ -2495,6 +2500,15 @@ impl Document {
         let body = text::read(&archive);
         let length = text::length(&body);
         let table_field = kind.attribute_table();
+
+        let end = range.end.max(range.start);
+        if end > length {
+            return Err(Error::TextRange {
+                storage,
+                index: end,
+                length,
+            });
+        }
 
         // A paragraph style applies to whole paragraphs, so the range grows to
         // the paragraphs it touches. Writing a paragraph run inside a paragraph

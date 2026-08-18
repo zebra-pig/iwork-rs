@@ -624,6 +624,40 @@ fn deleting_the_style_of_the_first_run_leaves_a_nil_entry_behind() {
     );
     assert_eq!(doc.problems(), Vec::<String>::new());
 }
+
+/// A range past the end of the text is refused, not quietly pulled back to it:
+/// `apply-style … 500 600` on a 54-unit body restyled the only paragraph it
+/// had and reported success.
+#[test]
+fn styling_past_the_end_of_the_text_is_refused() {
+    let path = fixture!("pages-plain.pages");
+    let doc = Document::open(&path).unwrap();
+    let storage = doc.text_storages().into_iter().next().unwrap();
+    let length = iwork::text::length(&storage.text);
+    let style = doc
+        .text_styles()
+        .into_iter()
+        .find(|s| s.kind == StyleKind::Paragraph)
+        .unwrap()
+        .identifier;
+
+    let mut doc = Document::open(&path).unwrap();
+    match doc.apply_text_style(storage.identifier, 500..600, style) {
+        Err(Error::TextRange {
+            index, length: l, ..
+        }) => {
+            assert_eq!(index, 600);
+            assert_eq!(l, length);
+        }
+        other => panic!("expected a named refusal, got {other:?}"),
+    }
+    assert!(doc.changed_streams().is_empty());
+    // The whole text is still fair game.
+    doc.apply_text_style(storage.identifier, 0..length, style)
+        .unwrap();
+    assert_eq!(doc.problems(), Vec::<String>::new());
+}
+
 // -- what a storage carries --------------------------------------------------
 
 /// Every storage in the corpus is made of fields this crate can place. A field

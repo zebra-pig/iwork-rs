@@ -722,14 +722,31 @@ fn applying_a_paragraph_style_uses_the_paragraph_table() {
     );
 }
 
+/// A range past the end of the text is refused the way `replace_text` refuses
+/// one. It used to be clamped, which styled whatever the clamp landed on and
+/// reported success — on a one-paragraph body, `500..600` restyled the
+/// paragraph.
 #[test]
-fn applying_past_the_end_of_the_text_is_clamped() {
+fn applying_past_the_end_of_the_text_is_refused() {
     let mut doc = document();
-    doc.apply_text_style(STORAGE, 20..9_000, EMPHASIS).unwrap();
+    let length = iwork::text::length(&doc.storage_text(STORAGE).unwrap());
+    match doc.apply_text_style(STORAGE, 20..9_000, EMPHASIS) {
+        Err(Error::TextRange {
+            storage,
+            index,
+            length: reported,
+        }) => {
+            assert_eq!(storage, STORAGE);
+            assert_eq!(index, 9_000);
+            assert_eq!(reported, length);
+        }
+        other => panic!("expected a named refusal, got {other:?}"),
+    }
     assert_eq!(
         runs_of(&doc, CHAR_TABLE),
         vec![(0, Some(BODY)), (6, Some(EMPHASIS))]
     );
+    assert!(doc.changed_streams().is_empty());
 }
 
 #[test]
