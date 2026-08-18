@@ -396,14 +396,78 @@ const ENTRIES: &[Entry] = &[
         confidence: Confirmed,
         app: App::Any,
     },
-    // -- stylesheets ---------------------------------------------------------
+    // -- charts --------------------------------------------------------------
     // The 5000s are `TSCH`, not `TSS`. Every document in the corpus carries the
     // theme's chart-style presets — six of 5020, six of 5022, six of 5024,
     // eighteen of 5026 (three axes each) and thirty-six of 5028 (six series
     // each) — and they were being reported as stylesheets and themes.
+    //
+    // **The whole block is a two-field sandwich.** Every archive from 5021 down
+    // to 5031 is `{1: super, 10000: the real message}`, and the schema of field
+    // 10000 is decided by the *shell's* type id and by nothing in the bytes —
+    // which is why they are named here even where nothing decodes them. 5021's
+    // extension is `TSCH.ChartArchive`, a message with **no type id of its
+    // own**; the ten style shells' extensions are the matching
+    // `TSCH.Generated.*Archive`s.
+    //
+    // Counts across the corpus: 33 of 5021, 138 of 5020, 140 of 5022, 33 of
+    // 5023, 140 of 5024, 33 of 5025, 423 of 5026, 99 of 5027, 849 of 5028, 49
+    // of 5029 and 139 of 5030. Confirmed entries are the ones this crate
+    // decodes and asserts about; the rest are named from position and shape.
+    Entry {
+        message_type: 5000,
+        name: "TSCH.PreUFF.ChartInfoArchive",
+        confidence: Unverified,
+        app: App::Any,
+    },
+    Entry {
+        message_type: 5002,
+        name: "TSCH.PreUFF.ChartGridArchive",
+        confidence: Unverified,
+        app: App::Any,
+    },
+    Entry {
+        message_type: 5004,
+        name: "TSCH.ChartMediatorArchive",
+        confidence: Inferred,
+        app: App::Any,
+    },
     Entry {
         message_type: 5020,
         name: "TSCH.ChartStylePreset",
+        confidence: Inferred,
+        app: App::Any,
+    },
+    // The chart on the canvas: a `TSD.DrawableArchive` at field 1 and the whole
+    // chart model at extension 10000. Decoded, printed by `iwork charts` and
+    // asserted against the grid Keynote was told to plot.
+    Entry {
+        message_type: 5021,
+        name: "TSCH.ChartDrawableArchive",
+        confidence: Confirmed,
+        app: App::Any,
+    },
+    Entry {
+        message_type: 5022,
+        name: "TSCH.ChartStyleArchive",
+        confidence: Inferred,
+        app: App::Any,
+    },
+    Entry {
+        message_type: 5023,
+        name: "TSCH.ChartNonStyleArchive",
+        confidence: Inferred,
+        app: App::Any,
+    },
+    Entry {
+        message_type: 5024,
+        name: "TSCH.LegendStyleArchive",
+        confidence: Inferred,
+        app: App::Any,
+    },
+    Entry {
+        message_type: 5025,
+        name: "TSCH.LegendNonStyleArchive",
         confidence: Inferred,
         app: App::Any,
     },
@@ -414,10 +478,48 @@ const ENTRIES: &[Entry] = &[
         app: App::Any,
     },
     Entry {
+        message_type: 5027,
+        name: "TSCH.ChartAxisNonStyleArchive",
+        confidence: Inferred,
+        app: App::Any,
+    },
+    Entry {
         message_type: 5028,
         name: "TSCH.ChartSeriesStyleArchive",
         confidence: Inferred,
         app: App::Any,
+    },
+    Entry {
+        message_type: 5029,
+        name: "TSCH.ChartSeriesNonStyleArchive",
+        confidence: Inferred,
+        app: App::Any,
+    },
+    // 5030 is in every document in the corpus and 5031 in none of them: a
+    // reference line's *style* is part of the theme's presets, its non-style is
+    // written only when a chart has a reference line, and no fixture and no
+    // bundled template has one.
+    Entry {
+        message_type: 5030,
+        name: "TSCH.ReferenceLineStyleArchive",
+        confidence: Inferred,
+        app: App::Any,
+    },
+    Entry {
+        message_type: 5031,
+        name: "TSCH.ReferenceLineNonStyleArchive",
+        confidence: Unverified,
+        app: App::Any,
+    },
+    // Numbers' subclass of the mediator, and the only place a chart's *live*
+    // data references live: `{1: super, 2: entity_id, 3: formula storage,
+    // 4: columns_are_series}`, with one `TSCE.FormulaArchive` per series and
+    // per label. Decoded and printed as `fed by …`.
+    Entry {
+        message_type: 12006,
+        name: "TN.ChartMediatorArchive",
+        confidence: Confirmed,
+        app: InNumbers,
     },
     // The stylesheet a document's styles belong to really is 401, and the
     // theme 402 — the 400s are where `TSS` lives.
