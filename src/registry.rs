@@ -490,6 +490,18 @@ const ENTRIES: &[Entry] = &[
         confidence: Unverified,
         app: InNumbers,
     },
+    // The only object in any document here that carries version patches, and
+    // the only reason `type == 0` needed settling before a table could be
+    // written. One per spreadsheet, in `Index/ViewState*.iwa`, always with
+    // three patches — for 11.0, 10.1 and 10.0 — each dropping field 28 from the
+    // base and supplying its own. Pages and Keynote have no equivalent. See
+    // FORMAT.md §3 and `Document::patched_objects`.
+    Entry {
+        message_type: 12026,
+        name: "TN.UIStateArchive",
+        confidence: Inferred,
+        app: InNumbers,
+    },
     // -- Keynote -------------------------------------------------------------
     // Derived from one deck: 1204 objects, 19 masters, 5 slides, 30 streams.
     // The app-level numbering starts at 1 and collides with Numbers throughout,

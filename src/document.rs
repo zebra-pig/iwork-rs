@@ -236,6 +236,43 @@ impl Document {
             .collect()
     }
 
+    /// Objects that carry a version patch — `MessageInfo.type == 0`.
+    ///
+    /// The archive format lets one object hold its message **and older
+    /// encodings of it as patches**: a first message of the real type, then
+    /// further messages of type `0`, each naming a `base_message_index`, an app
+    /// version it is meant for, and the fields to drop from the base before
+    /// merging. The first message is the newest encoding and the one the
+    /// current app reads; the patches exist so that an older Numbers opening
+    /// the same file gets a shape it understands.
+    ///
+    /// **What 15.3.1 actually writes, over this whole corpus and after an edit
+    /// made by the app itself: exactly one patched object per Numbers document,
+    /// and none at all in Pages or Keynote.** It is the `TN.UIStateArchive` in
+    /// the view-state component, with three patches for 11.0, 10.1 and 10.0,
+    /// each dropping field 28 from the base and supplying its own. No table
+    /// archive — no tile, no data list, no model — carries one.
+    ///
+    /// So the rule this crate follows is short. Read the first message and
+    /// ignore the patches, which is what the app does. Never write one. And
+    /// **never rewrite the first message of an object that has them**, because
+    /// the patches would then describe the object as it used to be, which is a
+    /// document that says two different things depending on who opens it.
+    /// [`Document::set_cell`] refuses on that ground rather than silently
+    /// producing one.
+    pub fn patched_objects(&self) -> Vec<(u64, usize)> {
+        self.objects()
+            .filter_map(|(_, object)| {
+                let patches = object
+                    .messages
+                    .iter()
+                    .filter(|m| m.message_type == 0)
+                    .count();
+                (patches > 0).then_some((object.identifier, patches))
+            })
+            .collect()
+    }
+
     /// Highest object identifier the document has ever allocated.
     ///
     /// New objects must take identifiers above this, and the field must be

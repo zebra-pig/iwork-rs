@@ -735,6 +735,24 @@ fn properties() -> Result<(), Error> {
 
 fn check(path: &str) -> Result<(), Error> {
     let doc = Document::open(path)?;
+
+    // Not a problem — a state. An object can carry older encodings of itself as
+    // patches, and this crate reads the first message and rewrites none of
+    // them; saying so is the difference between "nothing here" and "nothing
+    // here that this tool would touch".
+    let patched = doc.patched_objects();
+    if !patched.is_empty() {
+        let listed: Vec<String> = patched
+            .iter()
+            .map(|(id, patches)| format!("{id} ({patches})"))
+            .collect();
+        println!(
+            "  note: {} object(s) carry version patches, read-only here: {}",
+            patched.len(),
+            listed.join(", ")
+        );
+    }
+
     let problems = doc.problems();
     if problems.is_empty() {
         println!(

@@ -98,8 +98,61 @@ repeat until end of stream:
 | 2 | packed varints | schema version, e.g. `[1, 0, 5]` |
 | 3 | varint | payload length in bytes |
 
-Payloads follow the `ArchiveInfo` immediately, in declaration order. Every
-object in every sample carries exactly one message.
+Payloads follow the `ArchiveInfo` immediately, in declaration order. Almost
+every object carries exactly one message; the exceptions are below.
+
+### Version patches — `MessageInfo.type == 0`
+
+`0` is not a message type. It marks a **patch**: an older encoding of the object
+the first message already holds, kept so that an older app opening the same file
+gets a shape it understands. The `ArchiveInfo` says `should_merge` (field 3) and
+each patch carries the extra fields that place it:
+
+| Field | Meaning |
+|---|---|
+| 7 | `base_message_index` — which message this patches. `0` in everything here |
+| 8 | `diff_merge_version` — the app version the patch is *for* |
+| 9 | `diff_field_path` — when present, the payload is one field's value, not a whole message. **Absent in everything here** |
+| 10 | `fields_to_remove` — drop these from the base before merging |
+| 11 | `diff_read_version` — the minimum reader |
+
+A patch's `MessageInfo.version` is the sentinel `[0xFFFF, 0xFFFF, 0xFFFFFFFF]`.
+
+**What Numbers, Pages and Keynote 15.3.1 actually write** — measured over the
+twelve-document corpus and again after an edit made by Numbers itself:
+
+- **Exactly one patched object per Numbers document, and none at all in Pages
+  or Keynote.** It is the `TN.UIStateArchive` (12026) in the view-state
+  component, always with three patches, for `[11,0,*]`, `[10,1,*]` and
+  `[10,0,*]`, each with `fields_to_remove = [28]` and a payload holding
+  nothing but two copies of field 28. So the merge is: take the base, drop
+  field 28, add the patch's — an older encoding of one field.
+- **No table archive carries one.** No tile, no `TableDataList`, no
+  `TableModelArchive`, no header bucket. Editing a cell therefore never has to
+  merge a patch or re-emit one, which is the whole reason this had to be
+  settled before any table write shipped.
+- Having Numbers edit one cell and save produced no new patched object: the
+  same single view-state archive, and ten of 103 entries rewritten — the two
+  tiles holding the changed cell and the formula that depends on it, the
+  calculation engine, the document, the metadata, the previews, and a
+  view-state component that came back under a **new stream name with new object
+  identifiers**. The app reallocates that component on every save.
+
+The rule this crate follows, and the reason for each half:
+
+1. **Read the first message; ignore the patches.** That is what the current app
+   does, and it is what makes `iwork dump` agree with the app.
+2. **Never write one.** There is nothing to gain: a document this crate writes
+   is a document 15.3.1 wrote, with one value changed.
+3. **Never rewrite the first message of an object that has patches.** The
+   patches would then describe the object as it used to be, and the file would
+   say two different things depending on who opened it. `Document::set_cell`
+   refuses on that ground; `iwork check` prints the patched objects as a note.
+
+The published implementations get this wrong in two different directions —
+keynote-parser raises on a `diff_field_path` longer than one element,
+numbers-parser ignores `fields_to_remove` silently — and neither is exercised
+by anything 15.3.1 writes.
 
 **References** are always `{1: <object identifier>}` — a `TSP.Reference` wrapping
 an integer. There are no file offsets anywhere; resolution is by identifier
