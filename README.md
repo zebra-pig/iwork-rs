@@ -82,6 +82,11 @@ iwork organise  Budget.numbers            # sort rules, filters, categories,
 iwork set-cell  Budget.numbers Zellarten B3 n:43 out.numbers
 iwork set-cell  Budget.numbers Zellarten 2 1 n:43 out.numbers   # the same cell
 
+iwork sections  Report.pages              # sections, their text ranges, page
+                                          # numbering, headers and footers
+iwork structure Report.pages              # mode, paper, page templates, threads,
+                                          # contents lists, footnotes, columns
+
 iwork styles       Report.pages           # every text style, with its object id
 iwork style        Report.pages 3712      # one style, field by field, and what uses it
 iwork new-style    Report.pages 3712 Kicker out.pages
@@ -102,7 +107,7 @@ The format is four layers deep, and this crate gives you each of them:
 | 1 | ZIP package, every entry *stored* | [`package`](src/package.rs) |
 | 2 | `Index/*.iwa` — raw Snappy blocks, 64 KiB each | [`iwa`](src/iwa.rs) |
 | 3 | flat stream of length-delimited protobuf objects | [`iwa`](src/iwa.rs), [`pb`](src/pb.rs) |
-| 4 | an object graph whose shape depends on the app | [`document`](src/document.rs) |
+| 4 | an object graph whose shape depends on the app | [`document`](src/document.rs), [`pages`](src/pages.rs) |
 
 Apple does not publish the `.proto` definitions, and a numeric message type is
 the only thing identifying a payload's schema. So this crate works at the
@@ -388,6 +393,18 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | A written cell keeps its styles, format and undecoded bytes | ✅ | ✅ | — |
 | Writing a cell what it already holds changes no byte | ✅ | ✅ | — |
 | **The app reads back the written value** | ✅ | ✅ | — |
+| Pages mode: word processing vs page layout, and the app agrees | ✅ | — | — |
+| Sections: name, text range, page numbering, background, switches | ✅ | — | — |
+| **Every section's text agrees with the app, character for character** | ✅ | — | — |
+| Three headers and three footers per section template, every time | ✅ | — | — |
+| Page templates exist exactly in page-layout documents | ✅ | — | — |
+| Linked text boxes: the thread, its storage and its boxes in order | ✅ | — | — |
+| Table of contents: both settings archives, its rules and its entries | ✅ | — | — |
+| Columns: equal and non-equal, as fractions that add up to one | ✅ | — | — |
+| No footnote body and no bookmark exists to decode, anywhere | ✅ | — | — |
+| Write a header or footer; only the touched stream is rewritten | ✅ | — | — |
+| **Pages opens the edited document, saves it, and the header is still there** | ✅ | — | — |
+| Deleting a section break is refused by name | ✅ | — | — |
 | Drawables: geometry, rotation, lock, parent, z-order, containment | ✅ | ✅ | ✅ |
 | Shapes, text boxes, lines: path source and its natural size | ✅ | — | ✅ |
 | Masked images: the crop, and the frame the app reports | ✅ | — | ✅ |
@@ -490,6 +507,8 @@ scripts/app-check.sh out.pages "A new headline"   # exit 0 if Pages agrees
 scripts/app-check.sh --self-test Report.pages     # prove it fails when it should
 scripts/table-oracle.sh Budget.numbers            # every cell, as Numbers reads it
 scripts/drawable-oracle.sh Talk.key               # every rectangle, as the app reports it
+scripts/section-oracle.sh Report.pages            # every section's text, as Pages reads it
+scripts/resave.sh out.pages                       # have the app open it and write it out again
 
 IWORK_APP_CHECK=1 cargo test                      # every fixture, through the app
 ```
@@ -500,6 +519,12 @@ you give it one, and closes without saving. `--self-test` corrupts a copy of a
 document it has just accepted and checks that the app refuses it, because a
 harness that always says yes is worse than none.
 
+`resave.sh` is the harder test, for the parts of a document no dictionary will
+report. Pages has no header, footer, footnote or column property at all, so
+"the app read it back" has to be arranged: the app is made to open the edited
+document and **save it**, and the file that comes out was written by Pages from
+its own model. A header this crate invented badly does not survive that.
+
 ## Limitations
 
 - **Previews go stale.** The `preview*.jpg` thumbnails are not regenerated, so
@@ -508,9 +533,31 @@ harness that always says yes is worse than none.
   project than reading and writing the file.
 - **A text edit that would delete an anchored object is refused.** Deleting the
   `U+FFFC` an image, a footnote mark or a table hangs off means deleting that
-  object from the drawable list, the z-order and the media registry, and
-  deleting a `U+0004` merges two sections. Pages does all of that; this crate
-  does none of it, and says so by name instead of quietly detaching the object.
+  object from the drawable list, the z-order and the media registry. Pages does
+  all of that; this crate does none of it, and says so by name instead of
+  quietly detaching the object.
+- **Two sections cannot be merged, so deleting a section break is refused.**
+  The `U+0004` is what makes the section; deleting it leaves two
+  `TP.SectionArchive`s where one boundary is needed, and which of the two keeps
+  its section templates, its eighteen header and footer storages, its guides
+  and its background is a question Pages will not answer for anyone. `delete
+  section 2` comes back -10000, there is no `make new section`, the menu needs
+  a window, and setting a section's body text to the empty string leaves the
+  break where it was with a zero-length section behind it. Rather than guess,
+  `Error::SectionBreak` says which break, which section, and what is unknown.
+- **A footnote, an endnote and a bookmark have no source anywhere.** Not one of
+  the 901 templates the three apps ship has a storage of kind 2 or a
+  `TSWP.BookmarkFieldArchive`, no scripting dictionary can author one, and no
+  document from a real user is available here. The settings a footnote obeys
+  are read and are the defaults; the containment — a `U+FFFC` in the text, a
+  `TSWP.FootnoteReferenceAttachmentArchive` and the note's own storage — is
+  written down in `FORMAT.md` from the 15.3.1 schema and marked Unverified. The
+  reader reports what it finds and never fails.
+- **Rewriting a header replaces whatever the header was.** The date in a
+  newsletter's header is a smart field and the storage holds the string it last
+  rendered to, so setting the text removes the field and freezes the date. The
+  same is true of a page number. The edit report names the tables it rewrote,
+  which is how to tell.
 - **Changing a paragraph's list level is not implemented.** The level is read —
   `iwork paragraphs` prints it — but nothing here can make an app perform that
   edit to check a write against: Pages' rich text carries `font`, `size` and
