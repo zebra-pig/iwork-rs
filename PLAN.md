@@ -151,20 +151,34 @@ Everything layered on top of the cells; depends only on Phase 1.
 
 ## Phase 2 — Tables: write
 
-- [ ] **Precondition: pin down the `type == 0` diff/merge mechanism.** The
+- [x] **Precondition: pin down the `type == 0` diff/merge mechanism.** The
       distilled references show both Python parsers implement it incorrectly
       and incompatibly; before any table write, spec it from local probes
-      and teach the test suite what it means.
-- [ ] Edit an existing cell in place: text and number values first, then
+      and teach the test suite what it means. *(Resolved by measurement:
+      15.3.1 writes exactly one patched object per Numbers document — the
+      view state — and none in Pages or Keynote; **no table archive carries
+      one**, and having the app edit a cell and save produced no new ones.
+      Read the base and ignore the patches; never write one; refuse to
+      rewrite a patched object. FORMAT.md §3, `Document::patched_objects`,
+      `iwork check` note, `tests/cells.rs`.)*
+- [x] Edit an existing cell in place: text and number values first, then
       boolean/date; string-table maintenance; tile re-encode with the
       byte-identity rule for untouched tiles/streams. A written cell keeps
       (or is given) its data format — value and format travel together — and
       writing into a cell that carries a control definition preserves it.
-- [ ] `iwork set-cell <doc> <table> <row> <col> <value> <out>`.
-- [ ] App round-trip: Numbers opens the result and reports the new value via
+      *(All five value kinds plus "empty". **Scope:** the row must already
+      have stored cells — giving a row its first one needs a `TileRowInfo`
+      and is left with adding a row. Refused by name: formula cells,
+      rich-text cells, cells covered by a merge, patched objects.)*
+- [x] `iwork set-cell <doc> <table> <row> <col> <value> <out>`, and the same
+      cell as an A1 reference.
+- [x] App round-trip: Numbers opens the result and reports the new value via
       AppleScript. `iwork check` learns any invariant broken along the way.
+      *(`tests/cells.rs::numbers_reads_back_an_edited_cell`; `iwork check`
+      gained the four table invariants in `Table::audit`.)*
 - [ ] Stretch (only if in-place editing proves solid): add a row by copying
-      an existing one.
+      an existing one. *(Not attempted — see the verification log for what it
+      would take.)*
 
 ## Phase 3 — Drawables, geometry, media
 
@@ -623,6 +637,122 @@ fixture, and what the app accepted.
   - Row and column UUIDs are allocated per table and **collide across tables**:
     two freshly created five-column tables in different documents have the same
     five column UUIDs. Any UUID index must be per table.
+
+- 2026-08-18 — **Phase 2 complete (tables, write — in place).** `set_cell` on
+  `Document`, a cell-record *encoder* in `src/table.rs`, `iwork set-cell`, four
+  new `iwork check` invariants, FORMAT.md §3 "Version patches" and §5 "Writing
+  one cell", and `tests/cells.rs` — 16 tests. `cargo fmt --check` and `cargo
+  clippy -D warnings` clean; `cargo test --all-targets` green: 68 unit + 16 cell
+  + 15 fixture + 34 style + 22 table + 3 doc. `IWORK_APP_CHECK=1` green over the
+  whole suite: all twelve fixtures still open in their apps, the 2943-cell
+  oracle comparison still agrees, and the new write round trip passes.
+
+  **The `type == 0` precondition, resolved by measuring rather than
+  implementing.** The published references disagree about the merge rules
+  because nothing 15.3.1 writes exercises them. Over all twelve fixtures:
+  **one patched object per Numbers document and none at all in Pages or
+  Keynote** — the `TN.UIStateArchive` (12026) in the view-state component, with
+  three patches for 11.0, 10.1 and 10.0, `base_message_index` 0,
+  `diff_field_path` **absent**, `fields_to_remove` `[28]`, and a payload that is
+  nothing but two copies of field 28. Then the harder question: does the app
+  *produce* diffs when it saves an edit? Numbers was made to open
+  `numbers-values`, change B3 by script, and save. It rewrote ten of 103
+  entries — two tiles, the calculation engine, the document, the metadata, three
+  previews, `Metadata/Properties.plist`, and a view-state component that came
+  back under a **new stream name with new object identifiers** — and added no
+  patched object anywhere. **No tile, data list, model or header bucket carries
+  a patch**, so a cell write never has to merge or re-emit one. The rule is
+  therefore the blunt one, and it is now three lines in FORMAT.md and a refusal
+  in `set_cell` rather than an unimplementable merge.
+
+  **Everything else about the write path came from the same probe technique** —
+  have the app do it, then diff the objects. Five findings, each now a test:
+
+  | Question | What the app did | Where it landed |
+  |---|---|---|
+  | Are `TileRowInfo` fields 3/4 (pre-BNC) live? | Byte-identical before and after an edit to the row they describe | Dead, confirmed; the writer leaves them |
+  | Duplicate strings | `D2 := "Zahl"` took **string key 6**, the entry `A3` had just released | Interning is by value, refcounted |
+  | Released strings | Keys 6 and 13 vanished from the list when their last cell let go; key 14 was then handed out | Entries are removed at zero |
+  | `nextListID` | Stayed at 15 while freed keys 6 and 13 were reused | A high-water mark; the app takes the smallest free key, this crate takes the mark |
+  | A text cell made a number | Came back with `number_format` and **no** `text_format` | The slot key moves with the type; both lists' refcounts moved by one each |
+  | An emptied cell | **No record at all**, and both header buckets' counts fell by one | `CellValue::Empty` deletes the record |
+  | A cell in a column with no bucket entry | The app **created** `{index, 0, 0, 1}` | So does this |
+
+  **A correction to Phase 1.** FORMAT.md said 15.3.1 writes neither
+  `storage_version` nor `last_saved_in_BNC` on a tile. It writes both — field 6
+  is `5` and field 7 is `true` on every one of the 37 tiles in the corpus. The
+  Phase 1 reading was of the `TileStorage` message above the tile, whose fields
+  1–3 are the tile list, the tile size and the wide-row flag. The genuinely dead
+  field is `numCells` (3), which is `0` on a tile holding 2411 cells. Two tiles
+  of the pivot fixture set `should_use_wide_rows`, so the encoder's ×4 offset
+  scaling is exercised by a real document and not only by a unit test.
+
+  **What the app accepted.** `tests/cells.rs::numbers_reads_back_an_edited_cell`
+  makes nine edits to `numbers-values` — a number, a string, a date, a duration,
+  a boolean into a cell that had no record, a number into a column that had no
+  header entry, a text cell turned into a number, and a cell emptied — saves,
+  and drives the Phase 1 oracle. Numbers reports all nine, reports every
+  untouched cell unchanged, and keeps the `D9:E9` merge (still two cells both
+  called `D9`). Pages opens an edited `pages-report` and reads back the new cell
+  text through `scripts/app-check.sh`.
+
+  **The one thing a caller must know:** `C3` holds `=B3×2`, and after writing
+  `B3 := 43` the file still caches `84`, because nothing here evaluates a
+  formula. **Numbers recalculates on open and answers 86.** So a stale cache is
+  a limitation of readers, not a corruption of documents — but it is why
+  `set_cell` refuses to write *into* a formula cell, where the formula itself
+  would have to go.
+
+  **Stream-rewrite counts**, printed by `iwork set-cell` and asserted in
+  `editing_a_cell_rewrites_only_the_streams_it_has_to`. Out of 97 entries:
+
+  | Edit | Entries rewritten |
+  |---|--:|
+  | a number over a number | 1 (the tile) |
+  | text over text | 2 (the tile, the string list) |
+  | filling a cell that had no record | 5 (+ the format list, both header buckets) |
+  | writing a cell the value it already holds | **0** |
+
+  **`iwork check` learned four table invariants**, and all twelve fixtures
+  already keep them: every key a cell holds resolves in its list; a list entry's
+  refcount is the number of cells pointing at it; a list key is below
+  `nextListID`; a row's and a column's `numberOfCells` is how many records it
+  has. The first version of the refcount rule failed on three documents and was
+  wrong, not the documents: it counted one format key per cell, and **a cell
+  keeps a key for every format it has ever been given** — the header of a
+  currency column is a *text* cell carrying both. `check` also prints patched
+  objects as a note rather than a problem: it is a state, not a fault.
+
+  What Phase 3 (drawables, geometry, media) should know:
+
+  - **Probe first, implement second.** Every non-obvious rule above came from
+    making the app perform the edit and diffing the object streams, not from a
+    schema. The loop is `cp` the fixture, drive it with AppleScript (`save doc`
+    then `close doc saving yes` — never `saving no`), and compare with
+    `iwork objects` / `iwork dump`. It costs a minute and settles questions the
+    references disagree about.
+  - **A save by the app is not a small diff.** Numbers rewrote ten entries for
+    one changed digit, renamed a component and reallocated its objects. Do not
+    expect an app-made document to be comparable to this crate's output entry by
+    entry; compare *objects*, and only the ones the edit concerns.
+  - **Fixed-layout records carry fields nobody has decoded**, and drawables have
+    them too. The rule that made the cell encoder safe — decode, mutate the
+    fields you understand, re-encode everything else verbatim, and assert
+    `encode(decode(x)) == x` over the whole corpus — applies unchanged to
+    geometry and to media metadata.
+  - **Refcounted side tables are a pattern, not a table quirk.** `DataInfo` and
+    the media registry are the same shape; expect an entry nobody references to
+    be removed rather than left.
+  - The stretch goal that was not attempted, and what it needs: adding a row
+    means a new `TileRowInfo` (including the two "required" pre-BNC fields,
+    which would have to be copied from a donor row), a row UUID that is unique
+    *within the table* (they collide across tables), an entry in the row header
+    bucket and in `ColumnRowUIDMapArchive` — which is sorted by UUID, not by
+    index — and, in a categorised or filtered table, the group nodes' row index
+    ranges and the hidden-state extent's row UUIDs, which are two different
+    addressing schemes for the same rows. None of that is hard; all of it has to
+    be app-verified together, and there was no fixture combining a category with
+    a filter to verify it against.
 
 ## Execution notes
 
