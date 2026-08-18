@@ -284,6 +284,15 @@ impl Document {
     }
 
     pub fn from_package(package: Package) -> Result<Document, Error> {
+        // Before anything tries to Snappy-decompress a stream. A
+        // password-protected package is a package whose `Index/*.iwa` are
+        // ciphertext, and reporting that as "unexpected chunk marker 0x56" is
+        // the least useful thing this crate could say about it.
+        if let Some(encryption) = crate::metadata::encryption(&package) {
+            return Err(Error::Encrypted {
+                hint: encryption.hint,
+            });
+        }
         let mut streams = BTreeMap::new();
         for name in package.iwa_names() {
             let raw = package.get(&name).expect("name came from the package");
@@ -2527,6 +2536,15 @@ impl Document {
         crate::pages::column_layouts(self, storage)
     }
 
+    /// Comments, their authors, and tracked changes.
+    ///
+    /// Present in every document — the author storage always is — and empty in
+    /// every document this crate has been shown. See [`crate::annotations`] for
+    /// what that means and what is therefore unverified.
+    pub fn annotations(&self) -> crate::annotations::Annotations {
+        crate::annotations::annotations(self)
+    }
+
     /// Everything about the object graph that looks wrong.
     ///
     /// Written to be run against an *unedited* document first: whatever it says
@@ -3150,6 +3168,63 @@ impl Document {
                 ));
             }
         }
+
+        // -- identity, which lives outside the object graph ------------------
+        //
+        // Three places say what the document is, and an edit that rewrote one
+        // of them and not the others would leave a file whose parts disagree.
+        // What is checked is the **agreement**, never the presence: a document
+        // with no `Properties.plist` is not this crate's doing, while three
+        // that contradict each other is exactly what a bad `save_as_new` looks
+        // like.
+        match crate::metadata::Properties::read(&self.package) {
+            Err(e) => problems.push(format!("{}: {e}", crate::metadata::PROPERTIES)),
+            Ok(None) => {}
+            Ok(Some(properties)) => {
+                let identifier = self
+                    .package
+                    .get(crate::metadata::DOCUMENT_IDENTIFIER)
+                    .map(|raw| String::from_utf8_lossy(raw).trim().to_string());
+                if identifier.is_some() && identifier != properties.document_uuid {
+                    problems.push(format!(
+                        "{} says {:?} and Properties.plist says {:?}",
+                        crate::metadata::DOCUMENT_IDENTIFIER,
+                        identifier.unwrap_or_default(),
+                        properties.document_uuid.unwrap_or_default()
+                    ));
+                } else if properties.share_uuid != properties.document_uuid {
+                    problems.push(format!(
+                        "shareUUID {:?} is not the documentUUID {:?}",
+                        properties.share_uuid.unwrap_or_default(),
+                        properties.document_uuid.unwrap_or_default()
+                    ));
+                }
+                if let (Some(revision), Some(version)) =
+                    (&properties.revision, &properties.version_uuid)
+                {
+                    if !revision.ends_with(version) {
+                        problems.push(format!(
+                            "revision {revision} does not end in the versionUUID {version}"
+                        ));
+                    }
+                }
+            }
+        }
+
+        // A comment or a tracked change that points at an author the storage
+        // does not list is a dangling reference the object walk above cannot
+        // see, because both ends exist.
+        let annotations = self.annotations();
+        for comment in &annotations.comments {
+            if let Some(author) = comment.author {
+                if !annotations.authors.iter().any(|a| a.identifier == author) {
+                    problems.push(format!(
+                        "comment {} names author {author}, which is not an annotation author",
+                        comment.identifier
+                    ));
+                }
+            }
+        }
         problems
     }
 
@@ -3441,6 +3516,36 @@ impl Document {
     /// bytes actually in the package, so it cannot drift out of step with the
     /// edits the way a dirty flag can.
     pub fn save(&self, path: impl AsRef<std::path::Path>) -> Result<(), Error> {
+        self.saved_package().write(path)
+    }
+
+    /// Save under a **fresh document identity**, so the copy and the original
+    /// are two documents rather than two versions of one.
+    ///
+    /// `documentUUID`, `shareUUID`, `privateUUID` and `versionUUID` are
+    /// replaced, `revision` follows the new version, and
+    /// `Metadata/DocumentIdentifier` is rewritten to match — the exact set
+    /// Pages' own Save As was measured changing. `stableDocumentUUID` is kept,
+    /// because that is what says the copy came from this document.
+    ///
+    /// Everything else is [`Document::save`]: the object streams are the same
+    /// bytes, and `Metadata/BuildVersionHistory.plist` is left alone.
+    ///
+    /// Plain [`Document::save`] does the opposite and keeps the identity, which
+    /// is what an edit-in-place wants — and which byte-identity already proves,
+    /// since a no-op save reproduces `Properties.plist` exactly.
+    pub fn save_as_new(
+        &self,
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<crate::metadata::NewIdentity, Error> {
+        let mut package = self.saved_package();
+        let identity = crate::metadata::assign_new_identity(&mut package)?;
+        package.write(path)?;
+        Ok(identity)
+    }
+
+    /// The package [`Document::save`] would write.
+    fn saved_package(&self) -> Package {
         let mut package = self.package.clone();
         for (name, objects) in &self.streams {
             let framed = iwa::serialize_stream(objects);
@@ -3448,7 +3553,13 @@ impl Document {
                 package.set(name, iwa::compress(&framed));
             }
         }
-        package.write(path)
+        package
+    }
+
+    /// The package's metadata plists and the document-level fields of its root
+    /// archive: identity, locale, template, build history, custom-format list.
+    pub fn metadata(&self) -> Result<crate::metadata::Metadata, Error> {
+        crate::metadata::metadata(self)
     }
 
     /// Streams whose objects no longer match the bytes they were read from —

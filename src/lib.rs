@@ -44,20 +44,24 @@
 //! # Ok(()) }
 //! ```
 
+pub mod annotations;
 pub mod chart;
 pub mod document;
 pub mod drawable;
 pub mod formula;
 pub mod iwa;
 pub mod media;
+pub mod metadata;
 pub mod package;
 pub mod pages;
 pub mod pb;
+pub mod plist;
 pub mod registry;
 pub mod style;
 pub mod table;
 pub mod text;
 
+pub use annotations::{Annotations, Author, Change, Comment};
 pub use chart::{Chart, DataReferences, Grid, GridValue, Series};
 pub use document::{Component, DataFile, Document, Kind, TextEdit, TextStorage};
 pub use drawable::{Drawable, Geometry, Placement};
@@ -144,6 +148,12 @@ pub enum Error {
     UnwritableCharacter {
         character: char,
     },
+    /// The package is password-protected. Its object streams and its media are
+    /// ciphertext; this crate does not decrypt and will not write one.
+    Encrypted {
+        /// The password hint, from `.iwph`, when the document carries one.
+        hint: Option<String>,
+    },
 }
 
 impl std::fmt::Display for Error {
@@ -207,6 +217,15 @@ impl std::fmt::Display for Error {
                 f,
                 "storage {storage}: field {field} is not an attribute table this crate \
                  knows, and an edit would have to guess how its entries are anchored"
+            ),
+            Error::Encrypted { hint } => write!(
+                f,
+                "the document is password-protected ({}); its object streams are \
+                 ciphertext and this crate does not decrypt",
+                match hint {
+                    Some(hint) => format!("hint: {hint}"),
+                    None => "no hint".to_string(),
+                }
             ),
             Error::UnwritableCharacter { character } => write!(
                 f,
