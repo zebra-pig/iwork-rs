@@ -2710,6 +2710,25 @@ impl Document {
             problems.push(format!("object {identifier} is defined {count} times"));
         }
 
+        // An entry name is a path this crate will one day join to a directory —
+        // saving in the package form does exactly that — so a name that is not
+        // a plain relative path is a document trying to write somewhere it does
+        // not belong. All 928 packages examined here have `Index/…`,
+        // `Metadata/…`, `Data/…` and the four root files, and nothing else.
+        for name in self.package.names() {
+            let plain = !name.is_empty()
+                && !name.starts_with('/')
+                && std::path::Path::new(name)
+                    .components()
+                    .all(|c| matches!(c, std::path::Component::Normal(_)));
+            if !plain {
+                problems.push(format!(
+                    "package entry {name:?} is not a plain relative path, and would escape the \
+                     document if it were written as a package"
+                ));
+            }
+        }
+
         let highest = seen.keys().copied().max().unwrap_or(0);
         match self.last_object_identifier() {
             Some(mark) if mark < highest => problems.push(format!(
@@ -3933,6 +3952,41 @@ impl Document {
         let identity = crate::metadata::assign_new_identity(&mut package)?;
         package.write(path)?;
         Ok(identity)
+    }
+
+    /// The `preview*.jpg` entries: pictures of the document, drawn by the app.
+    ///
+    /// They are what the Finder and Quick Look show, and nothing else: no
+    /// object stream in 928 packages — the corpus and all 901 bundled templates
+    /// — so much as contains the string `preview`.
+    pub fn previews(&self) -> Vec<&str> {
+        self.package
+            .names()
+            .filter(|name| name.starts_with("preview") && !name.contains('/'))
+            .collect()
+    }
+
+    /// Remove the previews, and return how many went.
+    ///
+    /// **This crate does not do it on its own.** An edit makes a preview stale
+    /// — it is a rendering of the document as it was, and nothing here can
+    /// draw a page — but leaving it is what iWork itself does between saves,
+    /// and removing it would break the byte-identity a no-op save promises. See
+    /// `FORMAT.md` §1 for the whole argument.
+    ///
+    /// What makes the choice available rather than dangerous: a document
+    /// **without** previews is an ordinary document. All 901 template bundles
+    /// have none, two fixtures are exactly that and the apps open them; a
+    /// password-protected package has none either. And the app puts them back
+    /// on its own next save — three documents made from templates had no
+    /// previews, were opened and saved by Pages, Numbers and Keynote, and came
+    /// back with three each.
+    pub fn strip_previews(&mut self) -> usize {
+        let names: Vec<String> = self.previews().iter().map(|n| n.to_string()).collect();
+        for name in &names {
+            self.package.remove(name);
+        }
+        names.len()
     }
 
     /// The package [`Document::save`] would write.
