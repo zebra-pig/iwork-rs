@@ -307,7 +307,7 @@ confidently. Read-first, then the safest writes.
       is the 2013 word — 10143 is `TP.SectionTemplateArchive`. Columns are
       per-paragraph, not per-section, and their widths are **fractions of the
       text width**. **Bookmarks are the same boundary as footnotes**: not one
-      of the 640 Pages templates has a `TSWP.BookmarkFieldArchive`.)*
+      of the 901 bundled templates has a `TSWP.BookmarkFieldArchive`.)*
 - [x] Linked text boxes: the named thread joining boxes into one flow — a
       storage is not 1:1 with a drawable.
       *(Numbered, not named: `user_interface_identifier` is a thread's only
