@@ -747,6 +747,31 @@ impl Ast {
         Some(depth)
     }
 
+    /// The node stream as text, without the leading `=`.
+    ///
+    /// [`Formula::text`] is this with the `=` in front. It is separate because
+    /// a chart's data references are ASTs that are not whole formulas: each one
+    /// is a reference wrapped in function 175, and what a reader wants printed
+    /// is the reference, not `=(null)(…)`.
+    pub fn text(&self, at: Site<'_>) -> String {
+        let mut printer = Printer::new(at);
+        printer.run(self);
+        printer.finish()
+    }
+
+    /// Every value the node stream leaves on the stack, in order.
+    ///
+    /// A whole formula leaves exactly one, which is what [`Ast::text`] returns.
+    /// A *fragment* need not: a chart's data reference is a function of index
+    /// 175 over any number of operands, and dropping that node leaves one
+    /// string per operand — three of them where a series is fed by three
+    /// separate columns.
+    pub fn texts(&self, at: Site<'_>) -> Vec<String> {
+        let mut printer = Printer::new(at);
+        printer.run(self);
+        printer.stack
+    }
+
     /// Re-encode to the `ASTNodeArrayArchive` bytes.
     pub fn encode(&self) -> Vec<u8> {
         let mut array = Message::default();
@@ -829,9 +854,7 @@ impl Formula {
 
     /// The formula as text, in the spelling Numbers uses.
     pub fn text(&self, at: Site<'_>) -> String {
-        let mut printer = Printer::new(at);
-        printer.run(&self.ast);
-        printer.finish()
+        format!("={}", self.ast.text(at))
     }
 }
 
@@ -1235,8 +1258,7 @@ impl<'a> Printer<'a> {
     }
 
     fn finish(mut self) -> String {
-        let body = self.stack.pop().unwrap_or_default();
-        format!("={body}")
+        self.stack.pop().unwrap_or_default()
     }
 
     fn pop(&mut self, count: usize) -> Vec<String> {
