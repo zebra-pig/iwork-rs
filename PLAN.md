@@ -999,7 +999,7 @@ fixture, and what the app accepted.
   delete-text` are the new verbs, `iwork paragraphs` grew list level and style,
   `iwork check` gained four invariants, FORMAT.md §Text is rewritten and the
   README's clamping bullet is removed. `cargo fmt --check` and `cargo clippy
-  --all-targets` clean; `cargo test --all-targets` green: 97 unit + 16 cell +
+  --all-targets` clean; `cargo test --all-targets` green: 100 unit + 16 cell +
   18 drawable + 15 fixture + 34 style + 22 table + **14 text** + 3 doc.
   `IWORK_APP_CHECK=1` green over the whole suite, fifteen fixtures.
 
@@ -1131,6 +1131,12 @@ fixture, and what the app accepted.
   - **A link's target cannot be verified through an app.** No dictionary reports
     a URL. The app proves the document opens and the linked words are still
     there; the URL is checked by decoding.
+  - **`check-numbers.applescript` was reading only tables.** A Numbers sheet
+    holds shapes and text items like any other iWork container, and the
+    templates put addresses, notes and the only hyperlinks in the whole install
+    in them — so an edit to any of that came back as "not found" about a
+    document that contained it. It now reads them, which is also what Phase 4b
+    and 8a will want.
 
   What Phase 4b (Pages structure) should know:
 
