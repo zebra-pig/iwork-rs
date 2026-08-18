@@ -183,35 +183,63 @@ impl Package {
 
     /// Write the package form: one file per entry, under a directory.
     ///
-    /// Saving over an existing package **removes what is no longer an entry**.
-    /// A save that rewrote `Index/Document.iwa` and left the previous
-    /// `Index/Tables/DataList-9.iwa` lying beside it would leave a directory
-    /// holding two documents' worth of streams, and the component index only
-    /// names one of them — so the stale file is deleted and the directory it
-    /// was in is pruned if that emptied it.
+    /// **This crate never deletes a file it did not write.** Saving over a
+    /// directory that already holds an iWork package *does* sweep away streams
+    /// the package no longer lists — a save that rewrote `Index/Document.iwa`
+    /// and left the previous `Index/Tables/DataList-9.iwa` beside it would leave
+    /// two documents' worth of streams in one directory, and the component index
+    /// names only one of them. But the sweep is fenced twice, because the target
+    /// path is a caller's choice and `iwork duplicate Report.pages ~/Desktop`
+    /// must not empty the Desktop:
+    ///
+    /// 1. It runs **only** when the directory was recognisably a package
+    ///    *before* this save — it had an `Index/` directory and a
+    ///    `Metadata/Properties.plist` (`is_package_directory`). A directory that
+    ///    was something else keeps every file it held; the document is written
+    ///    alongside them.
+    /// 2. Even then it removes **only** files shaped like a former package entry
+    ///    (`looks_like_package_entry`) — `Index/*`, `Data/*`, `Metadata/*`, any
+    ///    `*.iwa`, a `preview*.jpg`. A stray file inside a package directory is
+    ///    left where it is.
+    ///
+    /// See FORMAT.md §1.
     fn write_directory(&self, path: impl AsRef<std::path::Path>) -> Result<(), Error> {
         let root = path.as_ref();
-        std::fs::create_dir_all(root)?;
 
-        let mut wanted: Vec<String> = Vec::with_capacity(self.entries.len());
+        // Answer this *before* writing anything: the writes below create
+        // `Index/` and `Metadata/Properties.plist`, which would make every
+        // target look like a package and unfence the sweep.
+        let overwriting_a_package = is_package_directory(root);
+
+        // Validate every entry name up front, so a hostile one aborts the save
+        // rather than leaving half a document — and half a sweep — on disk.
+        let mut targets = Vec::with_capacity(self.entries.len());
         for (name, data) in &self.entries {
-            let relative = entry_path(name)?;
-            let target = root.join(&relative);
+            targets.push((entry_path(name)?, name.as_str(), data));
+        }
+
+        std::fs::create_dir_all(root)?;
+        for (relative, _, data) in &targets {
+            let target = root.join(relative);
             if let Some(parent) = target.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::write(&target, data)?;
-            wanted.push(name.clone());
+            write_regular_file(&target, data)?;
         }
 
-        let mut present = Vec::new();
-        collect_names(root, "", 0, &mut present);
-        for name in present {
-            if !wanted.contains(&name) {
-                let _ = std::fs::remove_file(root.join(entry_path(&name)?));
+        if overwriting_a_package {
+            let mut present = Vec::new();
+            collect_names(root, "", 0, &mut present);
+            for name in present {
+                let wanted = targets.iter().any(|(_, n, _)| *n == name);
+                if !wanted && looks_like_package_entry(&name) {
+                    if let Ok(relative) = entry_path(&name) {
+                        let _ = std::fs::remove_file(root.join(relative));
+                    }
+                }
             }
+            prune_empty(root, 0);
         }
-        prune_empty(root, 0);
         Ok(())
     }
 
@@ -326,6 +354,50 @@ fn collect(
             entries.push((full, std::fs::read(&path)?));
         }
     }
+    Ok(())
+}
+
+/// Whether a directory already holds an iWork package: the `Index/` component
+/// directory and the `Metadata/Properties.plist` every document carries. Only
+/// then is sweeping away files the package no longer lists safe — a target
+/// directory that is *not* a package may be full of a caller's own files
+/// (`iwork duplicate Report.pages ~/Desktop`), and this crate never deletes
+/// those.
+fn is_package_directory(root: &Path) -> bool {
+    root.join("Index").is_dir() && root.join("Metadata/Properties.plist").is_file()
+}
+
+/// Whether an entry name is shaped like something a package writes, and so is a
+/// stale stream safe to remove when overwriting a package this crate owns.
+/// Anything else — a file a caller left in the target directory — is left where
+/// it is even inside a package.
+fn looks_like_package_entry(name: &str) -> bool {
+    name.starts_with("Index/")
+        || name.starts_with("Data/")
+        || name.starts_with("Metadata/")
+        || name.ends_with(".iwa")
+        || (name.starts_with("preview") && name.ends_with(".jpg"))
+}
+
+/// Write a regular file, first unlinking any symlink — or other non-regular
+/// file — already at the path.
+///
+/// `std::fs::write` opens the path following symlinks, so a link planted at an
+/// entry path (`Index/Document.iwa` pointing at `~/.ssh/authorized_keys`) would
+/// be written *through*, turning a save into an overwrite of a file outside the
+/// package. The read side already refuses to follow links (see `collect`); this
+/// is the write side of the same rule, and `iwork extract` shares it.
+pub fn write_regular_file(target: &Path, data: &[u8]) -> Result<(), Error> {
+    if let Ok(meta) = std::fs::symlink_metadata(target) {
+        if !meta.is_file() {
+            if meta.is_dir() {
+                std::fs::remove_dir_all(target)?;
+            } else {
+                std::fs::remove_file(target)?;
+            }
+        }
+    }
+    std::fs::write(target, data)?;
     Ok(())
 }
 
@@ -529,8 +601,10 @@ mod tests {
         let dir = scratch("stale");
         let document = dir.join("Probe.pages");
         std::fs::create_dir_all(document.join("Index/Tables")).unwrap();
+        std::fs::create_dir_all(document.join("Metadata")).unwrap();
         std::fs::write(document.join("Index/Document.iwa"), b"one").unwrap();
         std::fs::write(document.join("Index/Tables/DataList-9.iwa"), b"two").unwrap();
+        std::fs::write(document.join("Metadata/Properties.plist"), b"props").unwrap();
 
         let mut package = Package::read(&document).unwrap();
         package.remove("Index/Tables/DataList-9.iwa").unwrap();
@@ -546,6 +620,77 @@ mod tests {
             !document.join("Index/Tables").exists(),
             "the directory the stale stream was in should have been pruned"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The reviewer's scenario: `iwork duplicate Report.pages ~/Desktop`, where
+    /// the destination is a directory full of the user's own files rather than a
+    /// package. Writing the document there must place it *alongside* them and
+    /// delete nothing — the earlier writer swept every file it did not itself
+    /// write, which turned a duplicate into `rm -rf ~/Desktop`.
+    #[test]
+    fn saving_into_a_directory_of_unrelated_files_deletes_none_of_them() {
+        let dir = scratch("bystander");
+        std::fs::write(dir.join("resume.pdf"), b"the user's resume").unwrap();
+        std::fs::create_dir_all(dir.join("Photos")).unwrap();
+        std::fs::write(dir.join("Photos/holiday.jpg"), b"a photo").unwrap();
+
+        let package = Package {
+            entries: vec![
+                ("Index/Document.iwa".to_string(), b"stream".to_vec()),
+                ("Metadata/Properties.plist".to_string(), b"props".to_vec()),
+            ],
+            form: Form::Directory,
+        };
+        package.write(&dir).unwrap();
+
+        assert_eq!(
+            std::fs::read(dir.join("resume.pdf")).unwrap(),
+            b"the user's resume",
+            "an unrelated file was deleted by a package save"
+        );
+        assert!(dir.join("Photos/holiday.jpg").exists());
+        // And the document really was written among them.
+        assert_eq!(
+            std::fs::read(dir.join("Index/Document.iwa")).unwrap(),
+            b"stream"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A symlink planted where an entry will be written must not be followed:
+    /// `std::fs::write` would open the link and overwrite the file it points at,
+    /// somewhere outside the package entirely. The read side already refuses to
+    /// follow links; this is the write side of the same rule.
+    #[test]
+    fn a_symlink_at_an_entry_path_is_not_written_through() {
+        let dir = scratch("write-symlink");
+        let document = dir.join("Probe.pages");
+        std::fs::create_dir_all(document.join("Index")).unwrap();
+        let outside = dir.join("outside-secret");
+        std::fs::write(&outside, b"do not touch").unwrap();
+        std::os::unix::fs::symlink(&outside, document.join("Index/Document.iwa")).unwrap();
+
+        let package = Package {
+            entries: vec![
+                ("Index/Document.iwa".to_string(), b"stream".to_vec()),
+                ("Metadata/Properties.plist".to_string(), b"props".to_vec()),
+            ],
+            form: Form::Directory,
+        };
+        package.write(&document).unwrap();
+
+        assert_eq!(
+            std::fs::read(&outside).unwrap(),
+            b"do not touch",
+            "the symlink was followed and the file it points at was overwritten"
+        );
+        let written = document.join("Index/Document.iwa");
+        assert!(
+            std::fs::symlink_metadata(&written).unwrap().is_file(),
+            "the entry should be a real file where the link was"
+        );
+        assert_eq!(std::fs::read(&written).unwrap(), b"stream");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

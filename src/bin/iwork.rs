@@ -2671,7 +2671,9 @@ fn extract(path: &str, dir: &str) -> Result<(), Error> {
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&target, bytes)?;
+        // Never follow a symlink already at the target: `fs::write` would write
+        // through it and overwrite a file outside `dir`. See `write_regular_file`.
+        iwork::package::write_regular_file(&target, bytes)?;
         println!("  {} ({} bytes)", target.display(), bytes.len());
         written += 1;
     }

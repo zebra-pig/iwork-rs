@@ -116,6 +116,20 @@ Two things measured rather than assumed, both with Pages 15.3.1:
   keeps the shape it read, because a save that silently changed the user's file
   type would be a save that lost something.
 
+**Writing the directory form deletes nothing it did not write.** One file per
+entry goes under the folder, and overwriting a folder that was *already* a
+package sweeps away streams the document no longer lists — otherwise a save that
+dropped a table would leave its `Index/Tables/DataList-*.iwa` behind and a
+reader would meet two documents in one folder. But the target folder is a
+caller's choice, and `iwork duplicate Report.pages ~/Desktop` names one full of
+the user's own files. So the sweep is fenced twice: it runs only when the folder
+had an `Index/` directory and a `Metadata/Properties.plist` *before* the save
+(so an ordinary folder is written *into*, not emptied), and even then it removes
+only entry-shaped files — `Index/*`, `Data/*`, `Metadata/*`, any `*.iwa`, a
+`preview*.jpg` — never an unrelated file that happened to share the folder. A
+symlink sitting at an entry path is unlinked rather than written through, the
+write-side counterpart of the reader never following one.
+
 **Templates are packages too.** `.template` (Pages), `.nmbtemplate` (Numbers)
 and `.kth` (Keynote) hold the entries above and nothing else — all 901 bundles
 inside the three installed apps are ZIPs, not one of them the directory form.
