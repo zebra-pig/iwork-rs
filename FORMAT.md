@@ -1724,6 +1724,309 @@ message is the only thing that says what it means: 100 on a movie is live video,
 
 ---
 
+## 8. Pages structure — `TP`
+
+The archives only Pages writes: the document mode, the sections, the headers
+and footers, the page templates, the linked-text-box threads, the tables of
+contents and the footnote settings. Everything below was decoded from documents
+Pages 15.3.1 wrote — five fixtures built from its own templates — and checked
+against the app wherever the app would say anything at all.
+
+> **The published `TP` tables are twelve years old and this range moved.** Both
+> mined baselines are the same iWork '13 snapshot. Since then "page master"
+> became **section template**, six commands changed superclass, and several
+> field numbers were reused with incompatible types. Seven ids in the whole
+> 730-id registry carry a different message than the mined references claim and
+> **all seven are `TP`**. Names here come from the descriptors carved out of the
+> installed binaries (`reference/protos-15.3/pages/TPArchives.proto`).
+
+### The two document modes
+
+`TP.SettingsArchive.body` (field 1, default true). True is a word-processing
+document; false is a **page layout** one, which has no body text and whose
+pages are made of named page templates instead.
+
+Two more signals say the same thing, and neither was assumed:
+
+- **The app agrees.** `document body` is a read-only boolean in Pages'
+  dictionary and it is this field. Checked over four fixtures.
+- **A page-layout document is exactly one with a `TP.PageTemplateArchive`.**
+  Over all 640 bundled Pages templates the 388 whose `body` is false are
+  *precisely* the 388 carrying one, with no exception either way. A
+  word-processing document has none.
+
+**A page-layout document has no sections to the app.** `pages-layout` carries
+two `TP.SectionArchive`s, each with its six section templates and its
+thirty-six header and footer storages, and Pages answers `count of sections`
+with 0. The `sections` element is word-processing only, the way the Document
+inspector is; the archives are still there and are still what the headers hang
+off.
+
+Confirmed. `Document::structure()`, `iwork structure`,
+`tests/pages.rs::a_page_layout_document_is_the_one_with_page_templates`.
+
+### Paper and margins — `TP.DocumentArchive`
+
+| # | Field | Note |
+|--:|---|---|
+| 30, 31 | `page_width`, `page_height` | PostScript points |
+| 32–35 | left, right, top, bottom margin | |
+| 36, 37 | `header_margin`, `footer_margin` | |
+| 38 | `page_scale` | |
+| 42 | `orientation` | **0 in every document seen**, landscape templates included |
+| 43, 44 | `printer_id`, `paper_id` | the last printer used is persisted |
+| 21 | `uses_single_header_footer` | |
+| 39 | `lays_out_body_vertically` | |
+| 47 | `flow_info_container` | the linked-text-box threads |
+| 48 | `page_templates` | repeated; page layout only |
+| 14 | `toc_styles` | repeated `TSWP.TOCSettingsArchive` |
+
+**Orientation is the page size, not the flag.** Field 42 is 0 on the landscape
+templates too, so Pages swaps width and height rather than setting a flag;
+`PageSetup::portrait` compares the two. Facing pages is elsewhere again —
+`TP.SettingsArchive.facing_pages` (34), set in 18 of the 640 templates, all of
+them novel-shaped.
+
+### Sections — `TP.SectionArchive` (10011)
+
+A section is an entry in the **body storage's `table_section`** (field 17),
+anchored like a paragraph: at the character *after* the `U+0004` that begins
+it, never on the break itself. `TP.DocumentArchive.section` (5) exists in the
+schema and is absent from every document in this corpus.
+
+So a section's text is:
+
+```
+section i  =  [ start(i), start(i+1) − 1 )        the break belongs to neither
+last       =  [ start(n), end of the text )
+first      =    start 0, with no break in front of it
+```
+
+**Checked against the app, character for character.** Pages reports the three
+sections of `pages-report` as 145, 923 and 432 characters; the entries are at
+0, 146 and 1070 in a 1502-unit storage, and 146−0−1, 1070−146−1 and 1502−1070
+are those three numbers. Four documents, every section, text compared and not
+merely lengths.
+
+Fields 1–16 are all `OBSOLETE_`. What 15.3.1 writes:
+
+| # | Field | Observed |
+|--:|---|---|
+| 17 | `inherit_previous_header_footer` | 969 of 1048 sections in the bundled templates |
+| 18 | `section_template_first_page_different` | 6 |
+| 19 | `section_template_even_odd_pages_different` | 0 — **Unverified** |
+| 20 | `section_start_kind` | 0 everywhere — the other values are **Unverified** |
+| 21 | `section_page_number_kind` | 0 continue, **1 start at**; 7 sections use 1 |
+| 22 | `section_page_number_start` | 1 normally, 2 in three sections |
+| 23, 24, 25 | first / even / odd `TP.SectionTemplateArchive` | all three always present |
+| 26 | `name` | "Blank", "Section", "Chapter …", "Cover" |
+| 28 | `…first_page_hides_header_footer` | 120 sections |
+| 29 | `user_defined_guide_storage` | |
+| 30 | `background_fill` | 237 sections |
+| 31 | `section_hyperlink_uuid` | what a link to a section points at |
+
+Confirmed, except where the table says otherwise.
+
+### Headers and footers — `TP.SectionTemplateArchive` (10143)
+
+2013 called this a page master; the registry called it a page layout; it is a
+**section template**, and each section has three of them — one for its first
+page, one for even pages, one for odd.
+
+```
+TP.SectionTemplateArchive
+  1  repeated headers   → three TSWP.StorageArchive, kind = 1
+  2  repeated footers   → three more, also kind = 1
+  3  repeated section_template_drawables
+  4  page_template_uuidpath
+```
+
+**Always exactly three of each.** 1734 instances across the bundled templates
+and 306 across this corpus, and never any other count — which is Pages' three
+header and three footer fields. A *footer* storage is `kind = 1` as well; the
+only thing that makes it a footer is being in field 2.
+
+The zone order is **left, centre, right**, and that is *Inferred*: nothing in
+the archive names them, and all three zones of a strip point at the same
+paragraph style, so alignment does not say either. The evidence is a mirror
+pair — `08_Journal_Newsletter` puts its date in header zone 2 and its page
+number in footer zone 2, and `08_Newsletter_RTL`, the same design laid out
+right to left, puts both in zone 0. Content that changes ends when the design
+is mirrored is content addressed by side.
+
+Match-previous is `TP.SectionArchive.inherit_previous_header_footer` (17) for a
+section and `TP.PageTemplateArchive.headers_footers_match_previous_page` (4) —
+the message's only *required* field — for a page template.
+
+**A header's text is often not text.** The date in `pages-layout`'s header is a
+`TSWP.DateTimeSmartFieldArchive` and the storage holds the string it last
+rendered to; replacing the text removes the field and freezes the date. A page
+number is a `U+FFFC` with an attachment behind it, and replacing the text
+removes that too.
+
+### Page templates — `TP.PageTemplateArchive` (10017)
+
+Page-layout documents only.
+
+```
+1  name        "Blank"
+2  repeated section_template_drawables
+3  repeated placeholder_drawables  {tag, drawable, z_index}
+4  headers_footers_match_previous_page   (required)
+5  hide_headers_footers
+6  background_fill
+7  guide_storage
+```
+
+### Linked text boxes — `TSWP.FlowInfoArchive` (2410)
+
+`TP.DocumentArchive.flow_info_container` (47) → `TSWP.FlowInfoContainerArchive`
+(2411) → a list of threads.
+
+```
+TSWP.FlowInfoArchive
+  1  text_storage                 one storage for the whole thread
+  2  repeated textboxes           the boxes, in flow order
+  3  user_interface_identifier    the thread's number
+```
+
+**A thread is numbered, not named.** `user_interface_identifier` is its only
+identity — the number the app shows as "Text Box 1". This is the case §Text's
+"a storage is not one-to-one with a drawable" was written for: two
+`TSWP.ShapeInfoArchive`s share one storage, and an edit to the text moves the
+words between the boxes without either box changing.
+
+Nineteen of the 640 bundled templates carry a thread; every one of the 640
+carries the container, empty or not.
+
+### Columns — `TSWP.ColumnStyleArchive` (2024)
+
+Columns are **not a property of a section**. They are a column style reached
+from the body storage's `table_layout_style` (field 12), which is anchored per
+paragraph, so a document whose sections are set differently has several entries
+in that one table and the ranges say where each applies. Only the body storage
+carries the table; a text box in a thread has none.
+
+```
+ColumnStylePropertiesArchive
+  6  columns_null            "deliberately no columns"
+  7  columns → ColumnsArchive
+       1  equal_columns      {count, gap}
+       2  non_equal_columns  {first, [{gap, width} …]}
+  9  margins    11  padding    5  vertical_alignment    12  writing_direction
+```
+
+**Widths and gaps are fractions of the text width, not points.** The single
+non-equal layout in the whole install — `02_ResearchPaper_JP`, the only Pages
+template with more than one column — reads `first 0.26090077`,
+`gap 0.035152942`, `width 0.7039463`, which sum to exactly 1.0; its equal
+two-column neighbour has `gap 0.03527747` on a page whose text is 515 points
+wide, and three hundredths of a point would be no gap at all.
+
+That template is also the only source: **639 of the 640 bundled templates are
+one column.** It cannot be instantiated on this machine — the Japanese
+templates are not in this locale's list — so the fixture is the bundle renamed.
+
+### Tables of contents
+
+Four archives, and the first thing to know is that there are **two settings
+objects and they disagree**:
+
+| Type | Message | What it is |
+|---|---|---|
+| 2051 | `TSWP.TOCSettingsArchive` | the style-inclusion map: `{toc_name, toc_scope, [{paragraph_style, toc_entry_style, show_in_toc}]}` |
+| 2240 | `TSWP.TOCInfoArchive` | the placed list, which is a drawable: `{super, toc_settings, [toc_entry_data], [page_number_ranges], sync…}` |
+| 2052 | `TSWP.TOCEntryInstanceArchive` | one line as last laid out: paragraph index, page number, number format, **heading text**, indexed style, list level |
+| 2026 | `TSWP.TOCEntryStyleArchive` | a paragraph style plus `{page_number_style, show_page_number}` |
+
+`TP.DocumentArchive.toc_styles` (14) holds the document's own settings, with
+`toc_scope` 0; a placed list carries its own copy with `toc_scope` 1. In
+`pages-toc` the document's names two paragraph styles and the placed list's
+names six, of which two are included. Reading only one of them is reading the
+wrong one.
+
+A paragraph style also carries `show_in_toc` (33), `toc_style_id` (35) and
+`show_in_toc_navigator` (44) of its own, which is the same decision written a
+second time.
+
+**Only two of the 640 bundled Pages templates have a contents list at all**
+(`00C_Textbook_Portrait`, both variants), which is why there is one fixture and
+not several.
+
+### Footnotes and endnotes — nothing to decode
+
+`TP.SettingsArchive` records the settings, and every Pages document has them:
+
+| # | Field | Values |
+|--:|---|---|
+| 30 | `footnote_kind` | 0 footnotes, 1 document endnotes, 2 section endnotes |
+| 31 | `footnote_format` | 0 numeric, 1 roman, 2 symbolic, 3 Japanese numeric, 4 Japanese ideographic, 5 Arabic numeric |
+| 32 | `footnote_numbering` | 0 continuous, 1 restart each page, 2 restart each section |
+| 33 | `footnote_gap` | points between the body and the notes |
+
+**Every one of those is 0, 0, 0, 10 in every document reachable from here**, so
+the settings are Confirmed as fields and every non-default value is
+**Unverified**.
+
+The containment is worse off than that: it is **Inferred from the schema and
+nothing has ever decoded one**.
+
+```
+body storage
+  16  table_footnote          character-anchored, entry on a U+FFFC
+        → TSWP.FootnoteReferenceAttachmentArchive (2008)
+             1  super (TSWP.TextualAttachmentArchive, kind = 2 footnote mark)
+             2  contained_storage  → the note's own TSWP.StorageArchive, kind = 2
+             3  custom_mark_string
+```
+
+There is **no storage of kind 2 anywhere**: not in this corpus, not in any of
+the 901 templates the three apps ship, and no `table_footnote` entry either.
+Neither AppleScript nor a template can author one — Pages' dictionary has no
+footnote command — and no iWork-authored document from a real user is available
+here. So this crate reads the shape above, reports whatever it finds, and never
+fails; `tests/pages.rs::no_storage_in_the_corpus_is_a_footnote_body` is the
+tripwire that says so out loud if a fixture ever grows one.
+
+### Bookmarks — the same story
+
+`table_bookmark` (field 15) → `TSWP.BookmarkFieldArchive` (2035), a run-anchored
+table naming a range. **Not one of the 640 bundled Pages templates carries a
+`TSWP.BookmarkFieldArchive`**, and neither does anything in this corpus. A
+bookmark is made by naming a range in the app's UI and nothing reachable here
+can name a range. Read, reported, **Unverified**.
+
+`TP.DocumentArchive` field 46
+(`show_in_bookmarks_list_paragraph_styles_property_initialized`) and the
+paragraph-style property `show_in_bookmarks_list` (43) are present and are the
+*other* half — which headings appear in the bookmarks list — and are read.
+
+### Deleting a section break
+
+**Refused, and the refusal is the finding.**
+
+Deleting the `U+0004` that begins a section merges two sections into one, and
+which of the two keeps its page templates, its six section templates, its
+eighteen header and footer storages, its guide storage and its background fill
+is not something any probe here could establish. Pages will not perform the
+edit for anyone to watch:
+
+- `delete section 2 of document 1` answers **-10000**, "AppleEvent handler
+  failed";
+- there is no `make new section` in the dictionary;
+- the menu item that would do it needs a key window, which a locked screen does
+  not provide;
+- and `set body text of section 2 to ""` leaves the break exactly where it was,
+  with a **zero-length section** behind it — so a section with no text is a
+  legal state and is not a merge.
+
+`Error::SectionBreak` names the break, the section and what is not known.
+`iwork check` catches the damage after the fact: a section that does not begin
+at 0 begins on the character after a `U+0004`, and that invariant is what found
+the hole in the first place.
+
+---
+
 ## Writing documents
 
 Generate **from a template**, not from nothing. The container, the framing and
@@ -1790,7 +2093,13 @@ Rules a writer must respect:
     Deleting the character an image is anchored to cannot remove the image from
     the drawable list, the z-order and the media registry. The only honest
     options are to refuse or to do the whole job; this crate refuses, by name.
-16. **A field you cannot place is not a field to skip.** A storage's attribute
+16. **Do not merge two sections by deleting the break between them.** The
+    `U+0004` is what makes the section; deleting it leaves two
+    `TP.SectionArchive`s where one boundary is needed, and which of the two
+    keeps its section templates, its eighteen header and footer storages, its
+    guides and its background is a question Pages will not answer for anyone —
+    it refuses the edit from a script. §8 has the four ways that was checked.
+17. **A field you cannot place is not a field to skip.** A storage's attribute
     tables are told apart by field number and by nothing else, and an
     unrecognised one is far more likely to be a table than not. Refusing the
     edit is the safe answer; carrying it through unchanged while every other
