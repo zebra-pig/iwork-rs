@@ -548,11 +548,11 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | The parameters follow the effect, not the duration, delay or automatic flag | — | — | ✅ |
 | Magic Move's whole surface: fade unmatched, acceleration, text granularity | — | — | ✅ |
 | No transition anywhere carries a parameter the 15.3.1 schema does not name | — | — | ✅ |
-| The app writes no transition direction — absent in six decks and 182 themes | — | — | ✅ |
+| The app writes no transition direction — absent in seven decks and 182 themes | — | — | ✅ |
 | Playback: loop, play on open, restart-when-idle, and its **minutes-vs-seconds** trap | — | — | ✅ |
 | Presentation type and the two self-playing delays sit at their defaults, written | — | — | ✅ |
 | A soundtrack in every deck, empty in all of them; its track list is a data-id list | — | — | ✅ |
-| Builds: zero in six decks and in all 182 bundled themes, and nothing can make one | — | — | ✅ |
+| Builds: `keynote-builds.key` carries eight, measured from the Animate inspector; the other six decks and all 182 themes have none | — | — | ✅ |
 | No recorded presentation exists; one live-video camera per deck, and it is the default | — | — | ✅ |
 | **The app agrees about every slide** — 34 layout names and 14 slides, nine fields each | — | — | ✅ |
 | Skip and unskip a slide; unskipping restores the bytes exactly | — | — | ✅ |
@@ -584,7 +584,7 @@ four further Pages documents and one Keynote deck — 654 styles in all.
 
 ### Keynote status
 
-Keynote is verified against six decks — 1 to 46 slides, 17 slide layouts each —
+Keynote is verified against seven decks — 1 to 46 slides, 17 slide layouts each —
 and against its own scripting dictionary, which is the richest of the three:
 `scripts/slide-oracle.sh` asks the app for the slide count, the layouts by name,
 the four playback settings, and every slide's number, base layout, skipped flag,
@@ -675,8 +675,8 @@ Twenty-seven documents (thirty-three with `--ui`) that between them cover plain 
 text including emoji, a table and an image, lists, sections and facing pages, a
 table of contents, a page-layout document with linked text boxes, page
 numbering, columns, a password-protected document, two sheets of typed cells and
-formulas, a 300-row imported table, six decks — presenter notes, a skipped
-slide, charts, all 44 transition effects, the playback settings — and a slide
+formulas, a 300-row imported table, seven decks — presenter notes, a skipped
+slide, charts, all 44 transition effects, the playback settings, eight builds — and a slide
 carrying one of every drawable a script can make: a shape, a rotated shape, a
 shape at half opacity with a reflection, a text box, a line, an image, a locked
 shape and an image Keynote itself cropped. Five spreadsheets are built from
@@ -839,9 +839,11 @@ fuzzing story rather than half of it.
   no probe has watched Keynote do it. A slide's *layout* cannot be changed and
   cannot be copied — Keynote's own dictionary makes `slide layout` read-only.
 - **Builds and transition parameters are read, not written.** The transition's
-  effect, duration, delay and automatic flag are decoded and reported; the two
-  dozen `custom_*` fields beside them are named from the schema and unexercised,
-  and there is no build anywhere to decode. Nothing here writes an animation.
+  effect, duration, delay and automatic flag are decoded and reported, and so
+  are the eight builds `keynote-builds.key` carries — effect, delivery, event
+  trigger and the `"In"`/`"Out"` direction. The action-build and chunk-timing
+  fields beside them are named from the schema and unexercised. Nothing here
+  writes an animation.
 - **A copied slide's thumbnail is the original's.** The node keeps the source's
   `thumbnails` data reference and is marked `thumbnailsAreDirty`, which is what
   Keynote's own duplicate leaves behind — so the navigator shows the right
@@ -893,15 +895,17 @@ fuzzing story rather than half of it.
   written by this crate needs trying in the app before it is trusted —
   `scripts/app-check.sh` is how, and `IWORK_APP_CHECK=1 cargo test` runs it over
   every fixture, on a machine that has the apps.
-- **No comment, no reply and no tracked change exists to decode, anywhere.**
-  All 26 readable fixtures and all 901 templates the three apps ship carry
-  exactly one `TSK.AnnotationAuthorStorageArchive`, and in every one of those 927 it is
-  empty. No scripting dictionary has a comment command, a comment class or a
-  change-tracking property, and a template ships without review state, so
+- **No comment and no reply exists to decode, anywhere.** All 26 readable
+  fixtures and all 901 templates the three apps ship carry exactly one
+  `TSK.AnnotationAuthorStorageArchive`, and in every one of those 927 it is
+  empty. No scripting dictionary has a comment command or a comment class, so
   neither AppleScript nor template mining can produce one. Everything below the
   author storage is therefore decoded from the 15.3.1 schema and marked
   Unverified in `FORMAT.md`; the reader reports what it finds and never fails,
-  and two tripwire tests fail the day a fixture finally has one.
+  and two tripwire tests fail the day a fixture finally has one. **Tracked
+  changes are the exception:** `pages-tracked.pages`, made with Track Changes
+  on from the menu, carries a real `table_deletion`, so the change decoder has
+  its one example and an edit through it is refused (below).
 - **An edit through a storage with tracked changes is refused.** A tracked
   deletion keeps its characters — they are still in the text and Pages draws
   them struck through — so `table_deletion` is not the run table it looks like,

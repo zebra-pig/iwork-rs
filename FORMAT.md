@@ -18,9 +18,9 @@ Documents used:
 - a 15 MB Pages article — 485 objects, 8 streams, 2 TIFFs, 2 charts, German text
 - two Numbers spreadsheets — 738 and 647 objects, 97 and 37 streams
 - four further Pages documents, used for the style graph — 654 styles between them
-- six Keynote decks — 993 to 1466 objects, 1 to 46 slides, 17 slide layouts
+- seven Keynote decks — 991 to 1466 objects, 1 to 46 slides, 17 slide layouts
   each, and between them every drawable a script can make, every legacy chart
-  type, all 44 transition effects and two skipped slides
+  type, all 44 transition effects, two skipped slides and eight builds
 - **all 901 template bundles** the three apps ship, scanned whenever a claim
   needed a population rather than a sample
 
@@ -3310,12 +3310,14 @@ prior art; every claim below that is marked *Confirmed* was checked against
 Keynote itself through `scripts/slide-oracle.sh`, which is the richest oracle of
 the three apps' dictionaries.
 
-The corpus this rests on is six decks — `keynote-deck` (6 slides, an image
+The corpus this rests on is seven decks — `keynote-deck` (6 slides, an image
 slide, a skipped slide), `keynote-slides` (8 slides, 6 layouts, 2 skipped, 5
 transitions, slide numbers on), `keynote-shapes` (1 slide, every scriptable
 drawable), `keynote-charts` (19 slides), `keynote-transitions` (46 blank slides
-carrying all 44 effects) and `keynote-playback` (2 slides and four playback
-settings off their defaults) — plus the 182 `.kth` theme bundles the app ships.
+carrying all 44 effects), `keynote-playback` (2 slides and four playback
+settings off their defaults) and `keynote-builds` (four objects carrying eight
+builds — four Dissolve build-ins and four Disappear build-outs) — plus the 182
+`.kth` theme bundles the app ships.
 
 ### The show graph
 
