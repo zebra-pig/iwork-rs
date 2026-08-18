@@ -1130,8 +1130,10 @@ const ENTRIES: &[Entry] = &[
     },
     // `KN.SlideArchive.builds` (2) points at these. **No document in this
     // corpus has one**, because nothing in Keynote's dictionary makes a build —
-    // so the type is named from the 15.3.1 registry and the count this crate
-    // reports is always zero.
+    // so the type is named from the 15.3.1 registry, its fields are decoded from
+    // the 15.3.1 schema, and neither has ever been measured. `keynote::Build`
+    // reports one if it ever meets one and `tests/keynote.rs` fails the day a
+    // fixture grows one, which is the honest form of "unverified".
     Entry {
         message_type: 8,
         name: "KN.BuildArchive",
@@ -1166,10 +1168,28 @@ const ENTRIES: &[Entry] = &[
     },
     // A recorded presentation — ground rule 8's "read and pass through, never
     // author". Nothing here has one; `KN.ShowArchive.recording` (7) is where it
-    // would hang.
+    // would hang. Play ▸ Record Slideshow is menu-only and the dictionary has no
+    // term for it, so no probe can make one; `keynote::Recording` identifies and
+    // reports rather than pretending to understand.
     Entry {
         message_type: 16,
         name: "KN.RecordingArchive",
+        confidence: Inferred,
+        app: InKeynote,
+    },
+    // Its two track kinds, listed at `KN.RecordingArchive` fields 1 and 2: the
+    // event track holds navigation, laser, pause and movie events with start
+    // times; the movie track holds `KN.MovieSegmentArchive`s naming `Data/`
+    // entries. Unseen for the same reason the recording is.
+    Entry {
+        message_type: 17,
+        name: "KN.RecordingEventTrackArchive",
+        confidence: Inferred,
+        app: InKeynote,
+    },
+    Entry {
+        message_type: 18,
+        name: "KN.RecordingMovieTrackArchive",
         confidence: Inferred,
         app: InKeynote,
     },
@@ -1181,7 +1201,10 @@ const ENTRIES: &[Entry] = &[
         app: InKeynote,
     },
     // `KN.ShowArchive.soundtrack` (17) points at it, and every deck here has
-    // one: volume 1, mode "play once", no movie media.
+    // one: volume 1, mode "play once", no movie media, eleven bytes on the wire.
+    // The *track list* (3, a repeated `TSP.DataReference`) is decoded and
+    // unexercised — there is no soundtrack term anywhere in Keynote's sdef, and
+    // `make new audio clip` is accepted and then does nothing at all.
     Entry {
         message_type: 21,
         name: "KN.Soundtrack",
@@ -1215,7 +1238,12 @@ const ENTRIES: &[Entry] = &[
         confidence: Confirmed,
         app: InKeynote,
     },
-    // The theme's live-video sources, and the collection field 9 names.
+    // The theme's live-video sources, and the collection field 9 names. Every
+    // deck here carries exactly one, `"Default Camera"`, `is_default_source`
+    // true — and it is the collection's `default_source` (2) while its `sources`
+    // (1) is empty, so a reader that only walked the list would find none. A
+    // camera is a device rather than a document: identify and report, never
+    // author.
     Entry {
         message_type: 184,
         name: "KN.LiveVideoSource",
@@ -1228,8 +1256,10 @@ const ENTRIES: &[Entry] = &[
         confidence: Confirmed,
         app: InKeynote,
     },
-    // One stage of a build; `KN.SlideArchive.buildChunks` (43) lists them.
-    // Unseen for the same reason as the builds themselves.
+    // One stage of a build; `KN.SlideArchive.buildChunks` (43) lists them, in
+    // order, each with its own delay, duration and automatic flag — which is
+    // where "With Build 2, after 0.3s" would live. Unseen for the same reason as
+    // the builds themselves, and decoded on the same terms.
     Entry {
         message_type: 153,
         name: "KN.BuildChunkArchive",
