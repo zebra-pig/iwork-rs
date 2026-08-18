@@ -612,6 +612,7 @@ fn remap_table(
     anchoring: Anchoring,
     old_starts: &[u64],
     new_starts: &[u64],
+    old_length: u64,
     new_length: u64,
 ) -> (Message, EditReport) {
     let (entries, rest, entry_field) = split(table, anchoring);
@@ -653,7 +654,26 @@ fn remap_table(
 
     let mut out: Vec<Entry> = Vec::new();
     for mut entry in entries {
-        let Some(index) = edit.remap(entry.index, anchoring) else {
+        // The paragraph entry at the very end of the text is not a paragraph
+        // start: it is the slot the style of the paragraph not yet typed comes
+        // from, and 1,168 of the corpus's 1,622 storages have one. It is an
+        // *end marker*, so it follows the end of the text wherever that goes —
+        // which is what [`Edit::remap`] works out for every edit but one.
+        // Typing at the very end has `at == old_length`, and the rule that
+        // holds a paragraph start still (`index <= at`) then holds the marker
+        // at the old end, where the next entry-must-be-a-paragraph-start check
+        // drops it. `set-text` on `pages-columns`' text box followed by an
+        // insert at the end lost it exactly that way.
+        let end_marker = anchoring == Anchoring::Paragraph
+            && old_length > 0
+            && entry.index == old_length
+            && !old_starts.contains(&entry.index);
+        let remapped = if end_marker {
+            Some(new_length)
+        } else {
+            edit.remap(entry.index, anchoring)
+        };
+        let Some(index) = remapped else {
             report.dropped += 1;
             continue;
         };
@@ -722,10 +742,10 @@ fn remap_table(
     }
 
     // A run entry at or past the end of the text describes no characters at
-    // all. The paragraph tables do carry one there — 276 of the corpus's 389
-    // storages have it, and it is where the style of a paragraph not yet typed
-    // comes from — but a run table does not, and an edit that shortens the text
-    // onto one has produced a run of nothing.
+    // all. The paragraph tables do carry one there — 1,168 of the corpus's
+    // 1,622 storages have it, and it is where the style of a paragraph not yet
+    // typed comes from — but a run table does not, and an edit that shortens
+    // the text onto one has produced a run of nothing.
     if anchoring == Anchoring::Run {
         let before = out.len();
         out.retain(|entry| entry.index == 0 || entry.index < new_length);
@@ -1078,6 +1098,7 @@ pub fn apply(storage: &mut Message, edit: Edit, new_text: &str) -> EditReport {
         .map(|r| r.start)
         .collect();
     let new_starts: Vec<u64> = paragraph_ranges(new_text).iter().map(|r| r.start).collect();
+    let old_length = length(&old_text);
     let new_length = length(new_text);
 
     let mut report = EditReport::default();
@@ -1098,6 +1119,7 @@ pub fn apply(storage: &mut Message, edit: Edit, new_text: &str) -> EditReport {
             spec.anchoring,
             &old_starts,
             &new_starts,
+            old_length,
             new_length,
         );
         if says_nothing(&rewritten, spec.anchoring) {
@@ -1740,6 +1762,30 @@ mod tests {
             },
             "Company N\nProject",
         );
+    }
+
+    /// The paragraph entry at the end of the text is an end marker, not a
+    /// paragraph start, and it follows the end of the text — including when the
+    /// insertion happens exactly at it, which is where it used to be dropped.
+    /// `pages-columns`' text box is the document this came from.
+    #[test]
+    fn the_end_of_text_entry_moves_to_the_new_end() {
+        let mut s = storage(
+            "Hallo",
+            vec![(5, vec![entry(0, Some(56820)), entry(5, None)])],
+        );
+        edit(&mut s, 5, 0, " Welt");
+        assert_eq!(shape(&s, 5), vec![(0, Some(56820)), (10, None)]);
+
+        // Typing into the middle leaves it at the end just the same.
+        edit(&mut s, 2, 0, "xx");
+        assert_eq!(shape(&s, 5), vec![(0, Some(56820)), (12, None)]);
+
+        // And a storage that is empty has no end marker to move: the entry at 0
+        // is the style of the paragraph being typed, and it stays at 0.
+        let mut s = storage("", vec![(5, vec![entry(0, Some(56820))])]);
+        edit(&mut s, 0, 0, "Neu");
+        assert_eq!(shape(&s, 5), vec![(0, Some(56820))]);
     }
 
     /// Deleting the `U+0004` in front of a section is deleting the section,

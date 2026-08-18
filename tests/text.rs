@@ -477,6 +477,60 @@ fn a_storage_this_crate_cannot_read_faithfully_is_not_edited() {
     );
 }
 
+/// The end-of-text paragraph entry — the style of the paragraph not yet typed,
+/// which 1,168 of the corpus's 1,622 storages carry — is an **end marker**, and
+/// follows the end of the text.
+///
+/// `iwork set-text pages-columns.pages 57456 "Hallo"` moved it to 5 correctly;
+/// a further insert *at* 5 then held it there, where it was neither a paragraph
+/// start nor the end of the text, and it was dropped. Typing at the end of a
+/// text box is not an exotic edit.
+#[test]
+fn the_paragraph_entry_at_the_end_of_the_text_survives_typing_there() {
+    let path = fixture!("pages-columns.pages");
+    let doc = Document::open(&path).unwrap();
+    // A text box whose paragraph table carries the trailing entry.
+    let (storage, entries) = doc
+        .storages()
+        .into_iter()
+        .filter_map(|s| {
+            let table = s.tables.iter().find(|t| t.field == 5)?;
+            let ranges = doc.paragraph_ranges(s.identifier).ok()?;
+            (s.length > 0 && table.entries > ranges.len()).then_some((s.identifier, table.entries))
+        })
+        .next()
+        .expect("pages-columns has a storage with the end-of-text entry");
+
+    let ending = |doc: &Document| -> Vec<u64> {
+        let (_, object) = doc.object(storage).unwrap();
+        let archive = iwork::pb::Message::decode(object.payload()).unwrap();
+        let table = iwork::pb::decode_nested(archive.bytes(5).unwrap()).unwrap();
+        iwork::text::entry_indices(&table, Anchoring::Paragraph)
+            .into_iter()
+            .map(|(index, _)| index)
+            .collect()
+    };
+
+    let mut doc = Document::open(&path).unwrap();
+    doc.set_text(storage, "Hallo").unwrap();
+    assert_eq!(ending(&doc).last().copied(), Some(5));
+    assert_eq!(ending(&doc).len(), entries);
+
+    doc.insert_text(storage, 5, " Welt").unwrap();
+    assert_eq!(
+        ending(&doc).last().copied(),
+        Some(10),
+        "the end marker was dropped instead of following the end of the text"
+    );
+    assert_eq!(ending(&doc).len(), entries);
+    assert_eq!(doc.problems(), Vec::<String>::new());
+
+    // And it survives the save, which is what a caller sees.
+    let saved = reopen(&doc, "end-marker.pages");
+    assert_eq!(saved.storage_text(storage).unwrap(), "Hallo Welt");
+    assert_eq!(saved.problems(), Vec::<String>::new());
+}
+
 /// Styling a range in the middle of a storage that has no table of that kind
 /// leaves a table beginning at the range, and characters `0..start` with no
 /// attribute at all — which is the invariant `iwork check` enforces, broken by

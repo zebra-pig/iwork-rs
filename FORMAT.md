@@ -483,8 +483,9 @@ have no object.
 > the one from field 8.
 >
 > A paragraph table may also carry a final entry at the *end* of the text, which
-> is where the style of a paragraph not yet typed comes from — 276 of the 389
-> storages in the corpus have one.
+> is where the style of a paragraph not yet typed comes from — 1,168 of the
+> 1,622 storages in the corpus have one. It is an **end marker**, not a
+> paragraph start, and an edit moves it to wherever the end of the text now is.
 
 Paragraphs are `\n` within a single storage; there is no per-paragraph object.
 Each shape on the page owns its own storage — the Pages sample has 62 of them
