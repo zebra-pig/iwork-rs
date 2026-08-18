@@ -647,6 +647,16 @@ fixture, and what the app accepted.
   whole suite: all twelve fixtures still open in their apps, the 2943-cell
   oracle comparison still agrees, and the new write round trip passes.
 
+  **One harness bug, and it was this phase that made it visible.** `cargo test`
+  runs test *binaries* in parallel, and with the write round trip there are now
+  three of them driving the apps. Every script here begins by closing whatever
+  the app is holding, so two at once close each other's documents, and the
+  failure reads `the app that owns it would not open it` about a fixture that
+  opens perfectly well on its own — which is exactly what happened, once, on a
+  run whose repeat was green. `scripts/lib/osa.sh` gained `osa_acquire`: a lock
+  directory taken before the app is warmed, carrying the holder's pid so an
+  abandoned lock is stolen rather than waited out. Every entry point takes it.
+
   **The `type == 0` precondition, resolved by measuring rather than
   implementing.** The published references disagree about the merge rules
   because nothing 15.3.1 writes exercises them. Over all twelve fixtures:
