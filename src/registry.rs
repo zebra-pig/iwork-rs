@@ -65,20 +65,28 @@ use crate::document::Kind;
 use App::{Keynote as InKeynote, Numbers as InNumbers, Pages as InPages};
 use Confidence::*;
 
-/// Framework prefixes, by number range. These ranges are stable across the
-/// three apps and are the most reliable thing in this module.
+/// Framework prefixes, by number range.
+///
+/// Rebuilt from the type registries carved out of the installed 15.3.1 binaries
+/// — three dumps, one per app, agreeing on every range. The old table had two
+/// ranges wrong: **5000–5999 is `TSCH`, not `TSS`** (every document carries the
+/// theme's six chart-style presets, and they were being reported as
+/// stylesheets), and 1000–1999 is not assigned at all. `TSS` is 400–499 and
+/// `TSA` 600–699.
 pub fn framework(message_type: u32) -> &'static str {
     match message_type {
-        1..=999 => "TSP/TSK",
-        1000..=1999 => "TSA",
+        1..=199 => "app",
+        200..=399 => "TSK",
+        400..=599 => "TSS",
+        600..=999 => "TSA",
         2000..=2999 => "TSWP",
         3000..=3999 => "TSD",
         4000..=4999 => "TSCE",
-        5000..=5999 => "TSS",
+        5000..=5999 => "TSCH",
         6000..=6999 => "TST",
         10000..=10999 => "app",
         11000..=11999 => "TSP package",
-        12000..=12999 => "TSA/chart",
+        12000..=12999 => "app",
         _ => "?",
     }
 }
@@ -119,10 +127,15 @@ const ENTRIES: &[Entry] = &[
         confidence: Confirmed,
         app: App::Any,
     },
+    // The class most "shapes" really are: a `TSD.ShapeArchive` at field 1 plus
+    // the text storage a shape can hold at field 2. Confirmed by making Keynote
+    // create a shape, a text item and a line, all three of which came back as
+    // this type. `TSWP.SelectionArchive`, which this entry used to name, is
+    // 2002.
     Entry {
         message_type: 2011,
-        name: "TSWP.SelectionArchive",
-        confidence: Inferred,
+        name: "TSWP.ShapeInfoArchive",
+        confidence: Confirmed,
         app: App::Any,
     },
     // 2021 and 2022 are the other way round from what public prior art says.
@@ -157,58 +170,166 @@ const ENTRIES: &[Entry] = &[
     },
     Entry {
         message_type: 2026,
-        name: "TSWP.TextStyleArchive",
-        confidence: Inferred,
+        name: "TSWP.TOCEntryStyleArchive",
+        confidence: Unverified,
         app: App::Any,
     },
     // -- drawables -----------------------------------------------------------
+    //
+    // `TSD` ids live in the *common* registry: the same number means the same
+    // thing in all three apps, which the three 15.3.1 registry dumps confirm
+    // entry for entry. Two of the five entries this block used to hold were
+    // wrong — 3016 is the media style, not a theme, and 3047 is the guide
+    // storage — and both were Inferred, which is what Inferred is for.
+    Entry {
+        message_type: 3002,
+        name: "TSD.DrawableArchive",
+        confidence: Confirmed,
+        app: App::Any,
+    },
+    Entry {
+        message_type: 3003,
+        name: "TSD.ContainerArchive",
+        confidence: Unverified,
+        app: App::Any,
+    },
+    // Every shape in the corpus is a `TSWP.ShapeInfoArchive` (2011) wrapping
+    // one of these, rather than one of these on its own.
+    Entry {
+        message_type: 3004,
+        name: "TSD.ShapeArchive",
+        confidence: Confirmed,
+        app: App::Any,
+    },
     Entry {
         message_type: 3005,
         name: "TSD.ImageArchive",
         confidence: Confirmed,
         app: App::Any,
     },
+    // The window a masked image is seen through: its own geometry in the
+    // image's coordinate space plus a path source. Confirmed by the frames
+    // Pages reports for a cropped photo.
     Entry {
         message_type: 3006,
         name: "TSD.MaskArchive",
-        confidence: Inferred,
+        confidence: Confirmed,
+        app: App::Any,
+    },
+    // Read from the two live-video placeholders a Keynote theme ships: poster
+    // image data at 15, style at 19, `is_live_video` at 30 and the Keynote-only
+    // `KN.LiveVideoInfo` extension at 100.
+    Entry {
+        message_type: 3007,
+        name: "TSD.MovieArchive",
+        confidence: Confirmed,
         app: App::Any,
     },
     Entry {
         message_type: 3008,
         name: "TSD.GroupArchive",
-        confidence: Inferred,
+        confidence: Unverified,
         app: App::Any,
     },
     Entry {
+        message_type: 3009,
+        name: "TSD.ConnectionLineArchive",
+        confidence: Unverified,
+        app: App::Any,
+    },
+    Entry {
+        message_type: 3015,
+        name: "TSD.ShapeStyleArchive",
+        confidence: Unverified,
+        app: App::Any,
+    },
+    // Confirmed by what it holds — stroke, opacity, shadow and reflection, in
+    // *that* numbering, one field lower than a shape style because media has no
+    // fill. Thirteen of them in every document.
+    Entry {
         message_type: 3016,
-        name: "TSD.ThemeArchive",
+        name: "TSD.MediaStyleArchive",
+        confidence: Confirmed,
+        app: App::Any,
+    },
+    Entry {
+        message_type: 3045,
+        name: "TSD.CanvasSelectionArchive",
         confidence: Inferred,
         app: App::Any,
     },
     Entry {
         message_type: 3047,
-        name: "TSD.DrawableContentArchive",
+        name: "TSD.GuideStorageArchive",
         confidence: Inferred,
         app: App::Any,
     },
+    Entry {
+        message_type: 3061,
+        name: "TSD.DrawableSelectionArchive",
+        confidence: Inferred,
+        app: App::Any,
+    },
+    Entry {
+        message_type: 3091,
+        name: "TSD.FreehandDrawingToolkitUIState",
+        confidence: Inferred,
+        app: App::Any,
+    },
+    // An empty message — zero payload bytes — meaning "a caption could go here
+    // and none has been written". A Keynote deck carries 178 of them.
+    Entry {
+        message_type: 3097,
+        name: "TSD.StandinCaptionArchive",
+        confidence: Confirmed,
+        app: App::Any,
+    },
     // -- stylesheets ---------------------------------------------------------
+    // The 5000s are `TSCH`, not `TSS`. Every document in the corpus carries the
+    // theme's chart-style presets — six of 5020, six of 5022, six of 5024,
+    // eighteen of 5026 (three axes each) and thirty-six of 5028 (six series
+    // each) — and they were being reported as stylesheets and themes.
     Entry {
         message_type: 5020,
-        name: "TSS.StylesheetArchive",
+        name: "TSCH.ChartStylePreset",
         confidence: Inferred,
         app: App::Any,
     },
     Entry {
         message_type: 5026,
-        name: "TSS.ThemeArchive",
+        name: "TSCH.ChartAxisStyleArchive",
         confidence: Inferred,
         app: App::Any,
     },
     Entry {
         message_type: 5028,
-        name: "TSS.StyleArchive",
+        name: "TSCH.ChartSeriesStyleArchive",
         confidence: Inferred,
+        app: App::Any,
+    },
+    // The stylesheet a document's styles belong to really is 401, and the
+    // theme 402 — the 400s are where `TSS` lives.
+    Entry {
+        message_type: 401,
+        name: "TSS.StylesheetArchive",
+        confidence: Confirmed,
+        app: App::Any,
+    },
+    Entry {
+        message_type: 402,
+        name: "TSS.ThemeArchive",
+        confidence: Inferred,
+        app: App::Any,
+    },
+    // -- media ---------------------------------------------------------------
+    // Not a message type but the field the media registry lives in: the
+    // package metadata's `datas`, one `TSP.DataInfo` per file under `Data/`.
+    // The digest is a raw SHA-1 of the bytes, checked against `shasum` over
+    // every stored file in the corpus.
+    Entry {
+        message_type: 242,
+        name: "TSD.PencilAnnotationStorageArchive",
+        confidence: Unverified,
         app: App::Any,
     },
     // -- tables (Numbers, and tables embedded in Pages/Keynote) --------------
@@ -626,8 +747,10 @@ mod tests {
         assert_eq!(describe_in(Kind::Numbers, 1), "TN.DocumentArchive");
         assert_eq!(describe_in(Kind::Keynote, 1), "KN.DocumentArchive");
         // With no kind to go on, saying nothing beats saying the wrong one.
-        assert_eq!(describe(1), "TSP/TSK #1");
-        assert_eq!(describe_in(Kind::Unknown, 1), "TSP/TSK #1");
+        // Below 200 the number belongs to whichever app wrote the file, so the
+        // framework it falls back to is "app", not a shared one.
+        assert_eq!(describe(1), "app #1");
+        assert_eq!(describe_in(Kind::Unknown, 1), "app #1");
     }
 
     #[test]
