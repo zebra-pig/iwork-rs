@@ -1,0 +1,697 @@
+//! The Pages document spine: modes, sections, headers, footers and flows.
+//!
+//! Three claims, in the order they have to hold.
+//!
+//! **A section covers the text the app says it covers.** The range comes out of
+//! the body storage's table 17 by arithmetic — the entry sits on the character
+//! after a `U+0004`, and the break belongs to neither side — and behind
+//! `IWORK_APP_CHECK=1` every range is compared against `body text of section i`
+//! character for character, which is the only structural property Pages'
+//! dictionary will report.
+//!
+//! **The shape is the shape everywhere.** Three headers and three footers per
+//! section template, in every document in the corpus; page templates exactly
+//! where the document is a page-layout one; column fractions that add up.
+//!
+//! **A header is a text storage, and writing one survives the app.** Pages has
+//! no header property at all, so `app-check.sh` can only say the document
+//! opened. `resave.sh` says more: the app is made to open the edited document
+//! and write it out again, and what is on disk afterwards was written by Pages.
+//! A header this crate invented badly does not come back from that.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use iwork::pages::Mode;
+use iwork::{Document, Error};
+
+fn generated(name: &str) -> Option<PathBuf> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/generated")
+        .join(name);
+    path.exists().then_some(path)
+}
+
+macro_rules! fixture {
+    ($name:expr) => {
+        match generated($name) {
+            Some(path) => path,
+            None => {
+                eprintln!("no {} — skipping (run scripts/make-fixtures.sh)", $name);
+                return;
+            }
+        }
+    };
+}
+
+/// Every Pages fixture, which is the only kind this file is about.
+fn pages_fixtures() -> Vec<PathBuf> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/generated");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut found: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("pages"))
+        .collect();
+    found.sort();
+    found
+}
+
+// -- reading -----------------------------------------------------------------
+
+/// Only Pages has this. A Numbers or Keynote document has no
+/// `TP.DocumentArchive` and must come back with nothing rather than with
+/// something invented.
+#[test]
+fn only_a_pages_document_has_a_structure() {
+    for name in ["numbers-values.numbers", "keynote-deck.key"] {
+        let Some(path) = generated(name) else {
+            continue;
+        };
+        let doc = Document::open(&path).unwrap();
+        assert!(doc.structure().is_none(), "{name} reported a TP structure");
+        assert!(doc.sections().is_empty());
+        assert!(doc.header_footers().is_empty());
+    }
+    let path = fixture!("pages-report.pages");
+    assert!(Document::open(&path).unwrap().structure().is_some());
+}
+
+/// The arithmetic, stated once and checked against every fixture: a section
+/// begins after a `U+0004` and ends one short of the next section's start, so
+/// the ranges tile the body with exactly one character missing between each
+/// pair — the break.
+#[test]
+fn sections_tile_the_body_with_the_break_between_them() {
+    let mut checked = 0usize;
+    for path in pages_fixtures() {
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        let doc = Document::open(&path).unwrap();
+        let structure = doc.structure().unwrap();
+        let Some(body) = structure.body_storage else {
+            continue;
+        };
+        let text: Vec<u16> = doc.storage_text(body).unwrap().encode_utf16().collect();
+        assert!(
+            !structure.sections.is_empty(),
+            "{name}: a Pages document has at least one section"
+        );
+        assert_eq!(structure.sections[0].start, 0, "{name}");
+        for (index, section) in structure.sections.iter().enumerate() {
+            assert!(section.end >= section.start, "{name}: section {index}");
+            assert!(
+                section.end <= text.len() as u64,
+                "{name}: section {index} runs past the body"
+            );
+            if index > 0 {
+                assert_eq!(
+                    text.get(section.start as usize - 1).copied(),
+                    Some(0x0004),
+                    "{name}: section {index} does not begin after a break"
+                );
+            }
+            if let Some(next) = structure.sections.get(index + 1) {
+                assert_eq!(
+                    section.end + 1,
+                    next.start,
+                    "{name}: section {index} does not reach the next one's break"
+                );
+            } else {
+                assert_eq!(section.end, text.len() as u64, "{name}: the last section");
+            }
+            checked += 1;
+        }
+    }
+    assert!(checked >= 10, "only {checked} sections were checked");
+}
+
+/// Three headers and three footers, per template page, per section, in every
+/// document — never any other count. It is the rule `iwork check` enforces and
+/// the reason a zone can be named left, centre or right at all.
+#[test]
+fn every_section_template_carries_three_headers_and_three_footers() {
+    let mut templates = 0usize;
+    for path in pages_fixtures() {
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        let doc = Document::open(&path).unwrap();
+        let structure = doc.structure().unwrap();
+        let mut counted: BTreeMap<(u64, bool), Vec<&str>> = BTreeMap::new();
+        for entry in &structure.header_footers {
+            counted
+                .entry((entry.section_template, entry.footer))
+                .or_default()
+                .push(entry.zone.as_str());
+        }
+        for ((template, footer), zones) in &counted {
+            assert_eq!(
+                zones,
+                &vec!["left", "centre", "right"],
+                "{name}: section template {template} {}",
+                if *footer { "footers" } else { "headers" }
+            );
+        }
+        // One `first`, one `even` and one `odd` page per section, and a header
+        // set and a footer set on each: six keys per section.
+        assert_eq!(
+            counted.len(),
+            structure.sections.len() * 6,
+            "{name}: section templates per section"
+        );
+        templates += counted.len();
+        assert!(doc.problems().is_empty(), "{name}: {:?}", doc.problems());
+    }
+    assert!(templates >= 60, "only {templates} zone sets were seen");
+}
+
+/// The two document modes, and the second signal that says the same thing.
+///
+/// `TP.SettingsArchive.body` is the flag; a `TP.PageTemplateArchive` is the
+/// consequence. Over all 640 bundled Pages templates the two sets are equal,
+/// and the corpus has one document on each side of it.
+#[test]
+fn a_page_layout_document_is_the_one_with_page_templates() {
+    let mut modes = BTreeMap::new();
+    for path in pages_fixtures() {
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        let structure = Document::open(&path).unwrap().structure().unwrap();
+        *modes.entry(structure.mode).or_insert(0usize) += 1;
+        assert_eq!(
+            structure.mode == Mode::PageLayout,
+            !structure.page_templates.is_empty(),
+            "{name}: mode {} with {} page template(s)",
+            structure.mode.as_str(),
+            structure.page_templates.len()
+        );
+    }
+    assert!(
+        modes.get(&Mode::PageLayout).copied().unwrap_or(0) >= 1
+            && modes.get(&Mode::WordProcessing).copied().unwrap_or(0) >= 1,
+        "the corpus needs one of each: {modes:?}"
+    );
+}
+
+/// The one fixture with page numbering that is not the default, read field by
+/// field. `65_Sales_Bold_Report_PM` restarts at 2 in its second section and
+/// hides the header and footer on the first page of its first.
+#[test]
+fn page_numbering_and_the_section_switches_are_read() {
+    let path = fixture!("pages-numbering.pages");
+    let structure = Document::open(&path).unwrap().structure().unwrap();
+    assert_eq!(structure.sections.len(), 2);
+
+    let first = &structure.sections[0];
+    assert_eq!(first.page_number_kind, 0);
+    assert_eq!(first.numbering(), "continue from the previous section");
+    assert!(first.hides_header_footer_on_first_page);
+    assert!(first.has_background, "the cover paints its own background");
+    assert!(first.hyperlink_uuid, "a section a link can point at");
+
+    let second = &structure.sections[1];
+    assert_eq!((second.page_number_kind, second.page_number_start), (1, 2));
+    assert_eq!(second.numbering(), "start at 2");
+    assert!(!second.hides_header_footer_on_first_page);
+}
+
+/// Facing pages, which only the eighteen novel-shaped templates have.
+#[test]
+fn facing_pages_and_six_sections() {
+    let path = fixture!("pages-book.pages");
+    let structure = Document::open(&path).unwrap().structure().unwrap();
+    assert!(structure.setup.facing_pages);
+    assert_eq!(structure.sections.len(), 6);
+    assert!(structure.setup.portrait());
+    // A novel has no page templates, being a word-processing document.
+    assert!(structure.page_templates.is_empty());
+}
+
+/// The linked-text-box thread: one storage, several boxes, in flow order. A
+/// thread is numbered rather than named — `user_interface_identifier` is its
+/// only identity.
+#[test]
+fn a_thread_joins_two_boxes_to_one_storage() {
+    let path = fixture!("pages-layout.pages");
+    let doc = Document::open(&path).unwrap();
+    let structure = doc.structure().unwrap();
+    assert_eq!(structure.threads.len(), 1);
+    let thread = &structure.threads[0];
+    assert_eq!(thread.boxes.len(), 2, "the newsletter flows through two");
+    let storage = thread.storage.expect("a thread lays out one storage");
+    assert!(
+        doc.storage_text(storage).unwrap().len() > 100,
+        "and that storage holds the article"
+    );
+    // Every box exists and every one is a different object.
+    assert_ne!(thread.boxes[0], thread.boxes[1]);
+    for object in &thread.boxes {
+        assert!(doc.object(*object).is_some());
+    }
+}
+
+/// A table of contents in its two halves: the document's own style-inclusion
+/// map, and the placed list's copy — which do not agree, and reading only one
+/// of them is reading the wrong one.
+#[test]
+fn a_table_of_contents_has_two_settings_archives_that_disagree() {
+    let path = fixture!("pages-toc.pages");
+    let structure = Document::open(&path).unwrap().structure().unwrap();
+    assert_eq!(structure.contents.len(), 2);
+
+    let document_wide = &structure.contents[0];
+    assert!(document_wide.placed_in.is_none());
+    assert_eq!(document_wide.scope, 0);
+    assert_eq!(document_wide.rules.len(), 2);
+    assert!(document_wide.rules.iter().all(|r| r.show));
+
+    let placed = &structure.contents[1];
+    assert!(placed.placed_in.is_some(), "owned by a TSWP.TOCInfoArchive");
+    assert_eq!(placed.scope, 1);
+    assert_eq!(placed.rules.len(), 6);
+    assert_eq!(placed.rules.iter().filter(|r| r.show).count(), 2);
+
+    // And the entries the last layout produced, which carry the heading text
+    // and the page it landed on.
+    let headings: Vec<&str> = placed.entries.iter().map(|(h, _)| h.as_str()).collect();
+    assert_eq!(headings, vec!["Chapter Title", "Heading"]);
+    assert_eq!(placed.entries[0].1, 3);
+
+    // Every rule names a paragraph style that exists.
+    let doc = Document::open(&path).unwrap();
+    for rule in placed.rules.iter().chain(document_wide.rules.iter()) {
+        let style = rule.paragraph_style.expect("a rule names a style");
+        assert!(doc.text_style(style).is_some(), "style {style}");
+    }
+}
+
+/// Columns, and the unit finding: widths and gaps are fractions of the text
+/// width, not points. The one non-equal layout in the whole install adds up to
+/// exactly one.
+#[test]
+fn column_widths_are_fractions_that_add_up() {
+    let path = fixture!("pages-columns.pages");
+    let doc = Document::open(&path).unwrap();
+    let structure = doc.structure().unwrap();
+    let body = structure.body_storage.unwrap();
+    let layouts = doc.column_layouts(body);
+    assert_eq!(layouts.len(), 2, "one non-equal layout and one equal one");
+
+    let unequal = layouts
+        .iter()
+        .find(|l| l.unequal.is_some())
+        .expect("the only non-equal columns in the install");
+    assert_eq!(unequal.count(), 2);
+    let sum: f32 = unequal.fractions().iter().sum();
+    assert!(
+        (sum - 1.0).abs() < 1e-4,
+        "the fractions cover the text width: {sum} from {:?}",
+        unequal.fractions()
+    );
+
+    let equal = layouts
+        .iter()
+        .find(|l| l.equal.is_some())
+        .expect("and an equal two-column one");
+    assert_eq!(equal.count(), 2);
+    let (_, gap) = equal.equal.unwrap();
+    assert!(
+        gap > 0.0 && gap < 0.2,
+        "a gap of {gap} is a fraction, not a point measurement"
+    );
+    let sum: f32 = equal.fractions().iter().sum();
+    assert!((sum - 1.0).abs() < 1e-4, "{sum}");
+
+    // The two layouts tile the body, one entry per paragraph range.
+    assert_eq!(layouts[0].end, layouts[1].start);
+}
+
+/// Neither a footnote nor a bookmark exists anywhere this crate can reach —
+/// not in the corpus and not in any bundled template. The reader has to say so
+/// rather than fail, and the settings it *can* read are the defaults.
+#[test]
+fn there_is_no_footnote_and_no_bookmark_anywhere() {
+    let mut checked = 0usize;
+    for path in pages_fixtures() {
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        let structure = Document::open(&path).unwrap().structure().unwrap();
+        assert!(structure.footnotes.is_empty(), "{name} grew a footnote");
+        assert!(structure.bookmarks.is_empty(), "{name} grew a bookmark");
+        assert_eq!(structure.footnote_settings.kind, 0, "{name}");
+        assert_eq!(structure.footnote_settings.format, 0, "{name}");
+        assert_eq!(structure.footnote_settings.numbering, 0, "{name}");
+        assert_eq!(structure.footnote_settings.gap, 10, "{name}");
+        checked += 1;
+    }
+    assert!(checked >= 5);
+}
+
+/// A storage of kind 2 is a footnote body, and there is not one. Stated as its
+/// own test because it is the boundary the phase reports, and a fixture that
+/// ever grows one should make this fail loudly rather than pass quietly.
+#[test]
+fn no_storage_in_the_corpus_is_a_footnote_body() {
+    let mut storages = 0usize;
+    for path in pages_fixtures() {
+        let doc = Document::open(&path).unwrap();
+        for storage in doc.storages() {
+            assert_ne!(
+                storage.kind,
+                2,
+                "{}: storage {} is a footnote body — the phase's boundary has moved",
+                path.display(),
+                storage.identifier
+            );
+            storages += 1;
+        }
+    }
+    assert!(storages >= 100, "only {storages} storages were seen");
+}
+
+// -- writing -----------------------------------------------------------------
+
+/// Deleting the `U+0004` a section begins after is refused by name, and the
+/// document is left untouched.
+#[test]
+fn deleting_a_section_break_is_refused() {
+    let path = fixture!("pages-report.pages");
+    let doc = Document::open(&path).unwrap();
+    let structure = doc.structure().unwrap();
+    let body = structure.body_storage.unwrap();
+    let second = &structure.sections[1];
+    let break_at = second.start - 1;
+
+    // Exactly the break, and a range that swallows it along with text either
+    // side. (A full-range replace is refused too, but by
+    // `Error::AnchoredObject` — `pages-report` has a photo anchored at
+    // character 12 and that objection comes first.)
+    for range in [break_at..break_at + 1, break_at - 5..break_at + 5] {
+        let mut doc = Document::open(&path).unwrap();
+        let before = doc.storage_text(body).unwrap();
+        match doc.delete_text(body, range.clone()) {
+            Err(Error::SectionBreak {
+                storage,
+                index,
+                section,
+            }) => {
+                assert_eq!(storage, body);
+                assert_eq!(index, break_at);
+                assert_eq!(section, Some(second.identifier));
+            }
+            other => panic!("{range:?} was not refused: {other:?}"),
+        }
+        assert_eq!(doc.storage_text(body).unwrap(), before, "{range:?}");
+        assert!(doc.changed_streams().is_empty(), "{range:?}");
+    }
+
+    // And an edit that stays inside a section is not refused.
+    let mut doc = Document::open(&path).unwrap();
+    doc.delete_text(body, 100..140).unwrap();
+    assert!(!doc.changed_streams().is_empty());
+}
+
+/// Writing a header is writing a text storage: the remapping is the same, the
+/// document still checks out, and only the stream the storage lives in is
+/// rewritten.
+#[test]
+fn writing_a_header_rewrites_one_stream_and_nothing_else() {
+    let path = fixture!("pages-layout.pages");
+    let doc = Document::open(&path).unwrap();
+    let header = doc
+        .header_footers()
+        .into_iter()
+        .find(|hf| !hf.footer && !hf.text.is_empty())
+        .expect("pages-layout has header text");
+
+    let mut edited = Document::open(&path).unwrap();
+    edited
+        .set_text(header.storage, "Kopfzeile von iwork-rs")
+        .unwrap();
+    assert_eq!(edited.changed_streams().len(), 1);
+    assert!(edited.problems().is_empty(), "{:?}", edited.problems());
+
+    let found = edited
+        .header_footers()
+        .into_iter()
+        .find(|hf| hf.storage == header.storage)
+        .unwrap();
+    assert_eq!(found.text, "Kopfzeile von iwork-rs");
+    assert_eq!(found.zone, header.zone);
+    assert_eq!(found.section, header.section);
+    assert!(!found.footer);
+
+    // Writing the text a storage already holds changes nothing at all — as
+    // long as nothing is anchored to the characters being replaced.
+    let plain = doc
+        .header_footers()
+        .into_iter()
+        .find(|hf| hf.storage == found.storage)
+        .map(|_| ())
+        .and(
+            doc.header_footers()
+                .into_iter()
+                .find(|hf| !hf.text.is_empty() && smart_fields_of(&doc, hf.storage) == 0),
+        )
+        .expect("a header or footer with text and no smart field");
+    let mut same = Document::open(&path).unwrap();
+    same.set_text(plain.storage, &plain.text).unwrap();
+    assert!(same.changed_streams().is_empty());
+}
+
+/// How many smart-field runs a storage carries — the reason rewriting a header
+/// is not always a no-op.
+fn smart_fields_of(doc: &Document, storage: u64) -> usize {
+    doc.storages()
+        .into_iter()
+        .find(|s| s.identifier == storage)
+        .map(|s| {
+            s.tables
+                .iter()
+                .filter(|t| t.field == 11)
+                .map(|t| t.entries)
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
+/// **A header's text is often not text.** The date in `pages-layout`'s header
+/// is a `TSWP.DateTimeSmartFieldArchive`, and the storage holds the string it
+/// last rendered to; replacing the text removes the field and freezes the date,
+/// so the header stops updating. That is a consequence worth failing over if it
+/// ever changes silently, and it is why the crate reports the tables it
+/// rewrote.
+#[test]
+fn rewriting_a_header_that_holds_a_date_field_replaces_the_field_with_its_text() {
+    let path = fixture!("pages-layout.pages");
+    let doc = Document::open(&path).unwrap();
+    let dated = doc
+        .header_footers()
+        .into_iter()
+        .find(|hf| smart_fields_of(&doc, hf.storage) > 0)
+        .expect("the newsletter's header has a date field");
+    assert!(dated.text.contains("2026") || dated.text.contains("20"));
+
+    let mut edited = Document::open(&path).unwrap();
+    let report = edited.set_text(dated.storage, "Kopfzeile").unwrap();
+    assert!(
+        report.report.tables.contains(&11),
+        "the smart-field table was rewritten: {:?}",
+        report.report.tables
+    );
+    assert_eq!(
+        smart_fields_of(&edited, dated.storage),
+        0,
+        "the date field went with the text it rendered"
+    );
+    assert!(edited.problems().is_empty());
+}
+
+// -- the app -----------------------------------------------------------------
+
+fn script(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("scripts")
+        .join(name)
+}
+
+/// Ask Pages what the sections are: `(body flag, [(length, text)])`.
+fn ask_the_app(path: &Path) -> (bool, Vec<(usize, String)>) {
+    let out = std::process::Command::new(script("section-oracle.sh"))
+        .arg(path)
+        .output()
+        .unwrap_or_else(|e| panic!("section-oracle.sh: {e}"));
+    assert!(
+        out.status.success(),
+        "section-oracle.sh failed for {}: {}",
+        path.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut body = true;
+    let mut sections = Vec::new();
+    for line in text.lines() {
+        let parts: Vec<&str> = line.split('\t').collect();
+        match parts.as_slice() {
+            ["body", flag] => body = *flag == "true",
+            ["section", _, length, rest @ ..] => sections.push((
+                length.parse().unwrap_or(0),
+                rest.join("\t")
+                    .replace("\\n", "\n")
+                    .replace("\\r", "\r")
+                    .replace("\\t", "\t")
+                    .replace("\\\\", "\\"),
+            )),
+            _ => {}
+        }
+    }
+    (body, sections)
+}
+
+/// The section arithmetic, put to the app.
+///
+/// Off unless `IWORK_APP_CHECK=1`. `body text of section i` is the only thing
+/// Pages' dictionary will say about document structure, and it is exactly the
+/// range this crate computes from table 17: the entry sits one past the
+/// `U+0004`, and the break belongs to neither side. Compared character for
+/// character, not just by length.
+#[test]
+fn the_app_agrees_about_every_section() {
+    if std::env::var("IWORK_APP_CHECK").as_deref() != Ok("1") {
+        eprintln!("IWORK_APP_CHECK is not 1 — skipping the app round trip");
+        return;
+    }
+    let mut compared = 0usize;
+    for name in [
+        "pages-report.pages",
+        "pages-numbering.pages",
+        "pages-book.pages",
+        "pages-layout.pages",
+    ] {
+        let Some(path) = generated(name) else {
+            eprintln!("no {name} — skipping");
+            continue;
+        };
+        let (body, said) = ask_the_app(&path);
+        let doc = Document::open(&path).unwrap();
+        let structure = doc.structure().unwrap();
+
+        assert_eq!(
+            body,
+            structure.mode == Mode::WordProcessing,
+            "{name}: the app's `document body` and TP.SettingsArchive.body disagree"
+        );
+        // **A page-layout document has no sections to the app.** `pages-layout`
+        // carries two `TP.SectionArchive`s, each with its six section templates
+        // and its thirty-six header and footer storages, and Pages answers
+        // `count of sections` with 0 — the element is word-processing only, the
+        // way the Document inspector is. The archives are still there and still
+        // what the headers hang off, so the decoder reports them and this
+        // comparison stops here.
+        if !body {
+            assert_eq!(
+                said.len(),
+                0,
+                "{name}: a page-layout document has sections?"
+            );
+            assert!(
+                !structure.sections.is_empty(),
+                "{name}: …but the archive still has them"
+            );
+            continue;
+        }
+        assert_eq!(
+            said.len(),
+            structure.sections.len(),
+            "{name}: section count"
+        );
+
+        let text = doc
+            .storage_text(structure.body_storage.unwrap())
+            .unwrap_or_default();
+        let units: Vec<u16> = text.encode_utf16().collect();
+        for (index, section) in structure.sections.iter().enumerate() {
+            let (length, words) = &said[index];
+            assert_eq!(
+                section.length() as usize,
+                *length,
+                "{name}: section {} is {} unit(s) here and {length} to the app",
+                index + 1,
+                section.length()
+            );
+            let mine = String::from_utf16_lossy(
+                &units[section.start as usize..(section.end as usize).min(units.len())],
+            );
+            assert_eq!(
+                &mine,
+                words,
+                "{name}: section {} reads differently",
+                index + 1
+            );
+            compared += 1;
+        }
+    }
+    assert!(compared >= 10, "only {compared} sections were compared");
+}
+
+/// A header this crate wrote, put through Pages and read back out.
+///
+/// Off unless `IWORK_APP_CHECK=1`. Pages exposes no header text to a script —
+/// its dictionary has `body text` of a document, a section and a page, and
+/// nothing else — so "the app read it back" has to be arranged differently:
+/// the app is made to open the edited document and **save it**, and the file on
+/// disk afterwards is one Pages wrote. The header either came through its model
+/// or it did not.
+///
+/// The storage identifier survives the round trip, which is worth noting: Pages
+/// rewrote the document stream and kept the object's number.
+#[test]
+fn pages_saves_the_document_with_the_header_this_crate_wrote() {
+    if std::env::var("IWORK_APP_CHECK").as_deref() != Ok("1") {
+        eprintln!("IWORK_APP_CHECK is not 1 — skipping the app round trip");
+        return;
+    }
+    let path = fixture!("pages-layout.pages");
+    let doc = Document::open(&path).unwrap();
+    let header = doc
+        .header_footers()
+        .into_iter()
+        .find(|hf| !hf.footer && !hf.text.is_empty())
+        .expect("pages-layout has header text");
+    let footer = doc
+        .header_footers()
+        .into_iter()
+        .find(|hf| hf.footer && hf.section == header.section)
+        .expect("and a footer beside it");
+
+    let out = std::env::temp_dir().join("iwork-header.pages");
+    let _ = std::fs::remove_file(&out);
+    let mut edited = Document::open(&path).unwrap();
+    edited
+        .set_text(header.storage, "Kopfzeile von iwork-rs")
+        .unwrap();
+    edited.set_text(footer.storage, "Fusszeile 42").unwrap();
+    edited.save(&out).unwrap();
+
+    let status = std::process::Command::new(script("resave.sh"))
+        .arg(&out)
+        .status()
+        .unwrap_or_else(|e| panic!("resave.sh: {e}"));
+    assert!(status.success(), "Pages would not open and save {out:?}");
+
+    let after = Document::open(&out).unwrap();
+    let zones = after.header_footers();
+    assert!(
+        zones.iter().any(|hf| hf.text == "Kopfzeile von iwork-rs"),
+        "Pages saved the document without the header: {:?}",
+        zones
+            .iter()
+            .filter(|hf| !hf.text.is_empty())
+            .map(|hf| (hf.storage, hf.text.clone()))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        zones.iter().any(|hf| hf.text == "Fusszeile 42"),
+        "…or without the footer"
+    );
+    // And the document Pages wrote still keeps every rule this crate checks.
+    assert!(after.problems().is_empty(), "{:?}", after.problems());
+}

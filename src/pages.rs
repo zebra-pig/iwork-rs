@@ -157,7 +157,7 @@ pub mod section_field {
 /// `TP.PageTemplateArchive`** — the sets are equal, with no exception either
 /// way. A page-layout document has named page templates because that is what
 /// its pages are made of; a word-processing document has none.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Mode {
     WordProcessing,
     PageLayout,
@@ -266,7 +266,7 @@ impl PageSetup {
 }
 
 /// Which of a section's three template pages a header or footer belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TemplatePage {
     /// `first_section_template_page` (23) — used when
     /// `section_template_first_page_different` is set.
@@ -311,7 +311,7 @@ impl TemplatePage {
 /// page number in footer zone 2; `08_Newsletter_RTL`, the same design laid out
 /// right to left, puts both in zone 0. Content that moves to the other end of
 /// the strip when the design is mirrored is content addressed by *side*.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Zone {
     Left,
     Centre,

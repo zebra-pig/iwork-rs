@@ -151,7 +151,9 @@ pub const TABLES: &[Table] = &[
     // on the character *after* the `U+0004` that begins it, which is a
     // paragraph start — `pages-report` has one at 0 and one at 146, reading
     // `…123-4567\n\u{4}Company Name`, with the entry on the `C`. Deleting the
-    // break itself is still refused; see [`destroyed_anchors`].
+    // break itself is refused — by [`destroyed_sections`], because the
+    // paragraph anchoring is exactly what puts it out of
+    // [`destroyed_anchors`]' reach.
     Table {
         field: 17,
         name: "table_section",
