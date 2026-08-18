@@ -267,6 +267,21 @@ fn field_schema(table: &[(u32, Wire, &str)], number: u32) -> Option<Wire> {
         .map(|(_, wire, _)| *wire)
 }
 
+/// How deeply a `THUNK_NODE`'s nested arrays may nest before every
+/// thunk-descending path — validation, symbol collection and printing — gives
+/// up and returns a bounded result rather than recursing further.
+///
+/// A thunk holds a lazily evaluated argument, so genuine nesting is a handful of
+/// levels deep: an `IF` inside an `IF`, a `LAMBDA` body, a spilled `SEQUENCE`.
+/// Nothing the app writes comes near this. The bound exists only so a hostile
+/// document — the reviewer built one 40000 thunks deep in 574KB — turns into an
+/// error or a `#DEPTH!` marker instead of a stack overflow that `catch_unwind`
+/// cannot catch. 256 is far past any real formula and far below the depth a
+/// recursion of this shape needs to exhaust the stack, matching how the rest of
+/// the crate bounds itself (the varint's 10-byte cap, the document walk's 16
+/// levels).
+const THUNK_DEPTH_LIMIT: usize = 256;
+
 // -- the AST -----------------------------------------------------------------
 
 /// One `ASTNodeArchive`, kept as its message and read through accessors.
@@ -300,6 +315,13 @@ impl Node {
     /// Returns the offending field's number and a reason. This is the check
     /// that turns "the bytes parsed" into "the bytes are an AST node".
     pub fn validate(&self) -> Result<(), String> {
+        self.validate_at(0)
+    }
+
+    /// The body of [`Node::validate`], carrying the thunk-nesting depth so a
+    /// runaway chain of `THUNK_NODE`s becomes a bounded error rather than a
+    /// stack overflow.
+    fn validate_at(&self, depth: usize) -> Result<(), String> {
         for field in &self.raw.fields {
             let Some(wire) = field_schema(NODE_FIELDS, field.number) else {
                 return Err(format!(
@@ -315,7 +337,7 @@ impl Node {
             }
             if wire == Wire::Bytes {
                 if let Value::Bytes(bytes) = &field.value {
-                    if let Some(reason) = validate_submessage(field.number, bytes) {
+                    if let Some(reason) = validate_submessage(field.number, bytes, depth) {
                         return Err(reason);
                     }
                 }
@@ -475,6 +497,7 @@ impl Node {
             | node::EQUAL_TO
             | node::NOT_EQUAL_TO
             | node::COLON
+            | node::COLON_WITH_UIDS
             | node::INTERSECTION => (2, 1),
             node::NEGATION
             | node::PLUS_SIGN
@@ -489,9 +512,15 @@ impl Node {
             node::UNKNOWN_FUNCTION => (self.raw.varint(18).unwrap_or(0) as usize, 1),
             node::LIST => (self.raw.varint(13).unwrap_or(0) as usize, 1),
             node::ARRAY => {
+                // Raw varints, not the u32-truncated `array_shape`: a malformed
+                // node can carry a u64::MAX dimension, and multiplying two of
+                // them must not overflow-panic. A saturated product underflows
+                // the stack in `depth()`, which is the well-formed answer — an
+                // array that claims more cells than the file could hold is
+                // malformed, not a program.
                 let columns = self.raw.varint(11).unwrap_or(1) as usize;
                 let rows = self.raw.varint(12).unwrap_or(1) as usize;
-                (columns * rows, 1)
+                (columns.saturating_mul(rows), 1)
             }
             node::BEGIN_THUNK
             | node::END_THUNK
@@ -511,14 +540,32 @@ impl Node {
 
 /// Which submessages this module knows the shape of, and what it requires of
 /// them. A field not listed is carried through unvalidated — and unread.
-fn validate_submessage(number: u32, bytes: &[u8]) -> Option<String> {
+///
+/// A submessage this module *does* claim to know is a validation failure when it
+/// does not decode: the trust claim (see `Node::validate`) is that a decoded
+/// node is really an AST node, and a field the schema says is a nested message
+/// that will not parse as one is exactly the kind of misparse the check exists
+/// to catch. Returning `None` — "valid" — for it would be the silent pass this
+/// crate promises never to give.
+fn validate_submessage(number: u32, bytes: &[u8], depth: usize) -> Option<String> {
     let expect: &[(u32, Wire, &str)] = match number {
         14 => {
             // A nested node array: recurse, which is the only way a thunk's
-            // contents get the same guarantee as its parent's.
-            let array = decode_nested(bytes)?;
-            let ast = Ast::decode(&array)?;
-            return ast.validate().err();
+            // contents get the same guarantee as its parent's — but no deeper
+            // than the thunk-depth limit, so a hostile chain of thunks is a
+            // bounded error rather than a stack overflow.
+            if depth >= THUNK_DEPTH_LIMIT {
+                return Some(format!(
+                    "thunk nesting exceeds the limit of {THUNK_DEPTH_LIMIT}"
+                ));
+            }
+            let Some(array) = decode_nested(bytes) else {
+                return Some("field 14's thunk array does not decode".to_string());
+            };
+            let Some(ast) = Ast::decode(&array) else {
+                return Some("field 14's thunk array is not an AST node array".to_string());
+            };
+            return ast.validate_at(depth + 1).err();
         }
         26 | 27 => &[
             (1, Wire::Varint, "column_or_row"),
@@ -552,7 +599,9 @@ fn validate_submessage(number: u32, bytes: &[u8]) -> Option<String> {
         ],
         _ => return None,
     };
-    let message = decode_nested(bytes)?;
+    let Some(message) = decode_nested(bytes) else {
+        return Some(format!("field {number}'s submessage does not decode"));
+    };
     for field in &message.fields {
         match field_schema(expect, field.number) {
             Some(wire) if wire == wire_of(&field.value) => {}
@@ -715,8 +764,14 @@ impl Ast {
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        self.validate_at(0)
+    }
+
+    /// [`Ast::validate`] carrying the thunk-nesting depth, so the recursion
+    /// through nested thunk arrays is bounded.
+    fn validate_at(&self, depth: usize) -> Result<(), String> {
         for node in &self.nodes {
-            node.validate()?;
+            node.validate_at(depth)?;
         }
         Ok(())
     }
@@ -833,8 +888,24 @@ impl Formula {
         &self.raw
     }
 
+    /// Re-encode the archive, honouring an edit to [`Formula::ast`].
+    ///
+    /// The node array (field 1) is re-emitted from `ast`, so a caller that
+    /// rewrites the AST gets the rewrite back rather than the bytes it started
+    /// with. Every other field — the host cell (2–5), the translation flags (6)
+    /// and the host UUIDs (7–9) — is preserved verbatim from the archive this
+    /// formula decoded, which is what keeps `encode(decode(x)) == x` for an
+    /// unedited formula (`ast.encode()` reproduces field 1 byte for byte).
+    ///
+    /// `host` and `flags` are **decoded read views**, not inputs to this: they
+    /// are conveniences for inspecting the archive, and reconstructing a signed
+    /// host cell from `Option<(i64, i64)>` is lossy where the app has not been
+    /// observed to go. To change them, edit the archive through [`Formula::ast`]
+    /// and the fields carried on `raw`. Nothing in this corpus carries either.
     pub fn encode(&self) -> Vec<u8> {
-        self.raw.encode()
+        let mut archive = self.raw.clone();
+        archive.set_in_order(1, Value::Bytes(self.ast.encode()));
+        archive.encode()
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -937,9 +1008,14 @@ impl Reference {
                 if column == Axis::Unbounded && row == Axis::Unbounded {
                     return None;
                 }
+                // A stored `#REF!` saturates **both** axes at once, each at its
+                // own sentinel — that is how the app writes a fully-deleted
+                // precedent, and it is what FORMAT.md §9 records. A single
+                // saturated axis is not enough: a whole-column reference leaves
+                // its row `Unbounded` (never `Absolute(max)`), so requiring both
+                // never mistakes one for an error.
                 let is_error = node.kind == node::REFERENCE_ERROR_WITH_UIDS
-                    || saturated(column, COLUMN_MAX)
-                    || saturated(row, ROW_MAX);
+                    || (saturated(column, COLUMN_MAX) && saturated(row, ROW_MAX));
                 Some(Reference {
                     column,
                     row,
@@ -964,6 +1040,15 @@ impl Reference {
                 let (column, column_end) =
                     tract_axis(&tract, 1, 3, begin_column_absolute, end_column_absolute);
                 let (row, row_end) = tract_axis(&tract, 2, 4, begin_row_absolute, end_row_absolute);
+                // A tract endpoint sitting on its axis's saturation sentinel is
+                // a `#REF!`, exactly as for a single cell: the row's is
+                // `0x7fffffff`, the column's `0x7fff`. Without this a range
+                // ending at the sentinel would print a spurious column letter
+                // and a nine-digit row rather than the error it stands for.
+                let is_error = saturated(column, COLUMN_MAX)
+                    || saturated(column_end, COLUMN_MAX)
+                    || saturated(row, ROW_MAX)
+                    || saturated(row_end, ROW_MAX);
                 Some(Reference {
                     column,
                     row,
@@ -971,7 +1056,7 @@ impl Reference {
                     row_end,
                     table,
                     is_range: true,
-                    is_error: false,
+                    is_error,
                 })
             }
             _ => None,
@@ -1008,13 +1093,16 @@ fn saturated(axis: Axis, max: i64) -> bool {
 /// **zigzag** `sint32` — unlike a colon tract's offsets, which are plain
 /// `int32` varints. Mixing the two is the classic silent-corruption bug here.
 fn coordinate(node: &Message, number: u32) -> Axis {
+    // The whole-column / whole-row signal is the **submessage** being absent —
+    // a `CELL_REFERENCE_NODE` with no `AST_row` (27) is a whole column. A
+    // submessage that is present but carries no index is a different thing: it
+    // is offset 0 (`unzigzag(0)`), relative or absolute per field 2, not
+    // unbounded. Numbers writes the index explicitly, but a zero index that
+    // relied on the varint default would otherwise read as a whole axis.
     let Some(message) = node.bytes(number).and_then(decode_nested) else {
         return Axis::Unbounded;
     };
-    let Some(raw) = message.varint(1) else {
-        return Axis::Unbounded;
-    };
-    let index = unzigzag(raw);
+    let index = unzigzag(message.varint(1).unwrap_or(0));
     if message.varint(2).unwrap_or(0) != 0 {
         Axis::Absolute(index)
     } else {
@@ -1050,8 +1138,9 @@ fn tract_axis(
     } else {
         relative_range.map(|(_, end)| Axis::Relative(end))
     };
-    // An axis with neither list is the whole axis; so is one whose absolute
-    // range is the saturation sentinel.
+    // An axis with neither list is the whole axis. An endpoint that lands on
+    // the saturation sentinel is not handled here — it is a stored `#REF!`, and
+    // `Reference::of` flags it after both axes are read.
     (
         begin.unwrap_or(Axis::Unbounded),
         end.unwrap_or(Axis::Unbounded),
@@ -1243,6 +1332,9 @@ struct Printer<'a> {
     symbols: BTreeMap<u32, String>,
     /// Nodes this printer did not understand, by type.
     pub unsupported: Vec<u32>,
+    /// How many thunks deep this printer is nested, so a runaway chain of
+    /// `THUNK_NODE`s stops at [`THUNK_DEPTH_LIMIT`] instead of overflowing.
+    depth: usize,
 }
 
 impl<'a> Printer<'a> {
@@ -1254,6 +1346,7 @@ impl<'a> Printer<'a> {
             pending: Vec::new(),
             symbols: BTreeMap::new(),
             unsupported: Vec::new(),
+            depth: 0,
         }
     }
 
@@ -1266,7 +1359,18 @@ impl<'a> Printer<'a> {
         self.stack.split_off(at)
     }
 
-    fn collect_symbols(&mut self, ast: &Ast) {
+    /// Gather every symbol name in the whole tree — including the ones written
+    /// inside thunks, because a `VAR_NODE` is emitted inside the thunk its
+    /// `LAMBDA_NODE` names — in a **single** descent, bounded by depth.
+    ///
+    /// This runs once, from [`Printer::run`] at the top. The thunk printers it
+    /// feeds inherit the finished map (see [`Printer::node`]) and never collect
+    /// again: re-collecting per level is what made printing nested thunks
+    /// super-linear, re-decoding the whole remaining payload at every level.
+    fn collect_symbols(&mut self, ast: &Ast, depth: usize) {
+        if depth >= THUNK_DEPTH_LIMIT {
+            return;
+        }
         for node in &ast.nodes {
             match node.kind {
                 node::LET_BIND => {
@@ -1283,7 +1387,7 @@ impl<'a> Printer<'a> {
                 }
                 node::THUNK => {
                     if let Some(inner) = node.thunk() {
-                        self.collect_symbols(&inner);
+                        self.collect_symbols(&inner, depth + 1);
                     }
                 }
                 _ => {}
@@ -1291,8 +1395,16 @@ impl<'a> Printer<'a> {
         }
     }
 
+    /// Collect the symbols of the whole tree once, then print it.
     fn run(&mut self, ast: &Ast) {
-        self.collect_symbols(ast);
+        self.collect_symbols(ast, 0);
+        self.print(ast);
+    }
+
+    /// Print a node stream onto the stack, with the symbols already collected.
+    /// Thunk printers call this rather than [`Printer::run`] so the single
+    /// symbol pass is never repeated.
+    fn print(&mut self, ast: &Ast) {
         for node in &ast.nodes {
             self.node(node);
         }
@@ -1372,7 +1484,7 @@ impl<'a> Printer<'a> {
             node::EMPTY_ARGUMENT => self.stack.push(String::new()),
             node::ARRAY => {
                 let (columns, rows) = node.array_shape().unwrap_or((1, 1));
-                let cells = self.pop((columns as usize) * (rows as usize));
+                let cells = self.pop((columns as usize).saturating_mul(rows as usize));
                 let lines: Vec<String> = cells
                     .chunks(columns.max(1) as usize)
                     .map(|row| row.join(","))
@@ -1385,12 +1497,23 @@ impl<'a> Printer<'a> {
                 self.stack.push(format!("({})", items.join(",")));
             }
             node::THUNK => {
+                if self.depth >= THUNK_DEPTH_LIMIT {
+                    // A runaway chain of thunks stops here with a bounded
+                    // marker rather than recursing into a stack overflow.
+                    self.unsupported.push(node::THUNK);
+                    self.stack.push("#DEPTH!".to_string());
+                    return;
+                }
                 let text = node
                     .thunk()
                     .map(|inner| {
+                        // The symbols are already collected for the whole tree,
+                        // so print without re-collecting — walking once is what
+                        // keeps nested thunks linear rather than super-linear.
                         let mut printer = Printer::new(self.at);
                         printer.symbols = self.symbols.clone();
-                        printer.run(&inner);
+                        printer.depth = self.depth + 1;
+                        printer.print(&inner);
                         let body = printer.stack.pop().unwrap_or_default();
                         self.unsupported.extend(printer.unsupported);
                         body
@@ -1513,7 +1636,15 @@ impl<'a> Printer<'a> {
             return "#REF!".to_string();
         }
         let target = match reference.table {
-            Some(uid) => self.at.names.by_uid(uid),
+            // A reference that carries an owner UUID but names no table this
+            // document holds is a broken cross-table reference — a deleted
+            // table, or an owner this crate could not follow. It must not fall
+            // through to a bare local reference, which would be indistinguishable
+            // from a same-table one; every other unknown here prints a marker.
+            Some(uid) => match self.at.names.by_uid(uid) {
+                Some(target) => Some(target),
+                None => return "#TABLE!".to_string(),
+            },
             None => self.at.table,
         };
         let Some(target) = target else {
@@ -1635,6 +1766,12 @@ fn quote_name(name: &str) -> String {
 /// A1 notation from zero-based indices. An unbounded axis drops out, which is
 /// how `B` (a whole column) and `2:2` (a whole row) are written.
 fn a1(column: Option<i64>, row: Option<i64>, column_absolute: bool, row_absolute: bool) -> String {
+    // A resolved index below zero is off the top or left edge of the table —
+    // a relative reference counted from a host too near the origin. It is a
+    // `#REF!`, not a hybrid of a spliced marker and a zero/negative row.
+    if column.is_some_and(|c| c < 0) || row.is_some_and(|r| r < 0) {
+        return "#REF!".to_string();
+    }
     let mut text = String::new();
     if let Some(column) = column {
         if column_absolute {
@@ -1681,9 +1818,13 @@ pub fn parse_a1(text: &str) -> Option<(usize, usize)> {
     if letters.is_empty() || digits.is_empty() {
         return None;
     }
+    // Checked, so an over-long reference from the CLI (twenty letters overflow
+    // a `usize`) is rejected rather than panicking.
     let mut column = 0usize;
     for c in letters.chars() {
-        column = column * 26 + (c.to_ascii_uppercase() as usize - 'A' as usize + 1);
+        column = column
+            .checked_mul(26)?
+            .checked_add(c.to_ascii_uppercase() as usize - 'A' as usize + 1)?;
     }
     let row: usize = digits.parse().ok()?;
     (row > 0).then(|| (row - 1, column - 1))
@@ -1861,5 +2002,248 @@ mod tests {
             (36, sub(&[(1, Value::Varint(0))])),
         ]);
         assert!(old_let.validate().is_err());
+    }
+
+    fn msg(fields: &[(u32, Value)]) -> Message {
+        let mut message = Message::default();
+        for (number, value) in fields {
+            message.fields.push(crate::pb::Field {
+                number: *number,
+                value: value.clone(),
+            });
+        }
+        message
+    }
+
+    fn zigzag(value: i64) -> u64 {
+        ((value << 1) ^ (value >> 63)) as u64
+    }
+
+    /// A `THUNK_NODE` whose array holds another, `depth` levels deep, around a
+    /// single number — the shape of the reviewer's stack-overflow document.
+    fn nested_thunk_ast(depth: usize) -> Ast {
+        let number = node_of(&[
+            (1, Value::Varint(u64::from(node::NUMBER))),
+            (4, Value::Fixed64(1.0f64.to_le_bytes())),
+        ]);
+        let mut array = msg(&[(1, Value::Bytes(number.encode()))]);
+        for _ in 0..depth {
+            let thunk = node_of(&[
+                (1, Value::Varint(u64::from(node::THUNK))),
+                (14, Value::Bytes(array.encode())),
+            ]);
+            array = msg(&[(1, Value::Bytes(thunk.encode()))]);
+        }
+        Ast::decode(&array).unwrap()
+    }
+
+    /// A hostile chain of thunks is a bounded error and a bounded string, never
+    /// a stack overflow (which `catch_unwind` cannot catch).
+    #[test]
+    fn a_runaway_thunk_chain_is_bounded() {
+        let names = Names::default();
+        let deep = nested_thunk_ast(5000);
+        let error = deep
+            .validate()
+            .expect_err("deep thunk nesting must be rejected, not overflow the stack");
+        assert!(error.contains("thunk nesting exceeds"), "{error}");
+        let text = deep.text(Site::anonymous(&names));
+        assert!(
+            text.contains("#DEPTH!"),
+            "printing stops at the depth limit with a marker: {text}"
+        );
+
+        // A chain just under the limit still validates and prints clean.
+        let shallow = nested_thunk_ast(THUNK_DEPTH_LIMIT - 1);
+        assert!(shallow.validate().is_ok());
+        assert!(!shallow.text(Site::anonymous(&names)).contains("#DEPTH!"));
+    }
+
+    /// A malformed `ARRAY_NODE` with `u64::MAX` dimensions must not overflow the
+    /// stack-effect multiply; it is simply not a well-formed program.
+    #[test]
+    fn an_over_large_array_does_not_overflow() {
+        let node = node_of(&[
+            (1, Value::Varint(u64::from(node::ARRAY))),
+            (11, Value::Varint(u64::MAX)),
+            (12, Value::Varint(u64::MAX)),
+        ]);
+        assert_eq!(node.stack_effect(), (usize::MAX, 1));
+        let ast = Ast { nodes: vec![node] };
+        assert!(!ast.is_well_formed());
+    }
+
+    /// `COLON_NODE_WITH_UIDS` (45) pops two operands like `COLON` (29) and
+    /// `INTERSECTION` (69) — not zero, which made a formula using it read as not
+    /// well-formed.
+    #[test]
+    fn colon_with_uids_takes_two_operands() {
+        let colon = node_of(&[(1, Value::Varint(u64::from(node::COLON_WITH_UIDS)))]);
+        assert_eq!(colon.stack_effect(), (2, 1));
+        let cell = || {
+            node_of(&[
+                (1, Value::Varint(u64::from(node::CELL_REFERENCE))),
+                (26, sub(&[(1, Value::Varint(0)), (2, Value::Varint(1))])),
+                (27, sub(&[(1, Value::Varint(0)), (2, Value::Varint(1))])),
+            ])
+        };
+        let ast = Ast {
+            nodes: vec![cell(), cell(), colon],
+        };
+        assert!(ast.is_well_formed());
+    }
+
+    /// A coordinate submessage that is *present* but carries no index is offset
+    /// 0, not a whole axis — the whole-axis signal is the submessage being
+    /// absent.
+    #[test]
+    fn a_present_coordinate_with_no_index_is_offset_zero() {
+        let node = node_of(&[
+            (1, Value::Varint(u64::from(node::CELL_REFERENCE))),
+            (26, sub(&[(2, Value::Varint(0))])),
+            (27, sub(&[(2, Value::Varint(0))])),
+        ]);
+        let reference = node.reference().unwrap();
+        assert_eq!(reference.column, Axis::Relative(0));
+        assert_eq!(reference.row, Axis::Relative(0));
+
+        let whole = node_of(&[
+            (1, Value::Varint(u64::from(node::CELL_REFERENCE))),
+            (26, sub(&[(1, Value::Varint(2)), (2, Value::Varint(0))])),
+        ]);
+        assert_eq!(
+            whole.reference().unwrap().row,
+            Axis::Unbounded,
+            "field 27 absent is a whole column"
+        );
+    }
+
+    /// A stored `#REF!` saturates both axes; one saturated axis alone is not an
+    /// error. (The corpus's only saturated node is `REFERENCE_ERROR_WITH_UIDS`,
+    /// which is an error by kind, so this is the check that exercises the axes.)
+    #[test]
+    fn a_cell_reference_is_an_error_only_when_both_axes_saturate() {
+        let reference = |column: i64, row: i64| {
+            node_of(&[
+                (1, Value::Varint(u64::from(node::CELL_REFERENCE))),
+                (
+                    26,
+                    sub(&[(1, Value::Varint(zigzag(column))), (2, Value::Varint(1))]),
+                ),
+                (
+                    27,
+                    sub(&[(1, Value::Varint(zigzag(row))), (2, Value::Varint(1))]),
+                ),
+            ])
+            .reference()
+            .unwrap()
+        };
+        assert!(reference(COLUMN_MAX, ROW_MAX).is_error);
+        assert!(
+            !reference(COLUMN_MAX, 3).is_error,
+            "only the column saturated"
+        );
+        assert!(!reference(3, ROW_MAX).is_error, "only the row saturated");
+    }
+
+    /// A range whose endpoint lands on its axis's saturation sentinel is a
+    /// `#REF!`, exactly as for a single cell.
+    #[test]
+    fn a_tract_ending_on_the_sentinel_is_an_error() {
+        let tract = node_of(&[
+            (1, Value::Varint(u64::from(node::COLON_TRACT))),
+            (
+                33,
+                sub(&[
+                    (1, Value::Varint(1)),
+                    (2, Value::Varint(1)),
+                    (3, Value::Varint(1)),
+                    (4, Value::Varint(1)),
+                ]),
+            ),
+            (
+                40,
+                sub(&[
+                    (3, sub(&[(1, Value::Varint(1))])),
+                    (
+                        4,
+                        sub(&[(1, Value::Varint(1)), (2, Value::Varint(ROW_MAX as u64))]),
+                    ),
+                ]),
+            ),
+        ]);
+        assert!(tract.reference().unwrap().is_error);
+    }
+
+    /// A reference that carries an owner UUID no table in the document has
+    /// prints a marker, never a bare local reference that would look like a
+    /// same-table one.
+    #[test]
+    fn an_unresolvable_cross_table_owner_prints_a_marker() {
+        let cfuuid = sub(&[
+            (2, Value::Varint(1)),
+            (3, Value::Varint(0)),
+            (4, Value::Varint(0)),
+            (5, Value::Varint(0)),
+        ]);
+        let node = node_of(&[
+            (1, Value::Varint(u64::from(node::CELL_REFERENCE))),
+            (26, sub(&[(1, Value::Varint(0)), (2, Value::Varint(1))])),
+            (27, sub(&[(1, Value::Varint(0)), (2, Value::Varint(1))])),
+            (28, sub(&[(1, cfuuid)])),
+        ]);
+        let names = Names::default();
+        let ast = Ast { nodes: vec![node] };
+        assert_eq!(ast.text(Site::anonymous(&names)), "#TABLE!");
+    }
+
+    /// A relative reference resolving before the origin is a clean `#REF!`, not
+    /// a spliced marker joined to a zero or negative row.
+    #[test]
+    fn a_reference_resolving_negative_is_a_clean_ref_error() {
+        let node = node_of(&[
+            (1, Value::Varint(u64::from(node::CELL_REFERENCE))),
+            (
+                26,
+                sub(&[(1, Value::Varint(zigzag(-1))), (2, Value::Varint(0))]),
+            ),
+            (27, sub(&[(1, Value::Varint(0)), (2, Value::Varint(0))])),
+        ]);
+        let names = Names::default();
+        let ast = Ast { nodes: vec![node] };
+        assert_eq!(ast.text(Site::anonymous(&names)), "#REF!");
+    }
+
+    /// An over-long A1 reference from the CLI is rejected, not a panic.
+    #[test]
+    fn parse_a1_rejects_an_over_long_reference() {
+        let huge = format!("{}1", "A".repeat(20));
+        assert_eq!(parse_a1(&huge), None);
+        assert_eq!(parse_a1("ZZ100"), Some((99, 701)));
+    }
+
+    /// Editing `Formula::ast` is reflected by `encode`; an unedited formula
+    /// re-encodes to its own bytes.
+    #[test]
+    fn editing_the_ast_is_reflected_by_formula_encode() {
+        let literal = |value: f64| {
+            node_of(&[
+                (1, Value::Varint(u64::from(node::NUMBER))),
+                (4, Value::Fixed64(value.to_le_bytes())),
+            ])
+        };
+        let archive = msg(&[(
+            1,
+            Value::Bytes(msg(&[(1, Value::Bytes(literal(1.0).encode()))]).encode()),
+        )]);
+        let original = archive.encode();
+        let mut formula = Formula::decode(&archive).unwrap();
+        assert_eq!(formula.encode(), original, "unedited: byte-identical");
+
+        formula.ast = Ast::decode(&msg(&[(1, Value::Bytes(literal(2.0).encode()))])).unwrap();
+        let bytes = formula.encode();
+        assert_ne!(bytes, original, "the edit changed the bytes");
+        let round = Formula::decode(&Message::decode(&bytes).unwrap()).unwrap();
+        assert_eq!(round.ast.nodes[0].number().unwrap().value(), 2.0);
     }
 }
