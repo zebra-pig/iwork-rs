@@ -164,6 +164,7 @@ fn build(outline_array: bool) -> Document {
                 iwork::iwa::serialize(&objects),
             ),
         ],
+        ..Default::default()
     };
     Document::from_package(package).expect("synthetic package parses")
 }
@@ -976,6 +977,7 @@ fn split_document() -> Document {
                 iwork::iwa::serialize(&sheet),
             ),
         ],
+        ..Default::default()
     };
     Document::from_package(package).expect("synthetic package parses")
 }

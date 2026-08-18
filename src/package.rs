@@ -1,30 +1,118 @@
-//! The package container shared by Pages, Numbers and Keynote: a ZIP archive
-//! whose entries are all *stored* (compression method 0).
+//! The package container shared by Pages, Numbers and Keynote, in its two
+//! shapes: a ZIP archive whose entries are all *stored* (compression method 0),
+//! or a **directory** holding the same entries as real files.
 //!
 //! iWork relies on entries being uncompressed so media can be mapped straight
 //! out of the file, and the `Index/*.iwa` payloads carry their own Snappy
 //! compression, so deflating them again would only cost CPU. All three apps
 //! behave identically here.
+//!
+//! The two shapes are two content types rather than a detail of storage.
+//! `mdls` on the same document written both ways answers
+//! `com.apple.iwork.pages.sffpages` for the file — *single-file format* — and
+//! `com.apple.iwork.pages.pages`, conforming to `com.apple.package` and
+//! `public.directory`, for the directory. What is inside is identical: the same
+//! entry names, the same bytes.
 
 use std::io::{Cursor, Read, Write};
+use std::path::{Component, Path};
 use zip::write::SimpleFileOptions;
 
 use crate::Error;
 
-/// A raw iWork package: an ordered list of ZIP entries.
+/// Which of the two shapes a package has on disk.
+///
+/// A document keeps the one it was read in — `File > Advanced > Change File
+/// Type` is the user's choice, not this crate's, and the app itself is
+/// perfectly happy with either.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Form {
+    /// One file: the ZIP. What all three apps write unless told otherwise.
+    #[default]
+    SingleFile,
+    /// A directory, which the Finder shows as one document because the
+    /// extension is registered as a package type. Apple recommends it for
+    /// documents past a few hundred megabytes, where rewriting one huge file
+    /// for every save is the expensive part.
+    Directory,
+}
+
+impl Form {
+    /// What is at this path, if anything: a directory is a package, everything
+    /// else is read as a ZIP.
+    pub fn of(path: impl AsRef<Path>) -> Form {
+        if path.as_ref().is_dir() {
+            Form::Directory
+        } else {
+            Form::SingleFile
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Form::SingleFile => "single file",
+            Form::Directory => "package (a directory)",
+        }
+    }
+}
+
+/// A raw iWork package: an ordered list of entries, and the shape it had.
 ///
 /// Entry order is preserved on write. iWork does not appear to depend on it,
-/// but keeping it makes diffs against the original file readable.
+/// but keeping it makes diffs against the original file readable. A package
+/// read from a directory is ordered by name, because a directory has no order
+/// of its own to keep.
 #[derive(Clone, Default)]
 pub struct Package {
     pub entries: Vec<(String, Vec<u8>)>,
+    /// The shape this package was read in, and the one [`Package::write`] will
+    /// write it back in.
+    pub form: Form,
 }
+
+/// How deep a package directory may nest before this reader stops descending.
+///
+/// Real ones are two levels — `Index/Tables/DataList-1234.iwa` is the deepest
+/// entry any of the 901 bundled templates or 26 fixtures has. The limit is
+/// there so a directory a hostile program built cannot walk this reader into a
+/// stack overflow.
+const MAX_DEPTH: usize = 8;
 
 impl Package {
     pub fn read(path: impl AsRef<std::path::Path>) -> Result<Package, Error> {
         let path = path.as_ref();
+        if path.is_dir() {
+            return Package::read_directory(path);
+        }
         let bytes = std::fs::read(path)?;
         Package::from_bytes(&bytes)
+    }
+
+    /// Read the package form: a directory whose files are the entries.
+    ///
+    /// Names are the paths below `root`, joined with `/`, which is exactly what
+    /// the same document's ZIP calls them — so a package and a single file read
+    /// into the same `Package` and everything above this layer is unaware of
+    /// the difference.
+    ///
+    /// Three things are deliberately not entries. `.DS_Store` is the Finder's,
+    /// not the document's, and iWork never writes one — carrying it into a ZIP
+    /// on the next save would add an entry the app did not put there. Symbolic
+    /// links are skipped rather than followed, because a link is a name
+    /// pointing outside the package and following one turns "read this
+    /// document" into "read that file". Anything that is not a regular file —
+    /// a fifo, a device — is skipped for the same reason: reading it is not a
+    /// bounded operation.
+    pub fn read_directory(root: impl AsRef<Path>) -> Result<Package, Error> {
+        let root = root.as_ref();
+        let mut entries = Vec::new();
+        collect(root, "", 0, &mut entries)?;
+        // A directory has no order, so give it one that is the same twice.
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(Package {
+            entries,
+            form: Form::Directory,
+        })
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Package, Error> {
@@ -45,14 +133,40 @@ impl Package {
             // is stored as CC 88 and would be rewritten as E2 95 A0 C3 AA.
             // Pages then opens a document whose images have gone missing.
             let name = String::from_utf8_lossy(file.name_raw()).into_owned();
-            let mut data = Vec::with_capacity(file.size() as usize);
+            // `size()` is what the central directory *claims*, and a ZIP a
+            // stranger built can claim four gigabytes for an entry containing
+            // nothing. Reserving room for the claim would let a 200-byte file
+            // ask for all the memory on the machine, so the capacity is the
+            // smaller of the claim and what is left of the archive; the vector
+            // grows if the entry really is that big.
+            let ceiling = bytes.len().min(1 << 20);
+            let mut data = Vec::with_capacity((file.size() as usize).min(ceiling));
             file.read_to_end(&mut data)?;
             entries.push((name, data));
         }
-        Ok(Package { entries })
+        Ok(Package {
+            entries,
+            form: Form::SingleFile,
+        })
     }
 
+    /// Write the package back in the shape it came in.
     pub fn write(&self, path: impl AsRef<std::path::Path>) -> Result<(), Error> {
+        self.write_as(path, self.form)
+    }
+
+    /// Write the package in a chosen shape, whatever shape it was read in.
+    ///
+    /// The entries are the same bytes either way; this is the conversion
+    /// `File > Advanced > Change File Type` performs.
+    pub fn write_as(&self, path: impl AsRef<std::path::Path>, form: Form) -> Result<(), Error> {
+        match form {
+            Form::SingleFile => self.write_zip(path),
+            Form::Directory => self.write_directory(path),
+        }
+    }
+
+    fn write_zip(&self, path: impl AsRef<std::path::Path>) -> Result<(), Error> {
         let file = std::fs::File::create(path)?;
         let mut zip = zip::ZipWriter::new(file);
         // Stored, never deflated — see the module comment.
@@ -64,6 +178,40 @@ impl Package {
             zip.write_all(data)?;
         }
         zip.finish()?;
+        Ok(())
+    }
+
+    /// Write the package form: one file per entry, under a directory.
+    ///
+    /// Saving over an existing package **removes what is no longer an entry**.
+    /// A save that rewrote `Index/Document.iwa` and left the previous
+    /// `Index/Tables/DataList-9.iwa` lying beside it would leave a directory
+    /// holding two documents' worth of streams, and the component index only
+    /// names one of them — so the stale file is deleted and the directory it
+    /// was in is pruned if that emptied it.
+    fn write_directory(&self, path: impl AsRef<std::path::Path>) -> Result<(), Error> {
+        let root = path.as_ref();
+        std::fs::create_dir_all(root)?;
+
+        let mut wanted: Vec<String> = Vec::with_capacity(self.entries.len());
+        for (name, data) in &self.entries {
+            let relative = entry_path(name)?;
+            let target = root.join(&relative);
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&target, data)?;
+            wanted.push(name.clone());
+        }
+
+        let mut present = Vec::new();
+        collect_names(root, "", 0, &mut present);
+        for name in present {
+            if !wanted.contains(&name) {
+                let _ = std::fs::remove_file(root.join(entry_path(&name)?));
+            }
+        }
+        prune_empty(root, 0);
         Ok(())
     }
 
@@ -112,6 +260,111 @@ impl Package {
             .filter(|n| n.starts_with("Data/"))
             .map(str::to_string)
             .collect()
+    }
+}
+
+/// The path an entry name stands for below the package root, refusing any name
+/// that would leave it.
+///
+/// An entry name arrives from a ZIP a stranger wrote and is used to build a
+/// path on this machine, which is the whole of the zip-slip problem: a package
+/// holding `../../../../Library/LaunchAgents/x.plist` would otherwise write
+/// there. Names are relative, `/`-separated and contain no `..`, in every
+/// document and every template here; anything else is refused by name.
+fn entry_path(name: &str) -> Result<std::path::PathBuf, Error> {
+    let refuse = |why: &str| {
+        Err(Error::Format(format!(
+            "package entry {name:?} {why}, and this crate will not write it to disk"
+        )))
+    };
+    if name.is_empty() {
+        return refuse("has no name");
+    }
+    if name.starts_with('/') {
+        return refuse("is an absolute path");
+    }
+    let path = Path::new(name);
+    for component in path.components() {
+        match component {
+            Component::Normal(_) => {}
+            _ => return refuse("is not a plain relative path"),
+        }
+    }
+    Ok(path.to_path_buf())
+}
+
+/// Walk a package directory, reading every regular file into an entry.
+fn collect(
+    dir: &Path,
+    prefix: &str,
+    depth: usize,
+    entries: &mut Vec<(String, Vec<u8>)>,
+) -> Result<(), Error> {
+    if depth > MAX_DEPTH {
+        return Err(Error::Format(format!(
+            "package directory nests more than {MAX_DEPTH} levels deep at {prefix:?}"
+        )));
+    }
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name == ".DS_Store" {
+            continue;
+        }
+        // `file_type` does not follow links, which is the point: a link is
+        // skipped rather than read through.
+        let kind = entry.file_type()?;
+        let path = entry.path();
+        let full = format!("{prefix}{name}");
+        if kind.is_dir() {
+            collect(&path, &format!("{full}/"), depth + 1, entries)?;
+        } else if kind.is_file() {
+            entries.push((full, std::fs::read(&path)?));
+        }
+    }
+    Ok(())
+}
+
+/// Every file already under a package directory, by entry name. Best effort:
+/// anything that cannot be read cannot be a stale entry worth deleting either.
+fn collect_names(dir: &Path, prefix: &str, depth: usize, names: &mut Vec<String>) {
+    if depth > MAX_DEPTH {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        let full = format!("{prefix}{name}");
+        if kind.is_dir() {
+            collect_names(&entry.path(), &format!("{full}/"), depth + 1, names);
+        } else if kind.is_file() && name != ".DS_Store" {
+            names.push(full);
+        }
+    }
+}
+
+/// Remove directories a save emptied, deepest first. The root itself stays.
+fn prune_empty(dir: &Path, depth: usize) {
+    if depth > MAX_DEPTH {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        if entry.file_type().is_ok_and(|k| k.is_dir()) {
+            let path = entry.path();
+            prune_empty(&path, depth + 1);
+            let empty = std::fs::read_dir(&path).is_ok_and(|mut d| d.next().is_none());
+            if empty {
+                let _ = std::fs::remove_dir(&path);
+            }
+        }
     }
 }
 
@@ -217,5 +470,115 @@ mod tests {
     fn ascii_names_are_unaffected() {
         let package = Package::from_bytes(&zip_with_raw_name(b"Index/Document.iwa", b"x")).unwrap();
         assert_eq!(package.iwa_names(), vec!["Index/Document.iwa".to_string()]);
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("iwork-package-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The two shapes are one document. A package read from a directory has the
+    /// same entry names and the same bytes as the ZIP of it, and saving it puts
+    /// a directory back rather than quietly converting the user's document to
+    /// the other file type.
+    #[test]
+    fn a_directory_is_a_package_and_stays_one() {
+        let dir = scratch("form");
+        let document = dir.join("Probe.pages");
+        std::fs::create_dir_all(document.join("Index")).unwrap();
+        std::fs::write(document.join("Index/Document.iwa"), b"stream").unwrap();
+        std::fs::write(document.join("Metadata"), b"not a directory here").unwrap();
+
+        let package = Package::read(&document).unwrap();
+        assert_eq!(package.form, Form::Directory);
+        assert_eq!(
+            package.names().collect::<Vec<_>>(),
+            vec!["Index/Document.iwa", "Metadata"]
+        );
+        assert_eq!(package.get("Index/Document.iwa"), Some(&b"stream"[..]));
+
+        let out = dir.join("Copy.pages");
+        package.write(&out).unwrap();
+        assert!(out.is_dir(), "a package saved as a single file");
+        assert_eq!(
+            std::fs::read(out.join("Index/Document.iwa")).unwrap(),
+            b"stream"
+        );
+
+        // And the other shape on request, which is the Change File Type
+        // conversion, with the entries unchanged.
+        let zipped = dir.join("Zipped.pages");
+        package.write_as(&zipped, Form::SingleFile).unwrap();
+        let reread = Package::read(&zipped).unwrap();
+        assert_eq!(reread.form, Form::SingleFile);
+        assert_eq!(reread.entries, package.entries);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A save over an existing package must not leave the streams of the
+    /// document that was there before: the component index names the new ones,
+    /// and a reader that met both would have two documents in one directory.
+    #[test]
+    fn saving_over_a_package_removes_what_is_no_longer_in_it() {
+        let dir = scratch("stale");
+        let document = dir.join("Probe.pages");
+        std::fs::create_dir_all(document.join("Index/Tables")).unwrap();
+        std::fs::write(document.join("Index/Document.iwa"), b"one").unwrap();
+        std::fs::write(document.join("Index/Tables/DataList-9.iwa"), b"two").unwrap();
+
+        let mut package = Package::read(&document).unwrap();
+        package.remove("Index/Tables/DataList-9.iwa").unwrap();
+        package.set("Index/Document.iwa", b"edited".to_vec());
+        package.write(&document).unwrap();
+
+        assert_eq!(
+            std::fs::read(document.join("Index/Document.iwa")).unwrap(),
+            b"edited"
+        );
+        assert!(!document.join("Index/Tables/DataList-9.iwa").exists());
+        assert!(
+            !document.join("Index/Tables").exists(),
+            "the directory the stale stream was in should have been pruned"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Entry names come out of a ZIP a stranger wrote, and writing the package
+    /// form turns each one into a path on this machine. `../` in a name is the
+    /// oldest archive attack there is, and it is refused rather than written.
+    #[test]
+    fn an_entry_name_may_not_escape_the_package() {
+        let dir = scratch("escape");
+        for hostile in ["../escaped.txt", "/etc/hostile", "Index/../../out", ""] {
+            let package = Package {
+                entries: vec![(hostile.to_string(), b"x".to_vec())],
+                form: Form::Directory,
+            };
+            let error = package.write(dir.join("Probe.pages")).unwrap_err();
+            assert!(
+                matches!(error, Error::Format(_)),
+                "{hostile:?} was not refused: {error}"
+            );
+        }
+        assert!(!dir.join("escaped.txt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A symlink in a package directory is a name pointing somewhere else, and
+    /// following one would let a document read a file it does not contain.
+    #[test]
+    fn a_symlink_is_not_an_entry() {
+        let dir = scratch("symlink");
+        let document = dir.join("Probe.pages");
+        std::fs::create_dir_all(document.join("Index")).unwrap();
+        std::fs::write(dir.join("secret"), b"not part of the document").unwrap();
+        std::fs::write(document.join("Index/Document.iwa"), b"stream").unwrap();
+        std::os::unix::fs::symlink(dir.join("secret"), document.join("Index/Secret.iwa")).unwrap();
+
+        let package = Package::read(&document).unwrap();
+        assert_eq!(package.iwa_names(), vec!["Index/Document.iwa".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

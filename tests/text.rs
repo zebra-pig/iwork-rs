@@ -741,6 +741,7 @@ fn an_edit_through_a_tracked_change_is_refused_by_name() {
             "Index/Document.iwa".to_string(),
             iwork::iwa::serialize(&objects),
         )],
+        ..Default::default()
     };
     let mut doc = Document::from_package(package).unwrap();
 

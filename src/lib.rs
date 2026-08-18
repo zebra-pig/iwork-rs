@@ -69,7 +69,7 @@ pub use drawable::{Drawable, Geometry, Placement};
 pub use formula::{Ast, Formula, Node, Reference};
 pub use keynote::{Layout, Placeholder, Show, Slide, SlideCopy, Transition};
 pub use media::MediaReplacement;
-pub use package::Package;
+pub use package::{Form, Package};
 pub use style::{CreatedStyle, Label, StyleDeletion, StyleKind, StyleUse, TextStyle};
 pub use table::{Cell, CellControl, CellFormat, CellValue, Merge, Table};
 

@@ -279,6 +279,9 @@ fn main() -> ExitCode {
 fn inspect(path: &str) -> Result<(), Error> {
     let doc = Document::open(path)?;
     println!("{} document — {path}", doc.kind().as_str());
+    // Which of the two shapes it is on disk, because a save puts it back in
+    // that shape and a reader should know which one they have.
+    println!("stored as {}", doc.package().form.as_str());
 
     // Pages has two kinds of document and they are not the same file at all:
     // one has a body storage the text flows through, the other has named page
