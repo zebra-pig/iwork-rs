@@ -281,6 +281,288 @@ fn transitions_read_as_the_dictionary_names_them() {
     assert!(doc.slides()[0].transition.is_none());
 }
 
+/// The `custom_*` block belongs to the **effect**, and Keynote writes exactly
+/// the parameters the chosen effect has.
+///
+/// `keynote-transitions` is 44 blank slides, one per effect in the app's own
+/// enumeration, identical in every other respect — same layout, no text, same
+/// duration, delay and automatic flag — so anything that differs between two of
+/// them is the effect. Ten of the 44 bring a parameter; the other 34 bring
+/// none, and that is the finding as much as the ten are.
+#[test]
+fn every_transition_parameter_belongs_to_its_effect() {
+    let path = fixture!("keynote-transitions.key");
+    let doc = Document::open(&path).unwrap();
+    let slides = doc.slides();
+    let by_effect: BTreeMap<&str, &iwork::keynote::Transition> = slides
+        .iter()
+        .map(|s| (s.transition.effect.as_str(), &s.transition))
+        .collect();
+    assert_eq!(
+        by_effect.len(),
+        44,
+        "all 44 of the app's effects, on 46 slides"
+    );
+
+    let p = |effect: &str| by_effect[effect].parameters;
+
+    // Bounce is the object-effect checkbox, and it is written **whatever its
+    // value** — false is a parameter the effect has, not a parameter it lacks.
+    assert_eq!(p("apple:ca-dissolve-and-flip").bounce, Some(true));
+    assert_eq!(p("apple:3D-cube").bounce, Some(true));
+    assert_eq!(p("apple:revolve").bounce, Some(true));
+    assert_eq!(
+        p("com.apple.iWork.Keynote.BLTRevolvingDoor").bounce,
+        Some(true)
+    );
+    assert_eq!(p("apple:ca-revolve").bounce, Some(false));
+    assert_eq!(p("apple:scale").bounce, Some(false));
+    assert_eq!(p("apple:dissolve").bounce, None, "dissolve has no bounce");
+
+    assert_eq!(p("com.apple.iWork.Keynote.BUKTwist").twist, Some(3.3));
+    assert_eq!(p("apple:fade-and-move").travel_distance, Some(1.0));
+    assert_eq!(p("apple:radial wipe").angle, Some(90.0));
+    assert_eq!(p("apple:radial wipe").blur_amount, Some(0.5));
+
+    // Magic Move's three: fade unmatched, acceleration, text granularity.
+    let magic = p("apple:magic-move-implied-motion-path");
+    assert_eq!(magic.magic_move_fade_unmatched, Some(true));
+    assert_eq!(
+        magic.timing_curve,
+        Some(iwork::keynote::TimingCurve::EaseInEaseOut)
+    );
+    assert_eq!(
+        magic.text_delivery,
+        Some(iwork::keynote::TextDelivery::ByObject)
+    );
+
+    // Fade Through Colour is the only effect of the 44 that writes a colour,
+    // and it is black, opaque.
+    let fade = by_effect["com.apple.iWork.Keynote.BLTFadeThruColor"];
+    let colour = fade.color.expect("a colour to fade through");
+    assert_eq!(
+        (colour.red, colour.green, colour.blue, colour.alpha),
+        (0.0, 0.0, 0.0, 1.0)
+    );
+    assert!(
+        fade.parameters.is_empty(),
+        "and no custom parameter besides"
+    );
+
+    let with_parameters = slides
+        .iter()
+        .filter(|s| !s.transition.parameters.is_empty() || s.transition.color.is_some())
+        .count();
+    assert_eq!(
+        with_parameters, 12,
+        "eleven of the 44 effects bring something, and magic move is on two slides"
+    );
+}
+
+/// The parameters do not move when the timing does.
+///
+/// The last two slides of `keynote-transitions` repeat an effect at another
+/// duration, delay and automatic flag. If the `custom_*` block were a function
+/// of anything but the effect, this is where it would show.
+#[test]
+fn the_timing_does_not_disturb_the_parameters() {
+    let path = fixture!("keynote-transitions.key");
+    let doc = Document::open(&path).unwrap();
+    let slides = doc.slides();
+    let magic: Vec<&iwork::keynote::Transition> = slides
+        .iter()
+        .map(|s| &s.transition)
+        .filter(|t| t.effect == "apple:magic-move-implied-motion-path")
+        .collect();
+    assert_eq!(magic.len(), 2);
+    assert_ne!(magic[0].duration, magic[1].duration, "different timings");
+    assert_ne!(magic[0].automatic, magic[1].automatic);
+    assert_eq!(magic[0].parameters, magic[1].parameters, "same parameters");
+
+    let wipe: Vec<&iwork::keynote::Transition> = slides
+        .iter()
+        .map(|s| &s.transition)
+        .filter(|t| t.effect == "apple:wipe")
+        .collect();
+    assert_eq!(wipe.len(), 2);
+    assert_ne!(wipe[0].duration, wipe[1].duration);
+    assert!(wipe[0].parameters.is_empty() && wipe[1].parameters.is_empty());
+}
+
+/// **Keynote's own writer never emits a direction.** All 44 effects leave field
+/// 4 absent, which reads as 0 — "whatever this effect does by default".
+///
+/// The values [`iwork::keynote::direction_name`] knows come from a PowerPoint
+/// import instead (FORMAT.md §13); nothing in this corpus carries one, and this
+/// test is what says so.
+#[test]
+fn the_app_writes_no_transition_direction() {
+    for path in keynote_fixtures() {
+        let doc = Document::open(&path).unwrap();
+        let show = doc.show().unwrap();
+        for transition in show
+            .slides
+            .iter()
+            .map(|s| &s.transition)
+            .chain(show.layouts.iter().map(|l| &l.transition))
+        {
+            assert_eq!(
+                transition.direction,
+                0,
+                "{}: {} has a direction",
+                path.display(),
+                transition.effect
+            );
+        }
+    }
+    assert_eq!(
+        iwork::keynote::direction_name(0),
+        "the effect's own default"
+    );
+}
+
+/// The playback settings a script can move, read out of the deck that moves
+/// them. `keynote-playback` differs from every other deck here in exactly four
+/// fields — and in a fifth number that is not a field at all.
+#[test]
+fn playback_settings_are_four_fields_of_the_show() {
+    let path = fixture!("keynote-playback.key");
+    let control = fixture!("keynote-slides.key");
+    let moved = Document::open(&path).unwrap().show().unwrap();
+    let default = Document::open(&control).unwrap().show().unwrap();
+
+    assert!(moved.loop_presentation && !default.loop_presentation);
+    assert!(moved.plays_on_open && !default.plays_on_open);
+    assert!(moved.idle_timer_active && !default.idle_timer_active);
+
+    // **Seconds on the wire, minutes in the dictionary.** The script asked for
+    // 137 and the field holds 8220.
+    assert_eq!(moved.idle_timer_delay, 8220.0);
+    assert_eq!(moved.idle_minutes(), 137.0);
+    assert_eq!(
+        default.idle_timer_delay, 900.0,
+        "the schema default, 15 min"
+    );
+
+    // The three nothing can move stay where they are, in both decks — written
+    // explicitly, at their defaults.
+    for show in [&moved, &default] {
+        assert_eq!(show.mode, 0);
+        assert_eq!(show.mode_name(), "normal");
+        assert_eq!(show.autoplay_transition_delay, 5.0);
+        assert_eq!(show.autoplay_build_delay, 2.0);
+    }
+}
+
+/// Every deck has a soundtrack and every soundtrack is empty — and nothing
+/// available can fill one in. `make new audio clip` is *accepted* by Keynote
+/// and then does nothing: no error, no clip, no `Data/` entry.
+#[test]
+fn the_soundtrack_is_present_and_empty_everywhere() {
+    let mut decks = 0;
+    for path in keynote_fixtures() {
+        let doc = Document::open(&path).unwrap();
+        let show = doc.show().unwrap();
+        let track = show
+            .soundtrack
+            .as_ref()
+            .unwrap_or_else(|| panic!("{}: no soundtrack", path.display()));
+        assert_eq!(track.volume, 1.0, "{}", path.display());
+        assert_eq!(track.mode, 0, "{}", path.display());
+        assert_eq!(track.mode_name(), "play once");
+        assert_eq!(track.tracks(), 0, "{}", path.display());
+        assert!(track.media.is_empty());
+        decks += 1;
+    }
+    assert!(decks >= 4, "only {decks} decks");
+}
+
+/// A recorded presentation and a live-video feed are the two never-author
+/// cases. There is no recording anywhere; there is one live-video source in
+/// every deck, and it is the theme's default camera.
+#[test]
+fn recordings_and_live_video_are_identified_not_authored() {
+    let mut decks = 0;
+    for path in keynote_fixtures() {
+        let doc = Document::open(&path).unwrap();
+        let show = doc.show().unwrap();
+        assert!(
+            show.recording.is_none(),
+            "{}: a recording turned up — measure it before trusting the decode",
+            path.display()
+        );
+        assert_eq!(show.live_video_sources.len(), 1, "{}", path.display());
+        let source = &show.live_video_sources[0];
+        assert_eq!(source.name, "Default Camera");
+        assert!(source.is_default);
+        assert!(
+            !source.listed,
+            "it is the collection's default_source and in no sources list"
+        );
+        decks += 1;
+    }
+    assert!(decks >= 4);
+}
+
+/// **The build tripwire.** There is no `KN.BuildArchive` in any document this
+/// crate has been shown, so [`iwork::keynote::Build`] is decoded from the
+/// 15.3.1 schema and has never been measured. The day a fixture grows one, this
+/// fails — which is the signal to go and measure it rather than to trust it.
+#[test]
+fn no_fixture_has_a_build_yet() {
+    for path in keynote_fixtures() {
+        let doc = Document::open(&path).unwrap();
+        let show = doc.show().unwrap();
+        assert_eq!(
+            show.build_count(),
+            0,
+            "{} has builds — KN.BuildArchive is decoded from the schema and \
+             UNVERIFIED; go and measure it against the app, then delete this test",
+            path.display()
+        );
+        for slide in &show.slides {
+            assert!(slide.build_chunks.is_empty(), "{}", path.display());
+        }
+        assert_eq!(
+            doc.objects()
+                .filter(|(_, o)| matches!(o.message_type(), 8 | 153))
+                .count(),
+            0,
+            "{}: a build archive exists without a slide listing it",
+            path.display()
+        );
+    }
+}
+
+/// **The transition-parameter tripwire.** Every field of
+/// `KN.TransitionAttributesArchive` the 15.3.1 schema names is decoded; a field
+/// it does not name means the table has gone out of date. Field 14 is a hole in
+/// the schema and would be caught here too.
+#[test]
+fn no_transition_carries_a_parameter_the_schema_does_not_name() {
+    let mut checked = 0usize;
+    for path in keynote_fixtures() {
+        let doc = Document::open(&path).unwrap();
+        let show = doc.show().unwrap();
+        for transition in show
+            .slides
+            .iter()
+            .map(|s| &s.transition)
+            .chain(show.layouts.iter().map(|l| &l.transition))
+        {
+            assert!(
+                transition.unknown_parameters.is_empty(),
+                "{}: {} carries parameter field(s) {:?} the schema does not name",
+                path.display(),
+                transition.effect,
+                transition.unknown_parameters
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 100, "only {checked} transitions");
+}
+
 /// The document-level "slide numbers showing" is not a document field: the app
 /// writes `isSlideNumberVisible` on every node and leaves
 /// `KN.ShowArchive.slideNumbersVisible` absent.
@@ -655,7 +937,12 @@ fn the_app_agrees_about_every_slide() {
         return;
     }
     let mut compared = 0usize;
-    for name in ["keynote-deck.key", "keynote-slides.key"] {
+    for name in [
+        "keynote-deck.key",
+        "keynote-slides.key",
+        "keynote-playback.key",
+        "keynote-transitions.key",
+    ] {
         let Some(path) = generated(name) else {
             eprintln!("no {name} — skipping");
             continue;
@@ -690,6 +977,35 @@ fn the_app_agrees_about_every_slide() {
             show.numbers_shown_on() == show.slides.len(),
             "{name}: slide numbers showing"
         );
+
+        // The four playback settings the dictionary exposes. The fourth is the
+        // one worth the round trip: `maximum idle duration` is in **minutes**
+        // and the field is in seconds.
+        let playback = said
+            .iter()
+            .find(|r| r[0] == "playback")
+            .expect("a playback record");
+        assert_eq!(
+            playback[1] == "true",
+            show.loop_presentation,
+            "{name}: auto loop"
+        );
+        assert_eq!(
+            playback[2] == "true",
+            show.plays_on_open,
+            "{name}: auto play"
+        );
+        assert_eq!(
+            playback[3] == "true",
+            show.idle_timer_active,
+            "{name}: auto restart"
+        );
+        assert_eq!(
+            playback[4].parse::<f64>().unwrap(),
+            show.idle_minutes(),
+            "{name}: maximum idle duration, in minutes"
+        );
+        compared += 4;
 
         let layouts: Vec<&Vec<String>> = said.iter().filter(|r| r[0] == "layout").collect();
         assert_eq!(layouts.len(), show.layouts.len());
@@ -758,20 +1074,34 @@ fn the_app_agrees_about_every_slide() {
                 "{name}: slide {} presenter notes",
                 slide.identifier
             );
-            // The app names an effect in English; the document names it by
-            // identifier. Only "no transition effect" can be compared without
-            // a table, and it is the one that matters for an inventory.
+            // The app names an effect in English and the document names it by
+            // identifier; `keynote::EFFECTS` is the app's own pairing, and this
+            // is where it is *checked* — 46 slides of `keynote-transitions`
+            // carry all 44 of them.
             assert_eq!(
                 record[9] == "no transition effect",
                 slide.transition.is_none(),
                 "{name}: slide {} transition",
                 slide.identifier
             );
+            assert_eq!(
+                iwork::keynote::effect_name(&slide.transition.effect),
+                Some(record[9].as_str()),
+                "{name}: slide {} effect {} is not what the app calls it",
+                slide.identifier,
+                slide.transition.effect
+            );
             if !slide.transition.is_none() {
                 assert_eq!(
                     record[12].parse::<f64>().unwrap(),
                     slide.transition.duration,
                     "{name}: slide {} transition duration",
+                    slide.identifier
+                );
+                assert_eq!(
+                    record[11].parse::<f64>().unwrap(),
+                    slide.transition.delay,
+                    "{name}: slide {} transition delay",
                     slide.identifier
                 );
                 assert_eq!(
