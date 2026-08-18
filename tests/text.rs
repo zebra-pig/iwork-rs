@@ -665,3 +665,109 @@ fn the_app_opens_an_edited_document_and_reads_the_new_words_back() {
     let resaved = Document::open(&out).unwrap();
     assert_eq!(resaved.problems(), Vec::<String>::new());
 }
+
+// -- change tracking (phase 7) ------------------------------------------------
+
+/// An edit through a storage with tracked changes is refused rather than
+/// remapped.
+///
+/// Nothing in the corpus has one and nothing here can make Pages produce one —
+/// its dictionary has no change-tracking property at all — so the storage is
+/// built by hand, in the shape `iwork::text` says `table_deletion` has:
+/// `{character_index, reference}`, a run table by its layout. The point of the
+/// refusal is that the layout is the *only* thing it shares with a run table.
+/// A tracked deletion covers characters that are still in the text and are not
+/// going to be shown, and an edit that slides its index the way it slides a
+/// style run moves a deletion marker onto characters nobody deleted.
+#[test]
+fn an_edit_through_a_tracked_change_is_refused_by_name() {
+    const STORAGE: u64 = 4242;
+    const CHANGE: u64 = 4243;
+
+    let reference = |target: u64| {
+        iwork::pb::Value::Bytes(
+            iwork::pb::Message {
+                fields: vec![iwork::pb::Field {
+                    number: 1,
+                    value: iwork::pb::Value::Varint(target),
+                }],
+            }
+            .encode(),
+        )
+    };
+    let entry = |index: u64, target: u64| iwork::pb::Message {
+        fields: vec![
+            iwork::pb::Field {
+                number: 1,
+                value: iwork::pb::Value::Varint(index),
+            },
+            iwork::pb::Field {
+                number: 2,
+                value: reference(target),
+            },
+        ],
+    };
+
+    let mut storage = iwork::pb::Message::default();
+    storage.set(1, iwork::pb::Value::Varint(0));
+    storage.set(3, iwork::pb::Value::Bytes(b"The quick brown fox".to_vec()));
+    storage.set(
+        iwork::text::DELETION_TABLE,
+        iwork::pb::Value::Bytes(entry(4, CHANGE).encode()),
+    );
+
+    // `TSWP.ChangeArchive`: kind 2 is a deletion, and there is no kind 0.
+    let mut change = iwork::pb::Message::default();
+    change.set(1, iwork::pb::Value::Varint(2));
+
+    let object = |identifier: u64, message_type: u32, payload: &iwork::pb::Message| {
+        iwork::iwa::ArchiveObject {
+            identifier,
+            messages: vec![iwork::iwa::ArchiveMessage {
+                message_type,
+                version: vec![1, 0, 5],
+                extra: Vec::new(),
+                payload: payload.encode(),
+            }],
+            extra: Vec::new(),
+        }
+    };
+    let objects = vec![
+        object(STORAGE, iwork::TYPE_STORAGE, &storage),
+        object(CHANGE, iwork::annotations::TYPE_CHANGE, &change),
+    ];
+    let package = iwork::Package {
+        entries: vec![(
+            "Index/Document.iwa".to_string(),
+            iwork::iwa::serialize(&objects),
+        )],
+    };
+    let mut doc = Document::from_package(package).unwrap();
+
+    // The reader sees it, and says so rather than pretending the document is
+    // ordinary.
+    let annotations = doc.annotations();
+    assert_eq!(annotations.tracked_storages, vec![STORAGE]);
+    assert_eq!(annotations.changes.len(), 1);
+    assert_eq!(
+        annotations.changes[0].kind,
+        iwork::annotations::ChangeKind::Deletion
+    );
+    assert_eq!(
+        annotations.changes[0].anchor,
+        Some((STORAGE, iwork::text::DELETION_TABLE, 4))
+    );
+
+    match doc.set_text(STORAGE, "anything at all") {
+        Err(Error::TrackedChanges { storage, field }) => {
+            assert_eq!(storage, STORAGE);
+            assert_eq!(field, iwork::text::DELETION_TABLE);
+        }
+        other => panic!("expected a TrackedChanges refusal, got {other:?}"),
+    }
+    // And an insertion table is refused just the same.
+    assert!(matches!(
+        doc.delete_text(STORAGE, 0..3),
+        Err(Error::TrackedChanges { .. })
+    ));
+}

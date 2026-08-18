@@ -980,6 +980,29 @@ fn structure(path: &str) -> Result<(), Error> {
         }
     }
 
+    let tracking = &s.change_tracking;
+    if tracking.is_default() {
+        println!("tracking  off, and the six display switches are at their defaults");
+    } else {
+        println!(
+            "tracking  {}, {} session(s){}, markup {}, deletions {}, bubbles {}, \
+             change bars {}, format changes {}, annotations {}",
+            if tracking.enabled { "on" } else { "off" },
+            tracking.sessions,
+            if tracking.has_recent_session {
+                ", one most recent"
+            } else {
+                ""
+            },
+            tracking.show_markup,
+            tracking.show_deletions,
+            tracking.bubbles_visibility,
+            tracking.change_bars,
+            tracking.format_changes,
+            tracking.annotations_visible
+        );
+    }
+
     let notes = &s.footnote_settings;
     println!(
         "footnotes {} as {}, numbered {}, gap {} pt — {} in the text",

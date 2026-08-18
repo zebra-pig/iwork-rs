@@ -92,6 +92,8 @@ pub mod document_field {
     pub const SETTINGS: u32 = 7;
     pub const TOC_STYLES: u32 = 14;
     pub const SUPER: u32 = 15;
+    pub const CHANGE_SESSIONS: u32 = 16;
+    pub const MOST_RECENT_CHANGE_SESSION: u32 = 17;
     pub const DRAWABLES_ZORDER: u32 = 20;
     pub const USES_SINGLE_HEADER_FOOTER: u32 = 21;
     pub const PAGE_WIDTH: u32 = 30;
@@ -112,6 +114,56 @@ pub mod document_field {
     pub const PAGE_TEMPLATES: u32 = 48;
 }
 
+/// Change tracking, as `TP` records it — the *document's* half of the feature.
+///
+/// The text's half is `table_insertion` (21) and `table_deletion` (22), and
+/// [`crate::annotations`] has both and what they cost an edit.
+///
+/// **All of this is at its default in every document.** Pages' scripting
+/// dictionary has no change-tracking property — no `change tracking enabled`,
+/// nothing that reads or writes any of these — and no bundled template has
+/// review state in it, so `enabled` is false everywhere, `sessions` is empty
+/// everywhere, and the six display switches sit at the values the 15.3.1
+/// schema gives them. The fields are Confirmed to exist and every non-default
+/// value they can hold is Unverified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChangeTracking {
+    /// `TP.DocumentArchive.change_tracking_enabled` (40).
+    pub enabled: bool,
+    /// How many `TSWP.ChangeSessionArchive` the document lists (16).
+    pub sessions: usize,
+    /// Whether it names a most recent one (17).
+    pub has_recent_session: bool,
+    /// `show_ct_markup` (12), default true.
+    pub show_markup: bool,
+    /// `show_ct_deletions` (13), default true.
+    pub show_deletions: bool,
+    /// `ct_bubbles_visibility` (14) — an `int32` with no documented default.
+    pub bubbles_visibility: u64,
+    /// `change_bars_visible` (15), default true.
+    pub change_bars: bool,
+    /// `format_changes_visible` (16), default true.
+    pub format_changes: bool,
+    /// `annotations_visible` (17), default true. The comment layer's switch,
+    /// not change tracking's.
+    pub annotations_visible: bool,
+}
+
+impl ChangeTracking {
+    /// Is this the state every document in the corpus is in?
+    pub fn is_default(&self) -> bool {
+        !self.enabled
+            && self.sessions == 0
+            && !self.has_recent_session
+            && self.show_markup
+            && self.show_deletions
+            && self.bubbles_visibility == 0
+            && self.change_bars
+            && self.format_changes
+            && self.annotations_visible
+    }
+}
+
 /// Field numbers of `TP.SettingsArchive`.
 pub mod settings_field {
     /// `body` — **and the document mode**. False is a page-layout document.
@@ -119,6 +171,15 @@ pub mod settings_field {
     pub const HEADERS: u32 = 2;
     pub const FOOTERS: u32 = 3;
     pub const HYPHENATION: u32 = 9;
+    /// The six change-tracking *display* switches. Present in every document
+    /// and exercised by none: nothing in Pages' dictionary turns change
+    /// tracking on, so all six are at their schema defaults everywhere.
+    pub const SHOW_CT_MARKUP: u32 = 12;
+    pub const SHOW_CT_DELETIONS: u32 = 13;
+    pub const CT_BUBBLES_VISIBILITY: u32 = 14;
+    pub const CHANGE_BARS_VISIBLE: u32 = 15;
+    pub const FORMAT_CHANGES_VISIBLE: u32 = 16;
+    pub const ANNOTATIONS_VISIBLE: u32 = 17;
     pub const DOCUMENT_IS_RTL: u32 = 18;
     pub const LANGUAGE: u32 = 21;
     pub const ORIG_TEMPLATE: u32 = 25;
@@ -552,6 +613,7 @@ pub struct Structure {
     pub mode: Mode,
     pub setup: PageSetup,
     pub footnote_settings: FootnoteSettings,
+    pub change_tracking: ChangeTracking,
     pub sections: Vec<Section>,
     pub header_footers: Vec<HeaderFooter>,
     pub page_templates: Vec<PageTemplate>,
@@ -670,6 +732,26 @@ pub fn structure(document: &crate::Document) -> Option<Structure> {
             .varint(settings_field::FOOTNOTE_NUMBERING)
             .unwrap_or(0),
         gap: settings.varint(settings_field::FOOTNOTE_GAP).unwrap_or(0),
+    };
+
+    let change_tracking = ChangeTracking {
+        enabled: flag(&root, document_field::CHANGE_TRACKING_ENABLED, false),
+        sessions: root
+            .fields
+            .iter()
+            .filter(|f| f.number == document_field::CHANGE_SESSIONS)
+            .count(),
+        has_recent_session: root
+            .get(document_field::MOST_RECENT_CHANGE_SESSION)
+            .is_some(),
+        show_markup: flag(&settings, settings_field::SHOW_CT_MARKUP, true),
+        show_deletions: flag(&settings, settings_field::SHOW_CT_DELETIONS, true),
+        bubbles_visibility: settings
+            .varint(settings_field::CT_BUBBLES_VISIBILITY)
+            .unwrap_or(0),
+        change_bars: flag(&settings, settings_field::CHANGE_BARS_VISIBLE, true),
+        format_changes: flag(&settings, settings_field::FORMAT_CHANGES_VISIBLE, true),
+        annotations_visible: flag(&settings, settings_field::ANNOTATIONS_VISIBLE, true),
     };
 
     let body_storage = reference(&root, document_field::BODY_STORAGE);
@@ -927,6 +1009,7 @@ pub fn structure(document: &crate::Document) -> Option<Structure> {
         mode,
         setup,
         footnote_settings,
+        change_tracking,
         sections,
         header_footers,
         page_templates,

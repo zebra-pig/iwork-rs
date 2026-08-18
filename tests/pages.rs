@@ -746,3 +746,27 @@ fn a_page_number_carries_its_own_format() {
         .unwrap();
     assert!(plain.numbers.is_empty());
 }
+
+// -- change tracking (phase 7) ------------------------------------------------
+
+/// **A tripwire, and a survey.** Change tracking has a document half in `TP`
+/// and a text half in the storage's tables, and neither is exercised anywhere:
+/// Pages' scripting dictionary has no change-tracking property at all, so no
+/// probe here can turn it on, and no bundled template ships with review state.
+/// Every one of the ten fields is therefore at its schema default in every
+/// Pages document in the corpus.
+///
+/// The day this fails, `src/pages.rs`'s `ChangeTracking` and
+/// `src/annotations.rs`'s change decoders have their first real example.
+#[test]
+fn change_tracking_is_off_and_at_its_defaults_everywhere() {
+    for path in pages_fixtures() {
+        let doc = Document::open(&path).unwrap();
+        let tracking = doc.structure().unwrap().change_tracking;
+        assert!(
+            tracking.is_default(),
+            "{}: change tracking is no longer at its defaults — {tracking:?}",
+            path.display()
+        );
+    }
+}
