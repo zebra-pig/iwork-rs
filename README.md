@@ -515,7 +515,7 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | Sparse series arrays sized by `count`, not by their entries | ✅ | ✅ | ✅ |
 | A chart too new for an old reader carries a down-level type patch | — | ✅ | — |
 | Every chart-domain archive re-encodes to its bytes (2090 of them) | ✅ | ✅ | ✅ |
-| Both plist forms in the package read; the binary one round-trips (945 of them) | ✅ | ✅ | ✅ |
+| Both plist forms in the package read; a binary one survives a rewrite | ✅ | ✅ | ✅ |
 | Identity agrees in all three places it is written | ✅ | ✅ | ✅ |
 | Locale, creation locale, document language, template id, custom-format list | ✅ | ✅ | ✅ |
 | A copy gets four new UUIDs and keeps the lineage; a plain save keeps all five | ✅ | ✅ | ✅ |
