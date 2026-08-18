@@ -14,6 +14,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use iwork::pb::{decode_nested, Message, Value};
 use iwork::table::{CellFormat, CellValue, Merge, Table};
 use iwork::Document;
 
@@ -173,6 +174,10 @@ fn every_cell_record_is_consumed_to_the_byte() {
                 records += 1;
             }
         }
+    }
+    if records == 0 {
+        eprintln!("no fixtures — skipping (run scripts/make-fixtures.sh)");
+        return;
     }
     assert!(records > 2000, "only {records} records seen");
     eprintln!("{records} cell records decoded with nothing left over");
@@ -728,6 +733,230 @@ fn saving_a_document_organised_this_way_changes_no_byte_of_it() {
         }
         let _ = std::fs::remove_file(&out);
     }
+}
+
+// -- hostile input -----------------------------------------------------------
+//
+// A document is untrusted bytes. These splice the shapes a real file could not
+// hold — a tile id past what its base row can address, a category tree that
+// references itself, a merge extent that reaches the top of `usize` — into a
+// genuine fixture's streams, and assert the reader *returns*: a bounded error
+// or a truncated read, never a panic or an abort.
+
+/// Rewrite the first length-delimited field `number` whose decoded message the
+/// closure accepts, re-encoding it in place. Returns whether one was changed;
+/// the closure returning `false` moves on to the next field of that number, so
+/// this walks past the rules that do not match to the one that does.
+fn edit_first(msg: &mut Message, number: u32, mut f: impl FnMut(&mut Message) -> bool) -> bool {
+    for field in msg.fields.iter_mut() {
+        if field.number != number {
+            continue;
+        }
+        let Value::Bytes(raw) = &field.value else {
+            continue;
+        };
+        let Some(mut child) = decode_nested(raw) else {
+            continue;
+        };
+        if f(&mut child) {
+            field.value = Value::Bytes(child.encode());
+            return true;
+        }
+    }
+    false
+}
+
+/// Splice a fixture: for every object, hand `mutate` its id, message type and
+/// decoded first message; re-encode any it changes and rebuild the `Document`.
+/// `None` when the corpus is absent; panics if nothing matched, so a test can
+/// never quietly assert against an unspliced document.
+fn spliced(name: &str, mut mutate: impl FnMut(u64, u32, &mut Message) -> bool) -> Option<Document> {
+    let path = generated(name)?;
+    let mut package = iwork::Package::read(&path).unwrap();
+    let mut matched = false;
+    for stream in package.iwa_names() {
+        let mut objects = iwork::iwa::parse(package.get(&stream).unwrap()).unwrap();
+        let mut touched = false;
+        for object in objects.iter_mut() {
+            let mt = object.message_type();
+            let Some(message) = object.messages.first_mut() else {
+                continue;
+            };
+            let Ok(mut decoded) = Message::decode(&message.payload) else {
+                continue;
+            };
+            if mutate(object.identifier, mt, &mut decoded) {
+                message.payload = decoded.encode();
+                touched = true;
+                matched = true;
+            }
+        }
+        if touched {
+            package.set(&stream, iwork::iwa::serialize(&objects));
+        }
+    }
+    assert!(matched, "{name}: the splice matched nothing");
+    Some(Document::from_package(package).unwrap())
+}
+
+/// A `TSP.Reference` message, `{1: id}`, as a length-delimited value.
+fn reference_to(id: u64) -> Value {
+    let mut r = Message::default();
+    r.set(1, Value::Varint(id));
+    Value::Bytes(r.encode())
+}
+
+/// A tile id of 2⁶⁰ overflows `tile_id × tile_size`. The reader must skip that
+/// tile, not wrap it to a plausible base row or panic multiplying it.
+#[test]
+fn a_tile_id_that_overflows_its_base_row_is_skipped_not_wrapped() {
+    let Some(doc) = spliced("numbers-large.numbers", |_, mt, model| {
+        if mt != iwork::table::TYPE_TABLE_MODEL {
+            return false;
+        }
+        // model → field 4 DataStore → field 3 TileStorage → first tile → id.
+        edit_first(model, 4, |store| {
+            edit_first(store, 3, |tiles| {
+                edit_first(tiles, 1, |tile| {
+                    tile.set(1, Value::Varint(1u64 << 60));
+                    true
+                })
+            })
+        })
+    }) else {
+        return;
+    };
+    // The call returns; the overflowing tile is simply absent from the read.
+    let tables = doc.tables();
+    assert!(!tables.is_empty(), "the table survived the hostile tile id");
+}
+
+/// A category node whose child list points back at the root is a cycle. The
+/// reader must break it, not recurse until the stack is gone.
+#[test]
+fn a_self_referential_category_tree_is_read_without_recursing_forever() {
+    // The inline tree cannot cycle, so first find the by-reference root the
+    // `GroupByArchive` names in field 18, then force the reader down that path
+    // (drop the inline field 3) and give the root a child edge to itself.
+    let path = match generated("numbers-categories.numbers") {
+        Some(p) => p,
+        None => return,
+    };
+    let root = {
+        let pkg = iwork::Package::read(&path).unwrap();
+        let mut found = 0u64;
+        for stream in pkg.iwa_names() {
+            for o in iwork::iwa::parse(pkg.get(&stream).unwrap()).unwrap() {
+                if o.message_type() == 6373 {
+                    if let Some(id) = Message::decode(o.payload()).ok().and_then(|m| {
+                        m.bytes(18)
+                            .and_then(decode_nested)
+                            .and_then(|r| r.varint(1))
+                    }) {
+                        found = id;
+                    }
+                }
+            }
+        }
+        found
+    };
+    assert!(
+        root != 0,
+        "no by-reference category root to point at itself"
+    );
+
+    let doc = spliced("numbers-categories.numbers", |id, mt, m| {
+        if mt == 6373 {
+            // Drop the inline root so the by-reference tree is what is read.
+            let before = m.fields.len();
+            m.fields.retain(|f| f.number != 3);
+            return m.fields.len() != before;
+        }
+        if id == root {
+            // The root gains a child edge to itself: root → root → …
+            m.append_in_order(10, reference_to(root));
+            return true;
+        }
+        false
+    })
+    .expect("the corpus is present");
+
+    // If this returns at all, the cycle was broken; categories still read.
+    let tables = doc.tables();
+    assert!(!tables.is_empty());
+}
+
+/// A merge whose extents reach the top of `usize` — the shape a reversed or
+/// wrapped colon tract used to yield — must not overflow the range arithmetic
+/// that decides which cell a merge covers.
+#[test]
+fn a_hostile_merge_extent_does_not_overflow_merge_covering() {
+    let doc = fixture!("numbers-values.numbers");
+    let mut t = table(&doc, "Zellarten");
+    t.merges = vec![Merge {
+        row: 0,
+        column: 0,
+        rows: usize::MAX,
+        columns: usize::MAX,
+    }];
+    // The lookup returns rather than panicking on `row + rows`.
+    assert_eq!(t.merge_covering(5, 5), Some(t.merges[0]));
+    assert_eq!(
+        t.merge_covering(usize::MAX - 1, usize::MAX - 1),
+        Some(t.merges[0])
+    );
+}
+
+/// A predicate's immediate number keeps its fraction. Spliced 2.5 into a
+/// highlighting rule that compared against 0, it reads back as 2.5, not 2.
+#[test]
+fn a_fractional_predicate_threshold_reads_back_whole() {
+    let Some(doc) = spliced("numbers-rules.numbers", |_, mt, obj| {
+        if mt != 6010 {
+            return false;
+        }
+        // 6010 → field 3 wrapper → a rule (field 1) → predicate (field 1) →
+        // one of its args (4/5/6) → data (field 2) → the immediate (field 1).
+        edit_first(obj, 3, |wrapper| {
+            edit_first(wrapper, 1, |rule| {
+                edit_first(rule, 1, |pred| {
+                    [4u32, 5, 6].into_iter().any(|arg| {
+                        edit_first(pred, arg, |arg| {
+                            edit_first(arg, 2, |data| {
+                                if matches!(data.get(1), Some(Value::Fixed64(_))) {
+                                    data.set(1, Value::Fixed64(2.5f64.to_le_bytes()));
+                                    true
+                                } else {
+                                    false
+                                }
+                            })
+                        })
+                    })
+                })
+            })
+        })
+    }) else {
+        return;
+    };
+
+    let threshold = doc
+        .tables()
+        .iter()
+        .flat_map(|t| t.conditional_styles.clone())
+        .flat_map(|s| s.rules)
+        .find_map(|r| {
+            r.predicate
+                .values
+                .into_iter()
+                .find(|v| v.to_text() == "2.5")
+        });
+    assert_eq!(
+        threshold,
+        Some(CellValue::Number(
+            iwork::table::Decimal::parse("2.5").unwrap()
+        )),
+        "the fractional threshold was truncated"
+    );
 }
 
 // -- the oracle --------------------------------------------------------------

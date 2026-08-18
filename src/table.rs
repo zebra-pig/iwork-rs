@@ -67,6 +67,22 @@ impl Decimal {
             .unwrap_or(f64::NAN)
     }
 
+    /// A decimal that keeps a `double`'s value, not its integer part.
+    ///
+    /// The predicate and category archives store an immediate number as an IEEE
+    /// `double`; casting that straight to the mantissa with a zero exponent
+    /// reads `2.5` back as `2`. Going through the float's own shortest decimal
+    /// text — `"2.5"`, which [`Decimal::parse`] turns into `25 × 10⁻¹` — keeps
+    /// the fraction. A value too wide for the 128-bit mantissa (or not finite)
+    /// falls back to the truncating cast rather than failing, since these are
+    /// read paths that must always return *something*.
+    pub fn from_f64(value: f64) -> Decimal {
+        Decimal::parse(&format!("{value}")).unwrap_or(Decimal {
+            mantissa: value as i128,
+            exponent: 0,
+        })
+    }
+
     /// Read a decimal from the digits the user typed, keeping them.
     ///
     /// `1.10` is kept as `110 × 10⁻²` rather than as the nearest `f64`, which is
@@ -94,7 +110,10 @@ impl Decimal {
         }
         Some(Decimal {
             mantissa: joined.parse().ok()?,
-            exponent: exponent - fraction.len() as i32,
+            // Hostile input reaches here through `iwork set-cell n:…`: an
+            // exponent of `i32::MIN` less a fraction's length underflows. A
+            // number this crate cannot place is refused, not wrapped.
+            exponent: exponent.checked_sub(i32::try_from(fraction.len()).ok()?)?,
         })
     }
 }
@@ -1287,10 +1306,9 @@ fn cell_value(message: &Message) -> Option<CellValue> {
         )),
         4 => {
             let number = message.bytes(4).and_then(decode_nested)?;
-            Some(CellValue::Number(Decimal {
-                mantissa: double_field(&number, 1) as i128,
-                exponent: 0,
-            }))
+            Some(CellValue::Number(Decimal::from_f64(double_field(
+                &number, 1,
+            ))))
         }
         5 => Some(CellValue::Text(
             message
@@ -1415,10 +1433,9 @@ fn predicate_value(data: &Message) -> Option<CellValue> {
         return Some(CellValue::Duration(f64::from_le_bytes(*bits)));
     }
     if let Some(Value::Fixed64(bits)) = data.get(1) {
-        return Some(CellValue::Number(Decimal {
-            mantissa: f64::from_le_bytes(*bits) as i128,
-            exponent: 0,
-        }));
+        return Some(CellValue::Number(Decimal::from_f64(f64::from_le_bytes(
+            *bits,
+        ))));
     }
     None
 }
@@ -1597,20 +1614,61 @@ pub struct Group {
     pub children: Vec<Group>,
 }
 
+/// How deep a category's group tree is allowed to recurse before the reader
+/// stops. Real categories nest a handful of levels at most; the cap is only
+/// here so a field-10 reference cycle — a node whose child list points back at
+/// an ancestor — yields a truncated read rather than a stack overflow.
+const MAX_GROUP_DEPTH: usize = 256;
+
 impl Group {
     fn decode(document: &crate::Document, message: &Message, collapsed: &[Uuid]) -> Group {
+        Group::decode_at(document, message, collapsed, 0, &mut Vec::new())
+    }
+
+    fn decode_at(
+        document: &crate::Document,
+        message: &Message,
+        collapsed: &[Uuid],
+        depth: usize,
+        seen: &mut Vec<u64>,
+    ) -> Group {
         let uid = message.bytes(1).and_then(Uuid::read).unwrap_or_default();
         let mut children = Vec::new();
-        for value in message.all(3) {
-            let Value::Bytes(raw) = value else { continue };
-            if let Some(child) = decode_nested(raw) {
-                children.push(Group::decode(document, &child, collapsed));
+        // Past the cap the node is read but its children are not followed — a
+        // bounded, truncated tree instead of an unbounded descent.
+        if depth < MAX_GROUP_DEPTH {
+            for value in message.all(3) {
+                let Value::Bytes(raw) = value else { continue };
+                if let Some(child) = decode_nested(raw) {
+                    children.push(Group::decode_at(
+                        document,
+                        &child,
+                        collapsed,
+                        depth + 1,
+                        seen,
+                    ));
+                }
             }
-        }
-        for value in message.all(10) {
-            let Value::Bytes(raw) = value else { continue };
-            if let Some(child) = reference(raw).and_then(|id| archive(document, id)) {
-                children.push(Group::decode(document, &child, collapsed));
+            for value in message.all(10) {
+                let Value::Bytes(raw) = value else { continue };
+                let Some(id) = reference(raw) else { continue };
+                // A node reached once on this path is not followed again: that
+                // is the cycle break, and it also spares a diamond of shared
+                // children an exponential re-walk.
+                if seen.contains(&id) {
+                    continue;
+                }
+                if let Some(child) = archive(document, id) {
+                    seen.push(id);
+                    children.push(Group::decode_at(
+                        document,
+                        &child,
+                        collapsed,
+                        depth + 1,
+                        seen,
+                    ));
+                    seen.pop();
+                }
             }
         }
         // Field 8 is the index set of rows and field 9 the lookup positions;
@@ -2116,9 +2174,14 @@ impl Table {
     /// mark of its own, so the only way to know that `E9` is not a cell is to
     /// ask which rectangle covers it.
     pub fn merge_covering(&self, row: usize, column: usize) -> Option<Merge> {
+        // `saturating_add` rather than `+`: `span` now refuses a reversed tract,
+        // but a merge read through the region-map fallback still carries
+        // file-supplied extents, and `row + rows` must not overflow into a panic
+        // (debug) or a wrap that hides the merge (release) — either would let a
+        // write slip into a covered cell.
         self.merges.iter().copied().find(|m| {
-            (m.row..m.row + m.rows).contains(&row)
-                && (m.column..m.column + m.columns).contains(&column)
+            (m.row..m.row.saturating_add(m.rows)).contains(&row)
+                && (m.column..m.column.saturating_add(m.columns)).contains(&column)
         })
     }
 
@@ -2198,6 +2261,7 @@ impl Table {
         for (name, list) in [
             ("string", &self.side.strings),
             ("format", &self.side.formats),
+            ("control", &self.side.controls),
         ] {
             for entry in list.entries.values() {
                 let counted = used.get(&(name, entry.key)).copied().unwrap_or(0);
@@ -2299,7 +2363,15 @@ pub fn parse_date(text: &str) -> Option<f64> {
     let year: i64 = parts.next()?.parse().ok()?;
     let month: i64 = parts.next()?.parse().ok()?;
     let day: i64 = parts.next()?.parse().ok()?;
-    if parts.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+    // A four-digit calendar year is the widest Numbers itself will hold; the
+    // bound is also what keeps `days_from_civil`'s `year × 146097` and the
+    // `days × 86400` below it from overflowing on hostile `iwork set-cell d:…`
+    // input like `25000000000000000-01-01`.
+    if parts.next().is_some()
+        || !(1..=9999).contains(&year)
+        || !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+    {
         return None;
     }
     let mut clock = time.split(':');
@@ -2884,11 +2956,14 @@ fn merges_from_owner(model: &Message) -> Vec<Merge> {
                     let (Some(columns), Some(rows)) = (span(&tract, 3), span(&tract, 4)) else {
                         continue;
                     };
+                    // `span` guarantees `.1 >= .0`, so the subtraction cannot
+                    // underflow; the `+ 1` is saturated in case a tract names an
+                    // extent all the way up to `usize::MAX`.
                     out.push(Merge {
                         row: rows.0,
                         column: columns.0,
-                        rows: rows.1 - rows.0 + 1,
-                        columns: columns.1 - columns.0 + 1,
+                        rows: (rows.1 - rows.0).saturating_add(1),
+                        columns: (columns.1 - columns.0).saturating_add(1),
                     });
                 }
                 Some(36) => {
@@ -2919,13 +2994,20 @@ fn merges_from_owner(model: &Message) -> Vec<Merge> {
 }
 
 /// First `{range_begin, range_end?}` entry of a colon tract's axis.
+///
+/// Both bounds come straight off the wire, so a hostile tract can name
+/// `range_end` below `range_begin`. That reversal is refused here rather than
+/// left to underflow `end - begin` in the caller: a degenerate axis is no merge
+/// at all, which is the safe reading — it never makes a real merge invisible,
+/// only declines to invent one from nonsense.
 fn span(tract: &Message, number: u32) -> Option<(usize, usize)> {
     let Value::Bytes(raw) = tract.get(number)? else {
         return None;
     };
     let range = decode_nested(raw)?;
     let begin = range.varint(1)? as usize;
-    Some((begin, range.varint(2).map(|e| e as usize).unwrap_or(begin)))
+    let end = range.varint(2).map(|e| e as usize).unwrap_or(begin);
+    (end >= begin).then_some((begin, end))
 }
 
 /// Protobuf zigzag decoding, which `AST_column` and `AST_row` use and the
@@ -2993,6 +3075,15 @@ fn read_cells(document: &crate::Document, store: &Message, side: &SideTables, ta
             continue;
         };
         let tile_id = entry.varint(1).unwrap_or(0) as usize;
+        // `tile_id` and `tile_size` are both off the wire; a tile id of 2⁶⁰
+        // overflows the product. An id that cannot name a real base row is
+        // skipped rather than wrapped to a plausible-looking one.
+        let Some(base_row) = tile_id.checked_mul(tile_size) else {
+            table
+                .problems
+                .push(format!("tile {tile_id}: base row is out of range"));
+            continue;
+        };
         let Some(tile) = entry
             .bytes(2)
             .and_then(reference)
@@ -3006,7 +3097,9 @@ fn read_cells(document: &crate::Document, store: &Message, side: &SideTables, ta
             let Some(info) = decode_nested(raw) else {
                 continue;
             };
-            let row = tile_id * tile_size + info.varint(1).unwrap_or(0) as usize;
+            let Some(row) = base_row.checked_add(info.varint(1).unwrap_or(0) as usize) else {
+                continue;
+            };
             let (Some(buffer), Some(offsets)) = (info.bytes(6), info.bytes(7)) else {
                 // Fields 3 and 4 are the pre-BNC pair. They are `required`, so
                 // they are always present and always meaningless in a modern
