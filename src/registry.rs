@@ -108,16 +108,102 @@ const ENTRIES: &[Entry] = &[
         confidence: Confirmed,
         app: App::Any,
     },
+    // **Not the annotation authors this table used to call them.** 11014/11015
+    // were carried over from prior art as `TSP.AnnotationAuthorArchive` and its
+    // storage, and every document in the corpus appeared to have three authors
+    // and a list of them. It has neither. The 15.3.1 registry names them
+    // `TSP.DataMetadata` and `TSP.DataMetadataMap`, and the payloads agree
+    // exactly: the map is `repeated {data_identifier, data_metadata}` whose
+    // identifiers are the media ids of the *theme assets* — the images a
+    // document names but does not carry — and each metadata is one
+    // `fallback_color`, the colour drawn where the asset is not there.
+    // `pages-report` maps 11, 10 and 14, which are its three unstored assets.
+    //
+    // The real annotation authors are 212/213, below, and there are none.
     Entry {
         message_type: 11014,
-        name: "TSP.AnnotationAuthorArchive",
-        confidence: Inferred,
+        name: "TSP.DataMetadata",
+        confidence: Confirmed,
         app: App::Any,
     },
     Entry {
         message_type: 11015,
-        name: "TSP.AnnotationAuthorStorageArchive",
-        confidence: Inferred,
+        name: "TSP.DataMetadataMap",
+        confidence: Confirmed,
+        app: App::Any,
+    },
+    // -- annotations ---------------------------------------------------------
+    // The author of a comment or of a tracked change: a name, a colour and the
+    // collaboration identity it belongs to. **Nothing in the corpus has one** —
+    // 924 documents were swept — so the fields are read off the 15.3.1 schema
+    // and the decoder has never met a filled-in author.
+    Entry {
+        message_type: 212,
+        name: "TSK.AnnotationAuthorArchive",
+        confidence: Unverified,
+        app: App::Any,
+    },
+    // Every document carries exactly one, in `Index/AnnotationAuthorStorage*`,
+    // and in all 924 it is an **empty payload**: zero authors. That the object
+    // exists is Confirmed; that field 1 lists authors is the schema's word.
+    Entry {
+        message_type: 213,
+        name: "TSK.AnnotationAuthorStorageArchive",
+        confidence: Confirmed,
+        app: App::Any,
+    },
+    // A comment's text, date, author and replies. Hangs off
+    // `TSD.DrawableArchive.comment` (field 6) for an object comment, off a
+    // `TSWP.CommentInfoArchive` for one in text, and off a
+    // `TST.CommentStorageWrapperArchive` for one on a cell.
+    Entry {
+        message_type: 3056,
+        name: "TSD.CommentStorageArchive",
+        confidence: Unverified,
+        app: App::Any,
+    },
+    // The floating shape a text comment is drawn as — a `TSWP.ShapeInfoArchive`
+    // with a comment storage hung off it.
+    Entry {
+        message_type: 2014,
+        name: "TSWP.CommentInfoArchive",
+        confidence: Unverified,
+        app: App::Any,
+    },
+    // The anchor a comment puts into text: `table_highlight` (23) and
+    // `table_overlapping_highlight` (25) both point at one.
+    Entry {
+        message_type: 2013,
+        name: "TSWP.HighlightArchive",
+        confidence: Unverified,
+        app: App::Any,
+    },
+    // -- change tracking -----------------------------------------------------
+    // One insertion or one deletion. `table_insertion` (21) and
+    // `table_deletion` (22) point at these. The kind has **no zero value** —
+    // insertion is 1, deletion 2 — so an all-default archive is invalid rather
+    // than an insertion.
+    Entry {
+        message_type: 2060,
+        name: "TSWP.ChangeArchive",
+        confidence: Unverified,
+        app: App::Any,
+    },
+    // The author-and-time an editing session belongs to;
+    // `TP.DocumentArchive.change_sessions` (16) lists them.
+    Entry {
+        message_type: 2062,
+        name: "TSWP.ChangeSessionArchive",
+        confidence: Unverified,
+        app: App::Any,
+    },
+    // A pre-collaboration change author, kept for documents old enough to have
+    // one. Its Objective-C class is `TSKAnnotationAuthor`, the same class 212
+    // unarchives to.
+    Entry {
+        message_type: 2061,
+        name: "TSK.DeprecatedChangeAuthorArchive",
+        confidence: Unverified,
         app: App::Any,
     },
     // -- word processing -----------------------------------------------------
