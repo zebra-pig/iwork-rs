@@ -2,7 +2,8 @@
 //!
 //! All three apps share one format, in four layers:
 //!
-//! 1. a ZIP package whose entries are all *stored* ([`package`]);
+//! 1. a package — a ZIP whose entries are all *stored*, or a directory holding
+//!    the same entries ([`package`]);
 //! 2. `Index/*.iwa` streams framed as raw Snappy blocks ([`iwa`]);
 //! 3. a flat stream of length-delimited protobuf objects ([`iwa`], [`pb`]);
 //! 4. an object graph whose shape depends on the app ([`document`], [`style`]).
@@ -13,6 +14,11 @@
 //! place. That is enough to inspect a document and rewrite parts of it without
 //! knowing every message definition, and it means an unrecognised object is
 //! carried through untouched rather than lost.
+//!
+//! A document is *created* by copying one that works — a template bundle, which
+//! is a package like any other ([`Document::from_template`]). Nothing here
+//! synthesises a document from nothing: inventing a message crashed Pages every
+//! time it was tried.
 //!
 //! ```no_run
 //! # fn main() -> Result<(), iwork::Error> {

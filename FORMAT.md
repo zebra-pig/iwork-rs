@@ -1,7 +1,8 @@
 # The iWork file format
 
-What `.pages`, `.numbers` and `.key` actually contain, as of iWork 6/13-era
-documents (`fileFormatVersion 2.3.4`).
+What `.pages`, `.numbers` and `.key` actually contain, as of **iWork 15.3.1**
+(`fileFormatVersion 26.3.1`). The one older sample used here, a Pages article,
+is `2.3.4`, and where the two differ this says so.
 
 Derived by observation from real documents; every structural claim here is
 asserted by the test suite. Where something is inferred rather than proven, it
@@ -9,21 +10,50 @@ says so.
 
 Documents used:
 
+- **27 documents written by Pages, Numbers and Keynote 15.3.1**, which
+  `scripts/make-fixtures.sh` rebuilds from the apps: 24 app-written, two of them
+  Apple template bundles renamed, one password-protected. Every corpus walker
+  skips the locked one by shape, so 26 are readable and most counts below are
+  over those.
 - a 15 MB Pages article — 485 objects, 8 streams, 2 TIFFs, 2 charts, German text
 - two Numbers spreadsheets — 738 and 647 objects, 97 and 37 streams
 - four further Pages documents, used for the style graph — 654 styles between them
-- four Keynote decks — 993 to 1466 objects, 1 to 19 slides, 17 slide layouts
+- six Keynote decks — 993 to 1466 objects, 1 to 46 slides, 17 slide layouts
   each, and between them every drawable a script can make, every legacy chart
-  type, five transitions and two skipped slides
+  type, all 44 transition effects and two skipped slides
+- **all 901 template bundles** the three apps ship, scanned whenever a claim
+  needed a population rather than a sample
 
 An older, pre-2013 `.pages` is an entirely different format — a bundle around an
 XML `index.xml.gz`. None of this applies to those.
 
 ---
 
+## Contents
+
+| § | |
+|---|---|
+| [1](#1-the-package) | The package — the container, its two shapes, templates, previews |
+| [2](#2-iwa-framing) | IWA framing — Snappy blocks and their limits |
+| [3](#3-the-object-stream) | The object stream — archives, message types, version patches |
+| [4](#4-the-document-graph) | The document graph — components, roots, text, styles |
+| [5](#5-tables--tst) | Tables — `TST`: tiles, cell records, formats, organisation |
+| [6](#6-drawables--tsd) | Drawables — `TSD`: geometry, containment, object styles |
+| [7](#7-media--tspdatainfo-and-the-data-directory) | Media — `TSP.DataInfo` and `Data/` |
+| [8](#8-pages-structure--tp) | Pages structure — `TP`: sections, headers, page templates |
+| [9](#9-formulas--tsce) | Formulas — `TSCE`: the AST, references, the text they print as |
+| [10](#10-charts--tsch) | Charts — `TSCH`: the grid, the mediator, the styles |
+| [11](#11-metadata-and-document-identity) | Metadata and identity — the five UUIDs, encryption |
+| [12](#12-annotations--comments-authors-and-change-tracking) | Annotations — comments, authors, change tracking |
+| [13](#13-keynote-structure--kn) | Keynote structure — `KN`: the show, builds, transitions |
+| [Writing](#writing-documents) | Writing documents — the rules a writer must respect |
+
+---
+
 ## 1. The package
 
-A ZIP archive. **Every entry uses compression method 0 (stored).** iWork relies
+A ZIP archive — or a directory of the same entries, which is the other half of
+this section. **Every entry uses compression method 0 (stored).** iWork relies
 on that so media can be mapped straight out of the file, and the index streams
 carry their own compression already.
 
@@ -56,6 +86,71 @@ booleans — and `fileFormatVersion 26.3.1`. **§11** has the ten of them, which
 them a copy may keep, and what a password-protected package looks like instead
 of all this.
 
+### Two shapes: a file and a directory
+
+`File > Advanced > Change File Type` writes the same entries into a **folder**
+named like the document instead of into a ZIP. Apple recommends it for
+documents past a few hundred megabytes, where rewriting one large file on every
+save is the expensive part.
+
+The two are two content types, not two ways of storing one:
+
+| On disk | `mdls -name kMDItemContentType` | Conforms to |
+|---|---|---|
+| `Report.pages` the file | `com.apple.iwork.pages.sffpages` | — *single-file format* |
+| `Report.pages` the folder | `com.apple.iwork.pages.pages` | `com.apple.package`, `public.directory` |
+
+Inside, they are identical: the same entry names — `Index/Document.iwa`,
+`Metadata/Properties.plist` — as real paths below the folder, with the same
+bytes. Nothing in the document says which shape it is in.
+
+Two things measured rather than assumed, both with Pages 15.3.1:
+
+- **The app opens a package built by hand.** A fixture unzipped into
+  `PkgProbe.pages/` was opened, read back and saved.
+- **Asked from a script to save it, the app writes one file back over the
+  folder.** `Change File Type` is a menu item and a menu item needs a window, so
+  what a document a *user* has set to the package form does on save is not
+  something a locked screen can establish; what is established is that a package
+  handed to the app and saved comes back a ZIP. This crate does the opposite and
+  keeps the shape it read, because a save that silently changed the user's file
+  type would be a save that lost something.
+
+**Templates are packages too.** `.template` (Pages), `.nmbtemplate` (Numbers)
+and `.kth` (Keynote) hold the entries above and nothing else — all 901 bundles
+inside the three installed apps are ZIPs, not one of them the directory form.
+What they do *not* have is as informative as what they do: **no
+`Index/ViewState.iwa`, no `Metadata/BuildVersionHistory.plist` and no
+previews**. A renamed template opens as a document in all three apps; §11 has
+the identity a new document gets instead of the template's.
+
+### Previews go stale, and are left alone
+
+`preview.jpg`, `preview-web.jpg` and `preview-micro.jpg` are the picture the
+Finder and Quick Look show. An edit through this crate makes them a picture of
+the document as it was, and this crate leaves them exactly where they are. The
+evidence for that being the right choice, rather than the lazy one:
+
+- **Nothing refers to them.** Not one object stream in 927 packages — the 26
+  readable fixtures and all 901 bundled templates — contains the string
+  `preview`. They
+  are not registered media (§7) and no component names them.
+- **They are optional.** All 901 templates have none, and two fixtures are
+  renamed template bundles that Pages and Numbers open. A password-protected
+  package has none either (§11).
+- **The app redraws them.** Three documents made from templates had no previews;
+  Pages, Numbers and Keynote each opened one and saved it, and each came back
+  with three.
+- **Removing them would cost byte-identity.** A no-op save reproduces every
+  entry, and that guarantee is worth more than a thumbnail that is wrong until
+  the app next saves — which is exactly the state iWork itself leaves them in
+  while a document is open and edited.
+
+So `iwork check` says nothing about a stale preview; `iwork inspect` says how
+many there are and what they are. `Document::strip_previews` is there for the
+caller who would rather have no thumbnail than a wrong one, and it is never
+automatic.
+
 ---
 
 ## 2. IWA framing
@@ -71,7 +166,13 @@ repeat until EOF:
 ```
 
 The 64 KiB block size is confirmed by observation: a 43 KB stylesheet stream
-decompresses to blocks of `[65536, 65536, 65536, 43329]`.
+decompresses to blocks of `[65536, 65536, 65536, 43329]`. It is also confirmed
+by census — **24,358 blocks across 927 packages, maximum 65,536, none over** —
+which is what lets a reader treat it as a limit rather than a habit. That
+matters, because a raw Snappy block begins with its uncompressed length as a
+varint and nothing in the container constrains it: five bytes can ask for four
+gigabytes, and a decoder that believes the number allocates it. A block
+claiming more than 65,536 bytes is refused here before anything is allocated.
 
 > **Object framing is independent of block boundaries.** A single object can
 > straddle two Snappy blocks, so every block must be concatenated *before* the
@@ -109,6 +210,15 @@ repeat until end of stream:
 Payloads follow the `ArchiveInfo` immediately, in declaration order. Almost
 every object carries exactly one message; the exceptions are below.
 
+Two things a reader must not take on trust here, both found by fuzzing the
+framing: **field 3 is a claim about bytes that have to be in the stream** — a
+`MessageInfo` saying 2^60 is a request to allocate 2^60 bytes, so the lengths an
+object declares are checked against what is left of the stream before any of it
+is reserved — and **an `ArchiveInfo` with no `MessageInfo` in it is legal
+protobuf**, three bytes long, and an object with no payload at all. Its type is
+0 and its payload is empty; indexing the first message of it is a crash in the
+middle of an otherwise ordinary document.
+
 ### Version patches — `MessageInfo.type == 0`
 
 `0` is not a message type. It marks a **patch**: an older encoding of the object
@@ -127,7 +237,8 @@ each patch carries the extra fields that place it:
 A patch's `MessageInfo.version` is the sentinel `[0xFFFF, 0xFFFF, 0xFFFFFFFF]`.
 
 **What Numbers, Pages and Keynote 15.3.1 actually write** — measured over the
-twelve-document corpus and again after an edit made by Numbers itself:
+corpus (twelve documents when this was written, 26 now, with the same answer)
+and again after an edit made by Numbers itself:
 
 - **One patched object per Numbers document** — the `TN.UIStateArchive` (12026)
   in the view-state component, always with three patches, for `[11,0,*]`,
@@ -328,7 +439,10 @@ is this repository's, and is what decides what an edit does to each one.
 | 27 | `table_tatechuyoko` | run | `TSWP.TateChuYokoFieldArchive` (10023) | — |
 | 28 | `table_drop_cap_style` | paragraph | `TSWP.DropCapStyleArchive` (10024) | 208 |
 
-The counts are over the thirteen generated fixtures, 389 storages. The eight
+The counts are over the thirteen generated fixtures this table was measured
+against, 389 storages; the corpus is 26 documents and 1,454 storages now, and
+no table outside this list has appeared in it —
+`no_storage_in_the_corpus_carries_an_unknown_table` is what says so. The eight
 tables with no count were never seen: no bundled template has a footnote, a
 tracked change, a comment, a bookmark or ruby text either — all 901 template
 bundles were scanned and every one of fields 15, 16, 18, 20–23, 25 and 26 is
@@ -2747,7 +2861,7 @@ templates, and no eleventh anywhere:
 | Key | Type | What it is |
 |---|---|---|
 | `documentUUID` | string | this file's identity |
-| `shareUUID` | string | equal to `documentUUID` in all 924 documents |
+| `shareUUID` | string | equal to `documentUUID` in all 927 documents |
 | `stableDocumentUUID` | string | the **lineage** — what this file was copied from |
 | `privateUUID` | string | |
 | `versionUUID` | string | this *save* |
@@ -2800,6 +2914,33 @@ layer, and there is no iCloud account here to watch it matter. The claim that a
 fresh `documentUUID` prevents a collision therefore rests on the measured Save
 As behaviour and on the app re-identifying byte copies of its own accord —
 not on an observed collision. *Inferred.*
+
+### A document made from a template keeps nothing
+
+A copy keeps its lineage. A document stamped out of a template does **not**,
+and the difference is measurable in the corpus without a probe:
+
+| | `stableDocumentUUID` | `documentUUID` |
+|---|---|---|
+| `00C_Textbook_Portrait/ISO.template` | `A0C50246-…` | `65D82B29-…` |
+| `pages-toc.pages`, which Pages made from it | its own, new | the same, new |
+
+The template has a lineage of its own — it was itself made from something — and
+none of it reaches the document: `pages-toc` has `stableDocumentUUID` equal to
+its own fresh `documentUUID`, and `pages-lists` (from
+`04_Real_Estate_Flyer/ISO`) and `numbers-categories` (from
+`21_BasicCategories/Traditional`) agree. So there are two identity rules, not
+one, and `Lineage::Kept` / `Lineage::Fresh` is which is being applied.
+
+The app also writes **`TSA.DocumentArchive.template_identifier`** —
+`Application/04_Real_Estate_Flyer/ISO`, the bundle's path inside the app
+without its extension, and the same string AppleScript addresses a template by.
+A template bundle itself has no `template_identifier` at all.
+
+*Confirmed* by `a_document_from_a_template_has_an_identity_of_its_own` and
+`a_document_from_a_template_records_which_one`, and accepted by all three apps:
+each opened a document `from_template` wrote, saved it, and left every UUID
+where this crate put it.
 
 ### What the document archive says about itself
 
@@ -2880,9 +3021,9 @@ and will not write an encrypted package.
 **Read the boundary first.** Everything in this section below the author
 storage is decoded from the 15.3.1 schema and **has never met a live example**.
 
-* All 23 fixtures and all 901 template bundles the three apps ship carry
-  exactly one `TSK.AnnotationAuthorStorageArchive` (213), and in every one of
-  those 924 its payload is **zero bytes long**. No authors, therefore no
+* All 26 readable fixtures and all 901 template bundles the three apps ship
+  carry exactly one `TSK.AnnotationAuthorStorageArchive` (213), and in every one
+  of those 927 its payload is **zero bytes long**. No authors, therefore no
   comments and no tracked changes.
 * Not one document anywhere on this machine has a 212, a 2013, a 2014, a 2060,
   a 2061, a 2062 or a 3056 in it, and no storage carries field 21, 22, 23 or 25.
@@ -2996,7 +3137,8 @@ wrong; *certain* that guessing is worse than declining.
 description, and it is the one thing in this area with a real oracle:
 `description` on an `image`, read-write in all three dictionaries, cocoa key
 `scriptAccessibilityDescription`. It is read by `Drawable::description` and
-shows in `iwork drawables`; nine fixtures carry one. *Confirmed.*
+shows in `iwork drawables`; **twelve fixtures carry 59 between them**,
+asserted by `alt_text_is_read_wherever_the_corpus_has_it`. *Confirmed.*
 
 The comment field beside it, `TSD.DrawableArchive.comment` (6), is read by
 `Drawable::comment` and is absent everywhere.
@@ -3482,7 +3624,10 @@ Rules a writer must respect:
 8. **Declare every reference that leaves its component** in the referring
    component's `external_references`. An undeclared one does not always crash —
    it can simply make the edit invisible, which is worse.
-9. **Previews go stale** — they are not regenerated by anything but iWork.
+9. **Previews go stale, and are left alone anyway** — nothing in the document
+   refers to them, the app redraws them the next time it saves, and removing
+   them would cost the byte-identity a no-op save promises. §1 has the
+   evidence and the one case for taking them out.
 10. **Never rewrite an object that carries version patches** (§3). The patches
     are older encodings of what you just replaced, and leaving them makes the
     document say two different things depending on the app that opens it. In
@@ -3561,3 +3706,19 @@ Rules a writer must respect:
     same object UUID is the way this corrupts a document that still opens.
     Everything else about the entry is copied from the component being copied,
     down to its `save_token`. §13.
+24. **A document made from a template is a new document, not a copy of the
+    template.** Rule 19's four UUIDs, and `stableDocumentUUID` **as well**: the
+    apps give a template-instantiated document a lineage beginning with itself,
+    measured on three of them against the bundles they came from.
+    `TSA.DocumentArchive.template_identifier` records which template — the app
+    writes it and the bundle does not have it. §1 and §11.
+25. **Keep the shape the document was in.** A package (a directory) is saved as
+    a package and a single file as a single file. The user chose that in
+    `File > Advanced > Change File Type` and nothing in the document records
+    it, so a writer that converted would be discarding a decision it cannot
+    read back. §1.
+26. **An entry name is a path, and a path from a stranger.** Writing the package
+    form joins each entry name to a directory, so a name that is absolute or
+    that contains `..` is refused rather than written; so is one in `iwork
+    extract`. Every real package uses `Index/…`, `Metadata/…`, `Data/…` and four
+    root files. `iwork check` reports anything else.

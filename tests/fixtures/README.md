@@ -30,13 +30,22 @@ If you have Pages, Numbers and Keynote, the apps will write you a corpus:
 ../../scripts/make-fixtures.sh
 ```
 
-It builds twenty documents into `generated/`: plain, styled and non-Latin text;
+It builds **27 documents** into `generated/`: plain, styled and non-Latin text;
 a table and a photo; lists; sections, facing pages, a table of contents, a
-page-layout document with linked text boxes, page numbering and columns; typed
-cells, formats, formulas, sort rules, filters, categories, pivots and
-hyperlinks; a 301-row imported table; and two decks with presenter notes,
-shapes and a skipped slide. Existing files are left alone unless `--force` is
+page-layout document with linked text boxes, page numbering and columns; a
+password-protected one; typed cells, formats, formulas, sort rules, filters,
+categories, pivots, charts and hyperlinks; a 301-row imported table; and six
+decks with presenter notes, shapes, charts, a skipped slide, all 44 transitions
+and the playback settings. Existing files are left alone unless `--force` is
 given. Nothing in `generated/` is committed either; the generator is.
+
+`pages-locked.pages` is the password-protected one and every corpus walker
+skips it **by shape** — the presence of a `.iwpv2` entry — rather than by name,
+because a reader pointing `IWORK_FIXTURES` at their own documents may well have
+one under another name.
+
+The suite reads the package form too, without a fixture in it: it writes each
+document out as a directory, reads it back and compares entry for entry.
 
 Most of the interesting ones come from Apple's own templates, because no
 scripting dictionary can create the feature: `make new document with properties
