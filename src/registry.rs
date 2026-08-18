@@ -163,6 +163,18 @@ const ENTRIES: &[Entry] = &[
         app: App::Any,
     },
     Entry {
+        message_type: 2003,
+        name: "TSWP.DrawableAttachmentArchive",
+        confidence: Confirmed,
+        app: App::Any,
+    },
+    Entry {
+        message_type: 2024,
+        name: "TSWP.ColumnStyleArchive",
+        confidence: Inferred,
+        app: App::Any,
+    },
+    Entry {
         message_type: 2025,
         name: "TSWP.ShapeStyleArchive",
         confidence: Inferred,
@@ -172,6 +184,43 @@ const ENTRIES: &[Entry] = &[
         message_type: 2026,
         name: "TSWP.TOCEntryStyleArchive",
         confidence: Unverified,
+        app: App::Any,
+    },
+    // The smart fields, all of which are anchored from `StorageArchive` field
+    // 11 and all of which wrap a `TSWP.SmartFieldArchive` carrying a UUID.
+    // 2031 is the placeholder — the commonest by far, 9335 of them across the
+    // installed templates, and what every "Company Name" in a Pages template
+    // is. 2032 is the hyperlink and its field 2 is the URL: three Numbers
+    // templates carry five between them, and none of the 640 Pages templates
+    // or 182 Keynote themes has one at all.
+    Entry {
+        message_type: 2031,
+        name: "TSWP.PlaceholderSmartFieldArchive",
+        confidence: Confirmed,
+        app: App::Any,
+    },
+    Entry {
+        message_type: 2032,
+        name: "TSWP.HyperlinkFieldArchive",
+        confidence: Confirmed,
+        app: App::Any,
+    },
+    Entry {
+        message_type: 2034,
+        name: "TSWP.DateTimeSmartFieldArchive",
+        confidence: Inferred,
+        app: App::Any,
+    },
+    Entry {
+        message_type: 2036,
+        name: "TSWP.MergeSmartFieldArchive",
+        confidence: Confirmed,
+        app: App::Any,
+    },
+    Entry {
+        message_type: 2043,
+        name: "TSWP.NumberAttachmentArchive",
+        confidence: Inferred,
         app: App::Any,
     },
     // -- drawables -----------------------------------------------------------

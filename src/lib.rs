@@ -50,7 +50,7 @@ pub mod style;
 pub mod table;
 pub mod text;
 
-pub use document::{Component, DataFile, Document, Kind, TextStorage};
+pub use document::{Component, DataFile, Document, Kind, TextEdit, TextStorage};
 pub use drawable::{Drawable, Geometry, Placement};
 pub use media::MediaReplacement;
 pub use package::Package;
@@ -86,6 +86,42 @@ pub enum Error {
         drawable: u64,
         reasons: Vec<String>,
     },
+    /// A character index was outside the storage's text.
+    TextRange {
+        storage: u64,
+        index: u64,
+        length: u64,
+    },
+    /// A character index landed between the halves of a surrogate pair —
+    /// inside an emoji, in other words. Indices count UTF-16 code units, and an
+    /// edit at half a character would leave two unpaired surrogates.
+    SplitSurrogate {
+        storage: u64,
+        index: u64,
+    },
+    /// The deleted range covered the character an object is anchored to: the
+    /// `U+FFFC` an image or a footnote mark stands in, the `U+0004` a section
+    /// begins after. Deleting it means deleting the object — Pages does exactly
+    /// that, removing the drawable, its mask, its z-order entry and its media
+    /// registration — and this crate will not, so it refuses.
+    AnchoredObject {
+        storage: u64,
+        index: u64,
+        table: &'static str,
+        object: Option<u64>,
+    },
+    /// The storage carries a length-delimited field that is not one of the
+    /// attribute tables this crate knows. It may well be one, and remapping it
+    /// by guesswork is how an edit silently damages a document.
+    UnknownAttributeTable {
+        storage: u64,
+        field: u32,
+    },
+    /// Text to be written contains a character that only means something with
+    /// an object behind it — see [`text::UNWRITABLE`].
+    UnwritableCharacter {
+        character: char,
+    },
 }
 
 impl std::fmt::Display for Error {
@@ -100,6 +136,46 @@ impl std::fmt::Display for Error {
                 f,
                 "drawable {drawable} carries edit state a replacement would falsify: {}",
                 reasons.join("; ")
+            ),
+            Error::TextRange {
+                storage,
+                index,
+                length,
+            } => write!(
+                f,
+                "storage {storage}: character {index} is outside its text, which is \
+                 {length} UTF-16 code unit(s) long"
+            ),
+            Error::SplitSurrogate { storage, index } => write!(
+                f,
+                "storage {storage}: character {index} is the second half of a surrogate \
+                 pair — indices count UTF-16 code units and an edit may not split one"
+            ),
+            Error::AnchoredObject {
+                storage,
+                index,
+                table,
+                object,
+            } => write!(
+                f,
+                "storage {storage}: character {index} anchors {} in {table}, and deleting \
+                 it means deleting that object from the whole document — which this crate \
+                 does not do",
+                match object {
+                    Some(id) => format!("object {id}"),
+                    None => "something".to_string(),
+                }
+            ),
+            Error::UnknownAttributeTable { storage, field } => write!(
+                f,
+                "storage {storage}: field {field} is not an attribute table this crate \
+                 knows, and an edit would have to guess how its entries are anchored"
+            ),
+            Error::UnwritableCharacter { character } => write!(
+                f,
+                "U+{:04X} stands for an object rather than for itself, and this crate \
+                 will not write one into text",
+                *character as u32
             ),
             Error::StyleInUse {
                 identifier,

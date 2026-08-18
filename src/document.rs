@@ -144,6 +144,111 @@ struct CellSite {
     column_bucket: Option<u64>,
 }
 
+/// `TSWP.HyperlinkFieldArchive` — `{1: {1: uuid}, 2: url}`.
+pub const TYPE_HYPERLINK_FIELD: u32 = 2032;
+
+/// One attribute table of one storage, as [`Document::storages`] found it.
+#[derive(Debug, Clone)]
+pub struct StorageTable {
+    pub field: u32,
+    pub name: &'static str,
+    pub anchoring: crate::text::Anchoring,
+    pub entries: usize,
+}
+
+/// A `TSWP.StorageArchive` and everything anchored into it.
+#[derive(Debug, Clone)]
+pub struct StorageInventory {
+    pub identifier: u64,
+    pub stream: String,
+    /// `StorageArchive.kind`: 0 body, 1 header, 2 footnote, 3 text box, 4 note,
+    /// 5 cell, 6 unclassified, 7 table of contents, 8 undefined. The default is
+    /// 3, so a storage with no field 1 is a text box.
+    pub kind: u64,
+    /// Length of the text in UTF-16 code units.
+    pub length: u64,
+    pub paragraphs: usize,
+    pub tables: Vec<StorageTable>,
+    /// A length-delimited field that is not a table this crate knows — the
+    /// reason an edit on this storage would be refused.
+    pub unknown_field: Option<u32>,
+}
+
+impl StorageInventory {
+    pub fn kind_name(&self) -> &'static str {
+        match self.kind {
+            0 => "body",
+            1 => "header",
+            2 => "footnote",
+            3 => "text box",
+            4 => "note",
+            5 => "cell",
+            6 => "unclassified",
+            7 => "table of contents",
+            _ => "undefined",
+        }
+    }
+}
+
+/// A hyperlink or other smart field, and the text it covers.
+#[derive(Debug, Clone)]
+pub struct SmartField {
+    pub storage: u64,
+    /// The field archive — 2031 placeholder, 2032 hyperlink, 2034 date and
+    /// time, 2036 mail merge, and the rest of 2031–2042.
+    pub object: u64,
+    pub message_type: u32,
+    /// Characters the field covers, in UTF-16 code units.
+    pub range: Range<u64>,
+    /// Field 2 of the archive. On a hyperlink (2032) it is the **URL**; on a
+    /// placeholder (2031) there is none; on a mail-merge field (2036) it is the
+    /// contacts property the field stands for, which is why this is not called
+    /// `url`.
+    pub payload: Option<String>,
+    pub text: String,
+}
+
+/// One paragraph's list state — see [`Document::list_paragraphs`].
+#[derive(Debug, Clone)]
+pub struct ListParagraph {
+    pub range: Range<u64>,
+    /// Indent depth, counted from 0. Stored as `first` in the paragraph-data
+    /// table.
+    pub level: u64,
+    /// `TSWP.ListStyleArchive` in force, if the storage names one.
+    pub style: Option<u64>,
+    pub text: String,
+}
+
+/// The style over a run, resolved — see [`Document::style_of_run`].
+#[derive(Debug, Clone)]
+pub struct ResolvedStyle {
+    /// The object the run points at, named or not.
+    pub style: u64,
+    /// Nearest ancestor with a name, which is the style a user would say the
+    /// text is in.
+    pub named: Option<u64>,
+    pub name: Option<String>,
+    /// Set on the anonymous archives iWork writes for directly formatted text.
+    pub is_variation: bool,
+    /// `override_count`, field 10 — how many properties the archive claims to
+    /// override. Not maintained by this crate, and reported as it is found.
+    pub override_count: Option<u64>,
+    /// Properties set anywhere between the run and its named style, named where
+    /// this crate knows the field and as `bag.field` where it does not.
+    pub overrides: Vec<String>,
+}
+
+/// What one text edit did — see [`Document::replace_text`].
+#[derive(Debug, Clone)]
+pub struct TextEdit {
+    pub storage: u64,
+    /// Where it happened and how much moved, in UTF-16 code units.
+    pub edit: crate::text::Edit,
+    /// What became of the attribute tables.
+    pub report: crate::text::EditReport,
+}
+
 /// A run of styled text, held by `TSWP.StorageArchive`.
 #[derive(Debug, Clone)]
 pub struct TextStorage {
@@ -336,9 +441,72 @@ impl Document {
 
     /// Replace the contents of one text storage.
     ///
-    /// The attribute-run tables are rewritten to stay within the new length —
-    /// see [`crate::text::write`] for what that does and does not preserve.
-    pub fn set_text(&mut self, identifier: u64, new_text: &str) -> Result<(), Error> {
+    /// A full-range [`Document::replace_text`], which is what "select all and
+    /// type" is. The first paragraph keeps its style and the paragraphs of the
+    /// new text are given entries of their own where the storage had one per
+    /// paragraph before; nothing is left pointing at a character that is not
+    /// there any more.
+    pub fn set_text(&mut self, identifier: u64, new_text: &str) -> Result<TextEdit, Error> {
+        let length = text::length(&self.storage_text(identifier)?);
+        self.replace_text(identifier, 0..length, new_text)
+    }
+
+    /// Insert text at a character index, moving everything anchored past it.
+    ///
+    /// `at` counts **UTF-16 code units**, like every character index in the
+    /// format; see [`Document::replace_text`].
+    pub fn insert_text(
+        &mut self,
+        identifier: u64,
+        at: u64,
+        new_text: &str,
+    ) -> Result<TextEdit, Error> {
+        self.replace_text(identifier, at..at, new_text)
+    }
+
+    /// Delete a range of a storage's text, moving everything anchored past it
+    /// and dropping what was inside it.
+    ///
+    /// `range` counts **UTF-16 code units**; see [`Document::replace_text`].
+    pub fn delete_text(&mut self, identifier: u64, range: Range<u64>) -> Result<TextEdit, Error> {
+        self.replace_text(identifier, range, "")
+    }
+
+    /// Replace `range` of a storage's text with `new_text`, remapping every
+    /// attribute table the storage carries.
+    ///
+    /// **Indices are UTF-16 code units**, which is what the format counts:
+    /// `"🎬"` is two, and an index between its halves is
+    /// [`Error::SplitSurrogate`] rather than a corrupted string.
+    ///
+    /// Everything anchored into the storage moves with the text — paragraph,
+    /// list, character and layout styles, smart fields and hyperlinks, language
+    /// and dictation runs, tracked insertions and deletions, comment and pencil
+    /// annotations, bookmarks, drop caps, and the paragraph-start bookkeeping.
+    /// [`crate::text::TABLES`] is the whole inventory and [`crate::text::Edit`]
+    /// is what each kind does. Where the rules came from — a probe per rule,
+    /// with Pages performing the edit — is in `FORMAT.md` §Text.
+    ///
+    /// What it refuses rather than damaging:
+    ///
+    /// * a range covering the character an object is anchored to
+    ///   ([`Error::AnchoredObject`]) — an image, a footnote mark, a section
+    ///   break. Pages deletes the object; this crate cannot, so it declines;
+    /// * a storage carrying a table this crate does not know
+    ///   ([`Error::UnknownAttributeTable`]);
+    /// * text containing `U+FFFC`, `U+0004` or `U+0005`
+    ///   ([`Error::UnwritableCharacter`]), which stand for objects;
+    /// * an index inside a surrogate pair, or outside the text.
+    pub fn replace_text(
+        &mut self,
+        identifier: u64,
+        range: Range<u64>,
+        new_text: &str,
+    ) -> Result<TextEdit, Error> {
+        if let Some(character) = new_text.chars().find(|c| text::UNWRITABLE.contains(c)) {
+            return Err(Error::UnwritableCharacter { character });
+        }
+
         for (name, objects) in self.streams.iter_mut() {
             for object in objects.iter_mut() {
                 if object.identifier != identifier || object.message_type() != crate::TYPE_STORAGE {
@@ -346,12 +514,330 @@ impl Document {
                 }
                 let mut storage = Message::decode(object.payload())
                     .map_err(|e| Error::Format(format!("{name}: storage {identifier}: {e}")))?;
-                text::write(&mut storage, new_text);
-                object.messages[0].payload = storage.encode();
+                if let Some(field) = text::unknown_table(&storage) {
+                    return Err(Error::UnknownAttributeTable {
+                        storage: identifier,
+                        field,
+                    });
+                }
+
+                let old = text::read(&storage);
+                let length = text::length(&old);
+                let (start, end) = (range.start, range.end.max(range.start));
+                if end > length {
+                    return Err(Error::TextRange {
+                        storage: identifier,
+                        index: end,
+                        length,
+                    });
+                }
+                let (Some(from), Some(to)) = (
+                    text::utf16_offset(&old, start),
+                    text::utf16_offset(&old, end),
+                ) else {
+                    let index = if text::utf16_offset(&old, start).is_none() {
+                        start
+                    } else {
+                        end
+                    };
+                    return Err(Error::SplitSurrogate {
+                        storage: identifier,
+                        index,
+                    });
+                };
+
+                let edit = text::Edit {
+                    at: start,
+                    removed: end - start,
+                    inserted: text::length(new_text),
+                };
+                if let Some((field, index, target)) =
+                    text::destroyed_anchors(&storage, &old, edit).first()
+                {
+                    return Err(Error::AnchoredObject {
+                        storage: identifier,
+                        index: *index,
+                        table: text::table(*field)
+                            .map(|t| t.name)
+                            .unwrap_or("an anchor table"),
+                        object: *target,
+                    });
+                }
+
+                let mut text = String::with_capacity(old.len() - (to - from) + new_text.len());
+                text.push_str(&old[..from]);
+                text.push_str(new_text);
+                text.push_str(&old[to..]);
+
+                let report = text::apply(&mut storage, edit, &text);
+                let payload = storage.encode();
+                if payload != object.payload() {
+                    object.messages[0].payload = payload;
+                }
+                return Ok(TextEdit {
+                    storage: identifier,
+                    edit,
+                    report,
+                });
+            }
+        }
+        Err(Error::NoSuchObject(identifier))
+    }
+
+    // -- what a storage carries ----------------------------------------------
+
+    /// Every `TSWP.StorageArchive` in the document, with the attribute tables it
+    /// carries — the inventory an edit has to remap.
+    ///
+    /// Unlike [`Document::text_storages`] this reports the placeholders too, and
+    /// the storages whose whole contents are a `U+FFFC`, because those are
+    /// exactly the ones with something anchored into them.
+    pub fn storages(&self) -> Vec<StorageInventory> {
+        let mut out = Vec::new();
+        for (stream, object) in self.objects() {
+            if object.message_type() != crate::TYPE_STORAGE {
+                continue;
+            }
+            let Ok(storage) = Message::decode(object.payload()) else {
+                continue;
+            };
+            let text = text::read(&storage);
+            let mut tables = Vec::new();
+            for spec in text::TABLES {
+                let Some(decoded) = storage.bytes(spec.field).and_then(crate::pb::decode_nested)
+                else {
+                    continue;
+                };
+                tables.push(StorageTable {
+                    field: spec.field,
+                    name: spec.name,
+                    anchoring: spec.anchoring,
+                    entries: text::entry_indices(&decoded, spec.anchoring).len(),
+                });
+            }
+            out.push(StorageInventory {
+                identifier: object.identifier,
+                stream: stream.to_string(),
+                kind: storage.varint(1).unwrap_or(3),
+                length: text::length(&text),
+                paragraphs: text::paragraph_ranges(&text).len(),
+                unknown_field: text::unknown_table(&storage),
+                tables,
+            });
+        }
+        out
+    }
+
+    /// Every smart field in the document — hyperlinks above all, but also the
+    /// placeholder, date, page-number and mail-merge fields that share the table.
+    ///
+    /// A smart field is a *run*: `StorageArchive` field 11 holds an entry
+    /// carrying the field's object at the character it starts on, and the run
+    /// reaches to the next entry — which for a field that does not run to the
+    /// end of the text is an entry with **no object**, a terminator. Both shapes
+    /// occur in Apple's own templates, and one link in `46_Business_Modern…`
+    /// runs to the end with no terminator at all.
+    pub fn smart_fields(&self) -> Vec<SmartField> {
+        let mut out = Vec::new();
+        for (_, object) in self.objects() {
+            if object.message_type() != crate::TYPE_STORAGE {
+                continue;
+            }
+            let Ok(storage) = Message::decode(object.payload()) else {
+                continue;
+            };
+            let Some(table) = storage.bytes(11).and_then(crate::pb::decode_nested) else {
+                continue;
+            };
+            let text = text::read(&storage);
+            let length = text::length(&text);
+            let entries = text::entry_indices(&table, text::Anchoring::Run);
+            for (position, (index, target)) in entries.iter().enumerate() {
+                let Some(target) = target else { continue };
+                let end = entries
+                    .get(position + 1)
+                    .map(|(next, _)| *next)
+                    .unwrap_or(length);
+                let (_, field) = self.object(*target).unzip();
+                let archive = field.and_then(|o| Message::decode(o.payload()).ok());
+                out.push(SmartField {
+                    storage: object.identifier,
+                    object: *target,
+                    message_type: field.map(|o| o.message_type()).unwrap_or(0),
+                    range: *index..end,
+                    payload: archive
+                        .as_ref()
+                        .and_then(|a| a.bytes(2))
+                        .map(|b| String::from_utf8_lossy(b).into_owned()),
+                    text: slice(&text, *index..end),
+                });
+            }
+        }
+        out
+    }
+
+    /// Point a hyperlink at a different address.
+    ///
+    /// `TSWP.HyperlinkFieldArchive` (2032) is `{1: {1: uuid}, 2: url}` — the
+    /// whole of the link is that one string, so changing it is changing one
+    /// field of one object and nothing else. What the *text* says is separate
+    /// and stays as it was; a link reading "example.com" and pointing at
+    /// somewhere else is a document the app writes happily.
+    pub fn set_link_url(&mut self, identifier: u64, url: &str) -> Result<(), Error> {
+        for (name, objects) in self.streams.iter_mut() {
+            for object in objects.iter_mut() {
+                if object.identifier != identifier {
+                    continue;
+                }
+                if object.message_type() != TYPE_HYPERLINK_FIELD {
+                    return Err(Error::Format(format!(
+                        "object {identifier} is a {} archive, not a hyperlink (2032)",
+                        object.message_type()
+                    )));
+                }
+                let mut archive = Message::decode(object.payload())
+                    .map_err(|e| Error::Format(format!("{name}: link {identifier}: {e}")))?;
+                archive.set_in_order(2, Value::Bytes(url.as_bytes().to_vec()));
+                object.messages[0].payload = archive.encode();
                 return Ok(());
             }
         }
         Err(Error::NoSuchObject(identifier))
+    }
+
+    /// The list state of every paragraph of a storage: its level, and the list
+    /// style in force.
+    ///
+    /// Two tables together say it, keyed on the same paragraph starts. Field 6
+    /// (`table_para_data`) carries `{character_index, first, second}` and
+    /// **`first` is the level**, counted from 0; field 7 (`table_list_style`)
+    /// points at the `TSWP.ListStyleArchive`. Both are sparse — a paragraph with
+    /// no entry keeps whatever the paragraph before it had — which is why they
+    /// are read forward rather than looked up.
+    ///
+    /// Read off Apple's own templates: `60_Academic_Modern_PM` has one storage
+    /// whose five paragraphs are levels 0 to 4 with a style override each, and
+    /// `04_Real_Estate_Flyer` has three named list styles and a level change in
+    /// one storage of fourteen paragraphs.
+    pub fn list_paragraphs(&self, identifier: u64) -> Result<Vec<ListParagraph>, Error> {
+        let storage = self.archive_of(identifier)?;
+        let text = text::read(&storage);
+        let levels = storage
+            .bytes(6)
+            .and_then(crate::pb::decode_nested)
+            .map(|t| text::para_data(&t))
+            .unwrap_or_default();
+        let styles = storage
+            .bytes(7)
+            .and_then(crate::pb::decode_nested)
+            .map(|t| text::entry_indices(&t, text::Anchoring::Paragraph))
+            .unwrap_or_default();
+
+        let carried = |entries: &[(u64, Option<u64>)], at: u64| {
+            entries
+                .iter()
+                .rev()
+                .find(|(index, _)| *index <= at)
+                .and_then(|(_, value)| *value)
+        };
+        Ok(text::paragraph_ranges(&text)
+            .into_iter()
+            .map(|range| ListParagraph {
+                level: carried(&levels, range.start).unwrap_or(0),
+                style: carried(&styles, range.start),
+                text: slice(&text, range.clone()),
+                range,
+            })
+            .collect())
+    }
+
+    /// The style in force over one character, resolved to the named style it
+    /// comes from and what the run overrides on top of it.
+    ///
+    /// Most runs in a real document do not point at a named style. They point at
+    /// a **variation**: an anonymous archive carrying [`style::IS_VARIATION`], a
+    /// parent, and a property bag holding only what differs. That is what iWork
+    /// writes when text is formatted directly rather than by picking a style
+    /// from the list, and it is why editing "Title" can leave the title looking
+    /// exactly as it did.
+    ///
+    /// This walks the parent chain to the first archive with a name and reports
+    /// both ends: which named style the run ultimately is, and which properties
+    /// the chain below it sets.
+    pub fn style_of_run(
+        &self,
+        storage: u64,
+        index: u64,
+        kind: StyleKind,
+    ) -> Result<Option<ResolvedStyle>, Error> {
+        let archive = self.archive_of(storage)?;
+        let Some(table) = archive
+            .bytes(kind.attribute_table())
+            .and_then(crate::pb::decode_nested)
+        else {
+            return Ok(None);
+        };
+        let anchoring = text::table(kind.attribute_table())
+            .map(|t| t.anchoring)
+            .unwrap_or(text::Anchoring::Run);
+        let entries = text::entry_indices(&table, anchoring);
+        let Some(identifier) = entries
+            .iter()
+            .rev()
+            .find(|(at, _)| *at <= index)
+            .and_then(|(_, target)| *target)
+        else {
+            return Ok(None);
+        };
+
+        let mut overrides: Vec<String> = Vec::new();
+        let mut named = None;
+        let mut name = None;
+        let mut walker = Some(identifier);
+        let mut seen = 0;
+        while let (Some(current), true) = (walker, seen < 16) {
+            seen += 1;
+            let Some(style) = self.text_style(current) else {
+                break;
+            };
+            for bag in [11u32, 12u32] {
+                let Some(properties) = style.archive.bytes(bag).and_then(crate::pb::decode_nested)
+                else {
+                    continue;
+                };
+                for field in &properties.fields {
+                    let path = [bag, field.number];
+                    let label = style::property::BY_NAME
+                        .iter()
+                        .find(|(_, known, _)| *known == path)
+                        .map(|(label, _, _)| label.to_string())
+                        .unwrap_or_else(|| format!("{bag}.{}", field.number));
+                    if !overrides.contains(&label) {
+                        overrides.push(label);
+                    }
+                }
+            }
+            if style.name.is_some() {
+                named = Some(current);
+                name = style.name.clone();
+                break;
+            }
+            walker = style.parent;
+        }
+
+        let archive = self.archive_of(identifier)?;
+        Ok(Some(ResolvedStyle {
+            style: identifier,
+            named,
+            name,
+            is_variation: style::get_path(&archive, style::IS_VARIATION)
+                .is_some_and(|v| v != Value::Varint(0)),
+            override_count: match style::get_path(&archive, style::OVERRIDE_COUNT) {
+                Some(Value::Varint(n)) => Some(n),
+                _ => None,
+            },
+            overrides,
+        }))
     }
 
     // -- tables --------------------------------------------------------------
@@ -2586,6 +3072,13 @@ fn utf8(bytes: Option<&[u8]>) -> String {
     bytes
         .map(|b| String::from_utf8_lossy(b).into_owned())
         .unwrap_or_default()
+}
+
+/// The characters of `text` in a UTF-16 range, as far as the range is real.
+fn slice(text: &str, range: Range<u64>) -> String {
+    let from = crate::text::utf16_offset(text, range.start).unwrap_or(text.len());
+    let to = crate::text::utf16_offset(text, range.end).unwrap_or(text.len());
+    text.get(from..to).unwrap_or_default().to_string()
 }
 
 /// Identify the app from the object graph alone.

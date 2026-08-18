@@ -12,6 +12,14 @@ iwork — inspect and edit Apple iWork documents (.pages, .numbers, .key)
   iwork inspect   <file>                   package, components, media, object census
   iwork text      <file>                   every text storage, with its object id
   iwork set-text  <file> <id> <text> <out> replace one text storage
+  iwork insert-text <file> <id> <at> <text> <out>
+                                           insert text at a character index
+  iwork delete-text <file> <id> <from> <to> <out>
+                                           delete a range of characters
+  iwork storages  <file>                   every text storage and the attribute
+                                           tables it carries
+  iwork links     <file>                   hyperlinks and smart fields, with the
+                                           text each one covers
   iwork objects   <file> [type]            list objects, optionally of one message type
   iwork dump      <file> <id>              one object, field by field
   iwork check     <file>                   look for a broken object graph
@@ -91,6 +99,15 @@ fn main() -> ExitCode {
             Ok(id) => set_text(file, id, new_text, out),
             Err(_) => Err(Error::Format(format!("'{id}' is not an object identifier"))),
         },
+        ["insert-text", file, id, at, new_text, out] => identifier(id)
+            .and_then(|id| index(at).map(|at| (id, at)))
+            .and_then(|(id, at)| insert_text(file, id, at as u64, new_text, out)),
+        ["delete-text", file, id, from, to, out] => identifier(id)
+            .and_then(|id| index(from).map(|f| (id, f)))
+            .and_then(|(id, f)| index(to).map(|t| (id, f, t)))
+            .and_then(|(id, f, t)| delete_text(file, id, f as u64..t as u64, out)),
+        ["storages", file] => storages(file),
+        ["links", file] => links(file),
         ["objects", file] => objects(file, None),
         ["objects", file, message_type] => match message_type.parse() {
             Ok(t) => objects(file, Some(t)),
@@ -230,8 +247,117 @@ fn text(path: &str) -> Result<(), Error> {
 
 fn set_text(path: &str, identifier: u64, new_text: &str, out: &str) -> Result<(), Error> {
     let mut doc = Document::open(path)?;
-    doc.set_text(identifier, new_text)?;
+    report_edit(doc.set_text(identifier, new_text)?);
     save(&doc, out)
+}
+
+fn insert_text(
+    path: &str,
+    identifier: u64,
+    at: u64,
+    new_text: &str,
+    out: &str,
+) -> Result<(), Error> {
+    let mut doc = Document::open(path)?;
+    report_edit(doc.insert_text(identifier, at, new_text)?);
+    save(&doc, out)
+}
+
+fn delete_text(
+    path: &str,
+    identifier: u64,
+    range: std::ops::Range<u64>,
+    out: &str,
+) -> Result<(), Error> {
+    let mut doc = Document::open(path)?;
+    report_edit(doc.delete_text(identifier, range)?);
+    save(&doc, out)
+}
+
+fn storages(path: &str) -> Result<(), Error> {
+    let doc = Document::open(path)?;
+    for storage in doc.storages() {
+        println!(
+            "  {:<9} {:<18} {:>6} unit(s), {} paragraph(s)   {}",
+            storage.identifier,
+            storage.kind_name(),
+            storage.length,
+            storage.paragraphs,
+            storage.stream
+        );
+        for table in &storage.tables {
+            println!(
+                "      {:>2} {:<28} {:<10} {} entr(y|ies)",
+                table.field,
+                table.name,
+                format!("{:?}", table.anchoring).to_lowercase(),
+                table.entries
+            );
+        }
+        if let Some(field) = storage.unknown_field {
+            println!("      !! field {field} is not a table this crate knows — edits refused");
+        }
+    }
+    Ok(())
+}
+
+fn links(path: &str) -> Result<(), Error> {
+    let doc = Document::open(path)?;
+    let fields = doc.smart_fields();
+    if fields.is_empty() {
+        println!("no smart fields");
+        return Ok(());
+    }
+    for field in fields {
+        println!(
+            "  storage {:<9} {:>5}..{:<5} {:<34} {:?}",
+            field.storage,
+            field.range.start,
+            field.range.end,
+            registry::lookup(field.message_type)
+                .map(|e| e.name)
+                .unwrap_or("unknown"),
+            field.text
+        );
+        if let Some(payload) = &field.payload {
+            let arrow = if field.message_type == 2032 {
+                "->"
+            } else {
+                " ="
+            };
+            println!("      {arrow} {payload}   (object {})", field.object);
+        }
+    }
+    Ok(())
+}
+
+/// What the edit did to the things anchored into the storage. Printed because
+/// it is the whole point: an edit that moves nothing has probably missed
+/// something, and one that drops a great deal has probably taken too much.
+fn report_edit(edit: iwork::TextEdit) {
+    let tables: Vec<String> = edit
+        .report
+        .tables
+        .iter()
+        .map(|field| match iwork::text::table(*field) {
+            Some(t) => format!("{field} {}", t.name),
+            None => field.to_string(),
+        })
+        .collect();
+    println!(
+        "storage {}: {} unit(s) removed at {}, {} inserted; \
+         {} run(s) moved, {} dropped, {} added",
+        edit.storage,
+        edit.edit.removed,
+        edit.edit.at,
+        edit.edit.inserted,
+        edit.report.moved,
+        edit.report.dropped,
+        edit.report.added
+    );
+    if !tables.is_empty() {
+        println!("  tables rewritten: {}", tables.join(", "));
+    }
 }
 
 /// Write the document and say which streams that actually rewrote.

@@ -156,7 +156,14 @@ fn object_streams_survive_a_roundtrip() {
 fn editing_text_touches_only_its_own_stream() {
     for path in require_fixtures() {
         let doc = Document::open(&path).unwrap();
-        let Some(target) = doc.text_storages().into_iter().next() else {
+        // Not simply the first storage: one with an anchored image is refused
+        // by name, which `text_that_anchors_an_object_is_not_replaced` asserts.
+        let Some(target) = doc.text_storages().into_iter().find(|storage| {
+            Document::open(&path)
+                .unwrap()
+                .set_text(storage.identifier, "x")
+                .is_ok()
+        }) else {
             continue; // a document with no text is fine, just not useful here
         };
 
