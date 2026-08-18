@@ -592,10 +592,11 @@ pub fn structure(document: &crate::Document) -> Option<Structure> {
         bottom_margin: float(&root, document_field::BOTTOM_MARGIN),
         header_margin: float(&root, document_field::HEADER_MARGIN),
         footer_margin: float(&root, document_field::FOOTER_MARGIN),
-        scale: root
-            .get(document_field::PAGE_SCALE)
-            .map(|_| float(&root, document_field::PAGE_SCALE))
-            .unwrap_or(1.0),
+        // A document with no `page_scale` is at 100%, not at 0%.
+        scale: match root.get(document_field::PAGE_SCALE) {
+            Some(_) => float(&root, document_field::PAGE_SCALE),
+            None => 1.0,
+        },
         orientation: root.varint(document_field::ORIENTATION).unwrap_or(0),
         paper_id: text(&root, document_field::PAPER_ID),
         printer_id: text(&root, document_field::PRINTER_ID),
@@ -640,11 +641,18 @@ pub fn structure(document: &crate::Document) -> Option<Structure> {
                 .collect();
         }
     }
-    // A document with no body — a page-layout one — still has sections; they
-    // are the `TP.SectionArchive`s themselves, in object order, covering no
-    // text at all. `TP.DocumentArchive.section` (5) is absent from every
-    // document in this corpus, so the table is the only route when there is
-    // one.
+    // Last resort, and **never taken**: over all 640 bundled Pages templates
+    // the number of sections reported here equals the number of
+    // `TP.SectionArchive` objects exactly, and no two of them start at 0 — so
+    // every document, page-layout ones included, has a body storage with a
+    // complete section table. `TP.DocumentArchive.section` (5) exists in the
+    // schema and is absent from every document seen. If a document ever turns
+    // up without the table, the archives are still listed, in object order,
+    // and their ranges read as empty rather than as a guess.
+    //
+    // An empty range is a visible non-claim — `iwork sections` prints
+    // "0 unit(s)" — which is the point; the alternative is a range invented
+    // from nothing.
     if starts.is_empty() {
         let mut loose: Vec<u64> = archives
             .iter()
