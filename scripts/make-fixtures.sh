@@ -379,6 +379,19 @@ build keynote-deck key 240 "$png"
 # transition names.
 build keynote-slides key 300
 
+# The transition A/B deck: 44 blank slides, one per effect in the app's own
+# `transition effects` enumeration, everything else about them identical, plus
+# two control slides that repeat an effect at other timings. The dictionary
+# reads only four of a transition's parameters back, so the rest are read by
+# *diffing* one slide against another — which needs slides that differ in one
+# thing. See `applescript/keynote-transitions.applescript`.
+build keynote-transitions key 600
+
+# The playback deck: the four show-level settings a script can move, all off
+# their defaults, so `KN.ShowArchive` fields 8, 15, 16 and 18 can be told apart
+# from the defaults every other deck here carries.
+build keynote-playback key 240
+
 # One of every drawable a script can put on a slide, with the properties the
 # app can read back — geometry, rotation, opacity, reflection, lock — plus an
 # image whose file the app replaces, which is how a *cropped* image gets into
