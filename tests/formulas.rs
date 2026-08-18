@@ -50,6 +50,13 @@ macro_rules! fixture {
 }
 
 /// Every document the corpus has, whatever app wrote it.
+/// A password-protected package, which is not a fixture any test here can use:
+/// its object streams are ciphertext and `Document::open` refuses it by design.
+/// `tests/fixtures.rs` is where that refusal is asserted.
+fn encrypted(path: &Path) -> bool {
+    iwork::Package::read(path).is_ok_and(|package| package.contains(".iwpv2"))
+}
+
 fn corpus() -> Vec<PathBuf> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/generated");
     let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -64,6 +71,7 @@ fn corpus() -> Vec<PathBuf> {
                 Some("pages") | Some("numbers") | Some("key")
             )
         })
+        .filter(|path| !encrypted(path))
         .collect();
     out.sort();
     out

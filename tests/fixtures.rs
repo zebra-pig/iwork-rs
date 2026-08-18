@@ -13,6 +13,12 @@ use iwork::pb::Message;
 use iwork::{iwa, style, Document, Kind, Package, StyleKind};
 
 fn fixtures() -> Vec<PathBuf> {
+    let mut found = all_fixtures();
+    found.retain(|path| !is_encrypted(path));
+    found
+}
+
+fn all_fixtures() -> Vec<PathBuf> {
     let dir = std::env::var("IWORK_FIXTURES")
         .map(PathBuf::from)
         .unwrap_or_else(|_| Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures"));
@@ -20,6 +26,17 @@ fn fixtures() -> Vec<PathBuf> {
     collect(&dir, &mut found);
     found.sort();
     found
+}
+
+/// A password-protected package, which every other test here must not be given:
+/// its object streams are ciphertext, so `Document::open` refuses it by design
+/// and the app will not open it without a password either.
+///
+/// The test is the package's own shape rather than the file's name, because a
+/// reader pointing `IWORK_FIXTURES` at their own documents may well have one
+/// and will not have named it `pages-locked`.
+fn is_encrypted(path: &Path) -> bool {
+    Package::read(path).is_ok_and(|package| package.contains(".iwpv2"))
 }
 
 /// Fixtures may be nested: `scripts/make-fixtures.sh` writes the documents it
@@ -682,6 +699,322 @@ fn registered_media_is_present() {
                 path.display(),
                 data.identifier
             );
+        }
+    }
+}
+
+// -- metadata, identity and the review layer (phase 7) -----------------------
+
+/// Every document has the three metadata entries, and they agree with one
+/// another: `Metadata/DocumentIdentifier` is `documentUUID` again, and so is
+/// `shareUUID`. Checked across the corpus because that agreement is what
+/// `save_as_new` has to preserve.
+#[test]
+fn every_document_identifies_itself_the_same_way_three_times() {
+    for path in require_fixtures() {
+        let doc = Document::open(&path).unwrap();
+        let metadata = doc
+            .metadata()
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let properties = metadata
+            .properties
+            .unwrap_or_else(|| panic!("{}: no Properties.plist", path.display()));
+
+        let document_uuid = properties
+            .document_uuid
+            .unwrap_or_else(|| panic!("{}: no documentUUID", path.display()));
+        assert!(
+            iwork::metadata::is_uuid(&document_uuid),
+            "{}: documentUUID is {document_uuid}",
+            path.display()
+        );
+        assert_eq!(
+            metadata.document_identifier.as_deref(),
+            Some(document_uuid.as_str()),
+            "{}: Metadata/DocumentIdentifier disagrees with documentUUID",
+            path.display()
+        );
+        assert_eq!(
+            properties.share_uuid.as_deref(),
+            Some(document_uuid.as_str()),
+            "{}: shareUUID disagrees with documentUUID",
+            path.display()
+        );
+        assert_eq!(
+            properties.revision.as_deref(),
+            Some(format!("0::{}", properties.version_uuid.clone().unwrap()).as_str()),
+            "{}: revision is not 0:: plus the version UUID",
+            path.display()
+        );
+        assert!(
+            properties.other.is_empty(),
+            "{}: Properties.plist has keys this crate does not name: {:?}",
+            path.display(),
+            properties.other
+        );
+    }
+}
+
+/// The document-level fields of the cross-app super, which sits at a different
+/// field number in each of the three apps.
+#[test]
+fn every_document_names_its_locale_and_its_custom_format_list() {
+    for path in require_fixtures() {
+        let doc = Document::open(&path).unwrap();
+        let metadata = doc.metadata().unwrap();
+        assert!(
+            metadata.locale.is_some(),
+            "{}: no TSK.DocumentArchive.locale_identifier",
+            path.display()
+        );
+        // The list is always there and is usually empty; what matters is that
+        // it is the object `Document::custom_formats` reads.
+        let list = metadata
+            .custom_format_list
+            .unwrap_or_else(|| panic!("{}: no custom format list", path.display()));
+        let (_, object) = doc
+            .object(list)
+            .unwrap_or_else(|| panic!("{}: custom format list {list} is missing", path.display()));
+        assert_eq!(
+            object.message_type(),
+            222,
+            "{}: the document's custom format list is not a TSK.CustomFormatListArchive",
+            path.display()
+        );
+    }
+}
+
+/// **The tripwire.** Every document carries exactly one annotation author
+/// storage and not one of them has an author in it, so nothing in the corpus
+/// has a comment, a reply or a tracked change. The day a fixture does, this
+/// fails and the Unverified decoders in `src/annotations.rs` get their first
+/// real example.
+#[test]
+fn no_fixture_has_a_comment_or_a_tracked_change() {
+    for path in require_fixtures() {
+        let doc = Document::open(&path).unwrap();
+        let annotations = doc.annotations();
+        assert!(
+            annotations.author_storage.is_some(),
+            "{}: no TSK.AnnotationAuthorStorageArchive",
+            path.display()
+        );
+        assert!(
+            annotations.is_empty(),
+            "{}: something in the review layer is no longer empty — {}",
+            path.display(),
+            annotations.summary()
+        );
+        assert!(
+            annotations.unreached.is_empty(),
+            "{}: annotation objects nothing points at: {:?}",
+            path.display(),
+            annotations.unreached
+        );
+    }
+}
+
+/// The storage's own view of the same thing: no `table_insertion`,
+/// `table_deletion`, `table_highlight` or `table_overlapping_highlight`
+/// anywhere.
+#[test]
+fn no_storage_carries_a_change_or_a_comment_anchor() {
+    for path in require_fixtures() {
+        let doc = Document::open(&path).unwrap();
+        for storage in doc.storages() {
+            for table in &storage.tables {
+                assert!(
+                    !matches!(table.field, 21 | 22 | 23 | 25),
+                    "{}: storage {} carries {} — the first one this crate has seen",
+                    path.display(),
+                    storage.identifier,
+                    table.name
+                );
+            }
+        }
+    }
+}
+
+/// A copy saved with `save_as_new` is a *different document*: four UUIDs
+/// change, the lineage does not, and every object stream is byte for byte the
+/// one the original had.
+#[test]
+fn save_as_new_replaces_the_identity_and_nothing_else() {
+    for path in require_fixtures() {
+        let doc = Document::open(&path).unwrap();
+        let before = doc.metadata().unwrap();
+        let out = std::env::temp_dir().join(format!(
+            "iwork-new-{}",
+            path.file_name().unwrap().to_string_lossy()
+        ));
+        let identity = doc.save_as_new(&out).unwrap();
+
+        let copy = Document::open(&out).unwrap();
+        let after = copy.metadata().unwrap();
+        let (was, now) = (before.properties.unwrap(), after.properties.unwrap());
+
+        assert_ne!(was.document_uuid, now.document_uuid, "{}", path.display());
+        assert_ne!(was.private_uuid, now.private_uuid, "{}", path.display());
+        assert_ne!(was.version_uuid, now.version_uuid, "{}", path.display());
+        assert_eq!(
+            was.stable_document_uuid,
+            now.stable_document_uuid,
+            "{}: the lineage must survive a copy",
+            path.display()
+        );
+        assert_eq!(
+            now.document_uuid.as_deref(),
+            Some(identity.document_uuid.as_str())
+        );
+        assert_eq!(now.share_uuid, now.document_uuid);
+        assert_eq!(after.document_identifier, now.document_uuid);
+        assert_eq!(
+            after.build_versions,
+            before.build_versions,
+            "{}: the build history belongs to the file, not to the identity",
+            path.display()
+        );
+        assert_eq!(was.file_format_version, now.file_format_version);
+
+        // Everything that is not the identity is the original's bytes.
+        let original = Package::read(&path).unwrap();
+        let written = Package::read(&out).unwrap();
+        for (name, data) in &original.entries {
+            if name.starts_with("Metadata/") && name != "Metadata/BuildVersionHistory.plist" {
+                continue;
+            }
+            assert_eq!(
+                written.get(name),
+                Some(data.as_slice()),
+                "{}: {name} changed",
+                path.display()
+            );
+        }
+        let _ = std::fs::remove_file(&out);
+    }
+}
+
+/// Two copies made in a row must not collide, or the whole exercise is
+/// pointless.
+#[test]
+fn two_copies_of_one_document_get_two_identities() {
+    let Some(path) = fixtures().into_iter().next() else {
+        eprintln!("no fixtures — skipping");
+        return;
+    };
+    let doc = Document::open(&path).unwrap();
+    let a = std::env::temp_dir().join("iwork-copy-a.pages");
+    let b = std::env::temp_dir().join("iwork-copy-b.pages");
+    let first = doc.save_as_new(&a).unwrap();
+    let second = doc.save_as_new(&b).unwrap();
+    assert_ne!(first.document_uuid, second.document_uuid);
+    assert_ne!(first.private_uuid, second.private_uuid);
+    assert_ne!(first.version_uuid, second.version_uuid);
+    assert_eq!(first.stable_document_uuid, second.stable_document_uuid);
+    let _ = std::fs::remove_file(&a);
+    let _ = std::fs::remove_file(&b);
+}
+
+/// A plain save leaves the identity alone — the other half of the same rule.
+#[test]
+fn a_plain_save_keeps_the_identity() {
+    for path in require_fixtures() {
+        let doc = Document::open(&path).unwrap();
+        let out = std::env::temp_dir().join(format!(
+            "iwork-same-{}",
+            path.file_name().unwrap().to_string_lossy()
+        ));
+        doc.save(&out).unwrap();
+        let before = Package::read(&path).unwrap();
+        let after = Package::read(&out).unwrap();
+        for entry in [
+            "Metadata/Properties.plist",
+            "Metadata/DocumentIdentifier",
+            "Metadata/BuildVersionHistory.plist",
+        ] {
+            assert_eq!(
+                before.get(entry),
+                after.get(entry),
+                "{}: {entry} changed on a plain save",
+                path.display()
+            );
+        }
+        let _ = std::fs::remove_file(&out);
+    }
+}
+
+/// A password-protected package is refused by name, and says what it knows.
+#[test]
+fn a_password_protected_document_is_refused_by_name() {
+    let locked: Vec<PathBuf> = all_fixtures()
+        .into_iter()
+        .filter(|p| is_encrypted(p))
+        .collect();
+    if locked.is_empty() {
+        eprintln!("no password-protected fixture — run scripts/make-fixtures.sh pages-locked");
+        return;
+    }
+    for path in locked {
+        match Document::open(&path) {
+            Err(iwork::Error::Encrypted { hint }) => {
+                assert_eq!(
+                    hint.as_deref(),
+                    Some("the probe"),
+                    "{}: the hint is stored in the clear and should come back",
+                    path.display()
+                );
+            }
+            Err(other) => panic!(
+                "{}: refused as {other} rather than as encrypted",
+                path.display()
+            ),
+            Ok(_) => panic!(
+                "{}: opened a package this crate cannot read",
+                path.display()
+            ),
+        }
+        // The shape the probe measured, asserted rather than described.
+        let package = Package::read(&path).unwrap();
+        let encryption = iwork::metadata::encryption(&package).unwrap();
+        assert_eq!(encryption.header_length, 104);
+        assert_eq!(encryption.header_words, vec![2, 1, 100_000]);
+        assert!(package.contains("Metadata/Properties.plist"));
+        assert!(
+            !package.contains("preview.jpg"),
+            "{}: an encrypted package has no previews",
+            path.display()
+        );
+        assert!(
+            iwork::plist::parse(package.get("Metadata/Properties.plist").unwrap()).is_ok(),
+            "{}: Properties.plist stays in the clear",
+            path.display()
+        );
+        assert!(
+            iwork::plist::parse(package.get("Metadata/BuildVersionHistory.plist").unwrap())
+                .is_err(),
+            "{}: BuildVersionHistory.plist does not",
+            path.display()
+        );
+    }
+}
+
+/// Both plist forms in the package parse, and a binary one survives a rewrite.
+#[test]
+fn every_metadata_plist_round_trips() {
+    for path in require_fixtures() {
+        let package = Package::read(&path).unwrap();
+        for name in [
+            "Metadata/Properties.plist",
+            "Metadata/BuildVersionHistory.plist",
+        ] {
+            let Some(raw) = package.get(name) else {
+                continue;
+            };
+            let value = iwork::plist::parse(raw)
+                .unwrap_or_else(|e| panic!("{}: {name}: {e}", path.display()));
+            let again = iwork::plist::parse(&iwork::plist::write(&value))
+                .unwrap_or_else(|e| panic!("{}: {name} rewritten: {e}", path.display()));
+            assert_eq!(value, again, "{}: {name}", path.display());
         }
     }
 }
