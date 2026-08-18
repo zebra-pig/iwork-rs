@@ -182,13 +182,27 @@ Everything layered on top of the cells; depends only on Phase 1.
 
 ## Phase 3 — Drawables, geometry, media
 
-- [ ] Enumerate drawables: `TSD.DrawableArchive` subclasses — shapes, image
+- [x] Enumerate drawables: `TSD.DrawableArchive` subclasses — shapes, image
       drawables, groups, lines — with their geometry
       (`TSD.GeometryArchive`: position, size, rotation, flags) and z-order.
-- [ ] Write geometry: move/resize a drawable; app-verified.
-- [ ] Read object styling: fills (colour/gradient/image + tint), strokes,
+      *(Also movies, masks, tables, charts, placeholders and captions; and
+      containment per app — Numbers sheets, Keynote slides, Pages section
+      templates, floating drawables and text-anchored attachments. Groups and
+      connection lines are decoded but **unexercised**: nothing in the corpus
+      has one, because no script can make the apps group anything.)*
+- [x] Write geometry: move/resize a drawable; app-verified.
+      *(Keynote reads back a moved shape and image; the resize of a masked
+      image reproduces what Pages wrote for the same edit, byte-identical in the
+      mask and two ulps out in one float of the image.)*
+- [x] Read object styling: fills (colour/gradient/image + tint), strokes,
       shadows, reflection, opacity, lock state — the `TSD` style surface.
-- [ ] Media: replace an existing image's bytes (Data entry +
+      *(Colour fills, strokes with their dash/dot patterns, shadows with their
+      non-zero defaults, reflection opacity and opacity, all resolved up the
+      inheritance chain, and the lock on the drawable. **Gradient and image
+      fills are decoded but Unverified** — nothing in the corpus has one, and
+      no script sets a fill. Tint is part of an image fill and unexercised for
+      the same reason.)*
+- [x] Media: replace an existing image's bytes (Data entry +
       `TSP.DataReference` + digest/metadata fields as observed); insert an
       image by copying an existing image drawable. App-verified. **Caveat
       proven by the guides:** a drawable carries non-destructive edit state
@@ -196,12 +210,24 @@ Everything layered on top of the cells; depends only on Phase 1.
       adjustments) between the stored pixels and the render — replacement
       must surface that state, or a swapped image opens fine and renders
       wrong while the app round-trip passes. Read it before writing bytes.
-- [ ] Inventory (read-level) of the wider media model: video/audio with trim
+      *(Replacement done and app-verified; the edit state is decoded and is a
+      **named refusal**. **Insertion was not attempted** — see the log for what
+      it needs. The caveat is real and was measured: the app's own replacement
+      re-fits the picture into the old frame with a mask, which is why this one
+      keeps the frame and warns instead.)*
+- [x] Inventory (read-level) of the wider media model: video/audio with trim
       points and poster frames, galleries, drawings (stroke order is
       load-bearing — "Animate Drawing" replays it), 3D objects; pass-through
       tests for each.
-- [ ] CLI: `iwork drawables`, `iwork set-geometry`, `iwork replace-media`.
-- [ ] FORMAT.md: §Drawables, §Media.
+      *(All of it is identified — movies by their playback fields, the rest by
+      the proto2 extension grafted onto the host archive. Only movies are
+      **exercised**, and the two in the corpus are Keynote live-video
+      placeholders with no film; galleries, 3D objects, drawings and web video
+      are Unverified for want of a document.)*
+- [x] CLI: `iwork drawables`, `iwork set-geometry`, `iwork replace-media`.
+      *(Plus `iwork media`, which lists the registry with its digests and says
+      whether each still matches its bytes.)*
+- [x] FORMAT.md: §Drawables, §Media.
 
 ## Phase 4 — Text: finish the story
 
@@ -777,6 +803,166 @@ fixture, and what the app accepted.
     addressing schemes for the same rows. None of that is hard; all of it has to
     be app-verified together, and there was no fixture combining a category with
     a filter to verify it against.
+
+- 2026-08-18 — **Phase 3 complete (drawables, geometry, media).** Two new
+  modules, `src/drawable.rs` and `src/media.rs`; `doc.drawables()`,
+  `doc.object_style()`, `doc.set_geometry()`, `doc.replace_media()`; four new
+  CLI verbs (`drawables`, `media`, `set-geometry`, `replace-media`); five new
+  `iwork check` invariants; FORMAT.md §6 Drawables and §7 Media plus three new
+  writing rules; a new fixture and a new oracle. `cargo fmt --check` and `cargo
+  clippy --all-targets` clean; `cargo test --all-targets` green: 79 unit + 16
+  cell + 18 drawable + 15 fixture + 34 style + 22 table + 3 doc.
+  `IWORK_APP_CHECK=1 cargo test` green over the whole suite, thirteen fixtures.
+
+  **What the apps proved, and how.** Every non-obvious rule below came from
+  copying a fixture, making the app perform the edit by AppleScript, saving, and
+  diffing objects — the Phase 2 method, unchanged.
+
+  | Question | What the app did | What it settled |
+  |---|---|---|
+  | Where is a drawable's geometry? | — | Field 1 of the innermost message reached by walking field 1; one to four levels deep in this corpus |
+  | What rectangle does the app report? | Pages says 60×123 475×383 for a photo whose archive says 33.86×66.28 511.86×466.13 | **A masked image is reported as its mask**, offset by the picture's own position |
+  | …and a rotated one? | Keynote says 470×57 220×180 for a 220×180 shape at 100×100 turned 30° | Position is the **rotated bounding box's corner**; size is not rotated |
+  | Move an image | One `TSD.ImageArchive` changed: position, size, **and `originalSize`** | Media keeps its placed size beside its geometry and both move |
+  | Resize a shape | Geometry **and** the bezier path source — natural size and all six corners | **A shape's size lives in two places**; changing one leaves the app reporting the other |
+  | Resize a masked image | Picture size, mask offset, mask size and the mask path's natural size all ×300/475; the mask path's *points* untouched | The assembly scales by one factor; masks take the natural size only |
+  | Replace an image's file | New `DataInfo`, `naturalSize` and traced path rewritten to the new pixel size, `flags` 0→2, and a **mask installed** to re-fit the picture into the old frame | What a replacement has to maintain, and what this crate deliberately does not do |
+  | Replace it again | The previous `DataInfo` **and its `Data/` entry vanished** | The media registry is refcounted, exactly like a table's string list |
+
+  **The non-destructive-state finding, which was the phase's open question.**
+  It is real, it is detectable, and replacement is safe only when it is absent.
+  Between an image's stored pixels and what is drawn sit `mask` (5), an Instant
+  Alpha path (10), twelve adjustments plus enhance (14), four references to
+  renderings **derived from the old pixels** (13, 15, 16, 17), a traced outline
+  (19) and `background_removed` (22). None of it is in a replacement file and
+  none of it can be recomputed from one. `replace_media` therefore refuses by
+  name — `Error::NonDestructiveEdit`, listing what it found — and the refusal
+  leaves the document untouched, which `tests/drawables.rs` asserts object by
+  object. **An identity mask is not an objection**: the app installs one when it
+  replaces an image itself, and a window over the whole picture hides nothing.
+  A traced path that is the plain rectangle of the picture's natural size — every
+  one in the corpus — is rewritten with the new size, as the app rewrites it.
+
+  The honest remainder: the frame does *not* follow the new picture. The app's
+  own replacement scale-to-fills the picture into the old window and crops the
+  overflow (an 8×8 frame given a 32×24 picture became a 10.67×8 image behind an
+  8×8 mask offset by 1.33); this crate keeps the frame, so a replacement of a
+  different aspect ratio is drawn stretched, says so, and points at
+  `set-geometry`.
+
+  **Digest, confirmed rather than believed.** `TSP.DataInfo` field 2 is a raw
+  20-byte SHA-1 of the file's bytes: `shasum Data/probe-9077.png` and field 2
+  agree, and `tests/drawables.rs::every_digest_is_the_sha1_of_the_bytes` checks
+  every stored file in the corpus. SHA-1 is implemented in `src/media.rs` — sixty
+  lines, four RFC 3174 vectors and the four padding boundaries — rather than
+  taken as a dependency.
+
+  **Stream-rewrite counts.**
+
+  | Edit | Entries rewritten |
+  |---|--:|
+  | move and resize a shape (25-entry deck) | 1 (the slide) |
+  | move or resize a masked image (37-entry Pages document) | 1 (the document) |
+  | replace an image used by two slides (30-entry deck) | 3 (the metadata and both slides) |
+  | write a rectangle an object already has | **0** |
+
+  For contrast, the app's own save of one image move rewrote 21 objects, renamed
+  the view-state component and reallocated its identifiers — the Phase 2 warning
+  that an app save is not a small diff, confirmed again.
+
+  **How close the writer gets to the app.** Asked to make the Pages report's
+  cropped photo 300 points wide — the same edit Pages had been made to perform —
+  this crate produced a **byte-identical mask archive** and an image archive
+  differing only in the last two ulps of one float. The shape resize matches
+  Keynote's output except where the app left −1.1e-13 and this crate leaves 0.
+
+  **Five new `iwork check` invariants**, all kept by every fixture: a data
+  reference resolves in the registry; a stored file is present and its digest is
+  the SHA-1 of its bytes; `MessageInfo.data_references` (framing field 6, packed
+  varints) lists exactly the data ids the payload uses — verified over every
+  media-bearing drawable in the corpus; a mask's parent is the image that names
+  it; a drawable's parent exists.
+
+  **A registry correction worth its own note.** The framework ranges were wrong
+  in two places: **5000–5999 is `TSCH`, not `TSS`**, so the six chart-style
+  presets every document carries, and the eighteen axis and thirty-six series
+  styles under them, were being reported as stylesheets and themes; and nothing
+  lives in 1000–1999. `TSS` is 400–499 — the stylesheet is 401 and was not in
+  the table at all. In the drawables block, 3016 is the media style rather than
+  a theme and 3047 the guide storage; 2011 is `TSWP.ShapeInfoArchive`, which is
+  what nearly every shape is, rather than a selection. All were Inferred.
+
+  **New fixture: `keynote-shapes.key`.** Keynote is the only app that will make
+  a drawable from a script — Pages and Numbers answer `make new shape` with
+  "Don't know how to create TMAScriptShapeInfoProxy" — and `TSD` is cross-app, so
+  one deck serves all three. It carries a shape, a shape turned 30°, a shape at
+  50% opacity with a 40% reflection, a text box, a line, an image, a locked
+  shape, and an image the app itself cropped by being told to show a square
+  picture in a 4:3 frame. `make new group` and `make new movie` are accepted and
+  do nothing, so groups and movies stay read-only.
+
+  **What resisted.**
+
+  - **A shape that sizes itself to its text has no size in the file.** Its
+    stored height is 0, flags 1, and its stored position is the centre of a box
+    that exists only once the text is laid out: Keynote reports such a text box
+    58 points above the archive's position and 115 tall. `Geometry::fits_its_text`
+    names the case; nothing here can resolve it without doing layout, and it is
+    excluded from the oracle comparison for that reason.
+  - **Groups and connection lines are decoded and unexercised.** No script
+    groups anything and no bundled theme ships a group, so `TSD.GroupArchive`'s
+    children list is read on trust.
+  - **Gradient and image fills, tint, and every media kind but movies** are the
+    same story: decoded, never seen. The two movies in the corpus are Keynote
+    live-video placeholders with no film — ground rule 8 material, read and named
+    and never authored.
+  - **Non-proportional resizing of a masked image is Unverified.** Every image
+    in the corpus has `aspect_ratio_locked` set and the app will not perform one,
+    so the horizontal and vertical factors are applied separately on the strength
+    of the proportional case alone.
+  - **Pixel correctness cannot be verified here.** The app round trip proves the
+    document opens, that the picture is still where it was and that the app
+    accepts the registry entry. Nothing on a locked screen can see what is drawn.
+  - **Inserting an image was not attempted** (the stretch goal). What it needs:
+    an `TSD.ImageArchive` copied from one that works with a new identifier above
+    `PackageMetadata` field 1; its two `StandinCaptionArchive`s copied with it,
+    because every drawable in a Keynote theme has them; an entry appended to the
+    container's drawable list (`KN.SlideArchive` field 7, `TN.SheetArchive` field
+    2, or a Pages attachment table entry *and* a `TP.DrawablesZOrderArchive`
+    entry); a `parent` pointing back; a new `DataInfo` and `Data/` entry, whose
+    identifier comes from a counter this phase never had to find, because
+    replacement reuses the one that is there; and `MessageInfo.object_references`
+    and `data_references` written for the new object, which nothing here has had
+    to synthesise yet — every write so far has only changed values inside an
+    object that already declared what it points at.
+
+  What Phase 4 (text) should know:
+
+  - **A shape owns its text**, at field 2 of `TSWP.ShapeInfoArchive` (and field 4
+    again, the same reference). `iwork drawables` prints the storage id, so the
+    text in a slide's shapes is reachable from the drawable side.
+  - **A Pages drawable can be anchored in text**, and then its `parent` is the
+    body storage and its place is an entry in that storage's **attachment table,
+    field 9** — `{1: character index, 2: → TSWP.DrawableAttachmentArchive}`. Any
+    remapping of character indices has to move those entries with everything
+    else, and dropping one detaches an image.
+  - `TP.DrawablesZOrderArchive` (10015) lists every drawable in the document in
+    one order, the body storage included; it is depth, not placement.
+
+  What Phase 8a (Keynote) should know:
+
+  - **`KN.SlideArchive` field 7 is the slide's drawable list, in z-order back to
+    front**, and fields 5, 6, 20 and 30 are placeholders that also appear in it,
+    or in the layout's case do not. A slide's stream is `Index/Slide-*.iwa` and a
+    layout's is `Index/TemplateSlide-*.iwa`, both holding a type 5 archive.
+  - **Keynote will create a shape, a text item, a line and an image from a
+    script**, and set position, size, rotation, opacity, reflection, lock and
+    accessibility description on them — which is the whole basis of the shapes
+    fixture. It will not create a group or a movie, and says "ok" when asked.
+  - `set file name of image` really does replace the picture, which is how the
+    app's own replacement path was observed.
+  - The theme carries live-video sources, and a slide-number placeholder that is
+    referenced from field 20 rather than from the drawable list.
 
 ## Execution notes
 
