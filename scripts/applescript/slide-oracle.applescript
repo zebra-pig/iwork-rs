@@ -10,9 +10,20 @@
 -- of a body placeholder with a **carriage return**, and a reader that folded
 -- them together could not tell that it had them right.
 --
---   show   <slide count>  <layout count>  <width>  <height>  <slide numbers showing>  <theme name>
---   layout <index>  <name>
---   slide  <number>  <layout name>  <skipped>  <title showing>  <body showing>  <title>  <body>  <notes>  <transition effect>  <automatic>  <delay>  <duration>
+--   show     <slide count>  <layout count>  <width>  <height>  <slide numbers showing>  <theme name>
+--   playback <auto loop>  <auto play>  <auto restart>  <maximum idle duration>
+--   layout   <index>  <name>
+--   slide    <number>  <layout name>  <skipped>  <title showing>  <body showing>  <title>  <body>  <notes>  <transition effect>  <automatic>  <delay>  <duration>
+--
+-- The `playback` line is the four show-level settings the dictionary exposes,
+-- and the only ones a script can move. **`maximum idle duration` is in
+-- minutes** and `KN.ShowArchive.idle_timer_delay` (16) is in seconds; the two
+-- disagree by a factor of sixty and a reader that took the number at face value
+-- would say a deck restarts after two hours when the app says two minutes.
+--
+-- What is deliberately absent because nothing exposes it: the presentation type
+-- (normal / links only / self playing), the two self-playing delays, the
+-- soundtrack and the recording.
 --
 -- `title` and `body` come back as `-` when the layout has no such placeholder:
 -- `default title item` answers with an *error* rather than an empty shape, so
@@ -106,6 +117,11 @@ on run argv
 				end try
 				set end of harvest to "show" & tab & slideCount & tab & layoutCount & ¬
 					tab & showWidth & tab & showHeight & tab & numbering & tab & themeName
+
+				set end of harvest to "playback" & tab & ((auto loop of doc) as text) & ¬
+					tab & ((auto play of doc) as text) & ¬
+					tab & ((auto restart of doc) as text) & ¬
+					tab & ((maximum idle duration of doc) as text)
 
 				repeat with i from 1 to layoutCount
 					set lay to slide layout i of doc
