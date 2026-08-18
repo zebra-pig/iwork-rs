@@ -588,7 +588,9 @@ from 0", and the field is simply not there in what Pages wrote.
 #### What cannot be remapped
 
 An **attachment** entry names a single character, and that character *is* the
-attachment: `U+FFFC`, with the drawable, footnote or number hanging off it.
+attachment: `U+FFFC` for a drawable or a number, `U+000E` for a footnote mark
+(`pages-footnotes.pages` settled that a footnote's placeholder is its own
+character), with the object hanging off it.
 Delete it and Pages deletes the object — told to delete a range covering the
 photo's `U+FFFC` in `pages-report`, it removed the `TSD.ImageArchive`, its mask,
 and their entries in the drawable list. That is a document-wide operation
@@ -2090,7 +2092,7 @@ second time.
 (`00C_Textbook_Portrait`, both variants), which is why there is one fixture and
 not several.
 
-### Footnotes and endnotes — nothing to decode
+### Footnotes and endnotes — decoded at last
 
 `TP.SettingsArchive` records the settings, and every Pages document has them:
 
@@ -2105,36 +2107,40 @@ not several.
 the settings are Confirmed as fields and every non-default value is
 **Unverified**.
 
-The containment is worse off than that: it is **Inferred from the schema and
-nothing has ever decoded one**.
+The containment, long Inferred-only, has now met a live example. The screen
+was unlocked, Insert > Footnote became clickable, and `pages-footnotes.pages`
+(recipe: `scripts/applescript/pages-footnotes-ui.applescript`) carries two —
+`table_footnote` entries at characters 26 and 77, each on a `U+FFFC`:
 
 ```
 body storage
-  16  table_footnote          character-anchored, entry on a U+FFFC
+  16  table_footnote          character-anchored, entry on a U+000E mark
         → TSWP.FootnoteReferenceAttachmentArchive (2008)
              1  super (TSWP.TextualAttachmentArchive, kind = 2 footnote mark)
              2  contained_storage  → the note's own TSWP.StorageArchive, kind = 2
              3  custom_mark_string
 ```
 
-There is **no storage of kind 2 anywhere**: not in this corpus, not in any of
-the 901 templates the three apps ship, and no `table_footnote` entry either.
-Neither AppleScript nor a template can author one — Pages' dictionary has no
-footnote command — and no iWork-authored document from a real user is available
-here. So this crate reads the shape above, reports whatever it finds, and never
-fails; `tests/pages.rs::no_storage_in_the_corpus_is_a_footnote_body` is the
-tripwire that says so out loud if a fixture ever grows one.
+The shape above is **Confirmed** as far as the fixture reaches: the anchor
+entries, the attachments, and two storages of kind 2 holding the note text.
+`custom_mark_string`, endnote modes and non-default numbering remain
+Inferred — the fixture uses automatic marks and default settings.
+`tests/pages.rs::footnote_bodies_are_kind_2_storages_and_only_where_footnotes_are`
+pins both the presence here and the absence everywhere else.
 
-### Bookmarks — the same story
+### Bookmarks — observed
 
 `table_bookmark` (field 15) → `TSWP.BookmarkFieldArchive` (2035), a run-anchored
-table naming a range. **Not one of the 901 templates the three apps ship
-carries a `TSWP.BookmarkFieldArchive`**, and neither does anything in this
-corpus. The same sweep found **zero** `TSWP.FootnoteReferenceAttachmentArchive`s
-and **zero** storages of kind 2, which is the footnote boundary above measured
-the same way. A
-bookmark is made by naming a range in the app's UI and nothing reachable here
-can name a range. Read, reported, **Unverified**.
+table naming a range. No template ships one; `pages-bookmarks.pages`
+(Insert > Bookmark, recipe `scripts/applescript/pages-bookmarks-ui.applescript`)
+carries two, and settled two things:
+
+- The archive is small and **nameless**: `{1.1 UUID string, 3 varint, 4
+  varint}` — whatever name the sidebar shows is derived from the bookmarked
+  text, not stored.
+- The table keeps **terminator entries** — an index with no reference, where a
+  bookmark's run ends — and a reader that counts entries counts bookmarks that
+  do not exist. Two archives, three entries, in the fixture.
 
 `TP.DocumentArchive` field 46
 (`show_in_bookmarks_list_paragraph_styles_property_initialized`) and the
@@ -3018,26 +3024,37 @@ and will not write an encrypted package.
 
 ## 12. Annotations — comments, authors and change tracking
 
-**Read the boundary first.** Everything in this section below the author
-storage is decoded from the 15.3.1 schema and **has never met a live example**.
+**How the boundary moved.** For a long time nothing below the author storage
+had ever met a live example: no scripting dictionary has a comment command or
+a change-tracking property, and all 901 template bundles ship without review
+state — every one of the corpus's type-213 payloads was zero bytes. Then the
+screen was unlocked, the Insert and Edit menus became drivable, and
+`pages-comments.pages` and `pages-tracked.pages`
+(`scripts/applescript/pages-comments-ui.applescript`, `…-tracked-ui…`) gave
+the decoders their first real documents.
 
-* All 26 readable fixtures and all 901 template bundles the three apps ship
-  carry exactly one `TSK.AnnotationAuthorStorageArchive` (213), and in every one
-  of those 927 its payload is **zero bytes long**. No authors, therefore no
-  comments and no tracked changes.
-* Not one document anywhere on this machine has a 212, a 2013, a 2014, a 2060,
-  a 2061, a 2062 or a 3056 in it, and no storage carries field 21, 22, 23 or 25.
-* No scripting dictionary will make one. `sdef` over all three apps finds
-  "annotation" only in Pages' `include annotations` *export* option, and
-  "change" not at all: there is no comment command, no comment class, and no
-  change-tracking property.
-* Template mining, the substitute for AppleScript everywhere else in this
-  repository, finds nothing either — a template ships without review state.
+What they settled — including one bug the schema alone could not show:
 
-So: the storage is *Confirmed*, and everything reachable from it is
-*Unverified*. It is written down because a document that arrives from somebody
-else's Mac will have all of it, and a reader that silently ignores a comment
-anchor is a reader that loses one. `tests/fixtures.rs` has the tripwires.
+* **The anchor tables are one level deeper than a schema reading suggests.**
+  A storage's field 21/22/23/25 is the *table*: a wrapper message whose
+  repeated field 1 holds the `{character_index, reference}` entries, exactly
+  like every other attribute table (§4). Decoding the storage field as if it
+  were an entry finds nothing — and every comment reports unattached, which
+  is how the bug announced itself.
+* A comment anchors through a `TSWP.HighlightArchive` (2013) of
+  `{1 → comment, 2 UUID string}`; the fixture's two sit at characters 0
+  and 63, exactly the words the recipe selected. The author storage finally
+  holds a real `TSK.AnnotationAuthorArchive` — name and colour, as drawn.
+* A tracked change reaches its 2060 from `table_insertion`/`table_deletion`
+  the same way (the fixture: insertions at 3 and 116, a deletion at 0, one
+  `TSWP.ChangeSessionArchive`), and `TP.DocumentArchive.change_tracking_enabled`
+  (40) is finally seen true.
+
+Those parts are **Confirmed**. Still never seen and still *Unverified*:
+replies, any resolved state (no descriptor anywhere contains `resolv`), cell
+comments, `table_overlapping_highlight` (25), deprecated change authors
+(2061), and what accepting or rejecting a change leaves behind.
+`tests/fixtures.rs` keeps tripwires for exactly those.
 
 ### The graph
 
@@ -3221,7 +3238,7 @@ the show lists the slides' nodes, the theme lists the layouts'.
 | Field | Meaning | Evidence |
 |---|---|---|
 | 1 | `style` → `KN.SlideStyleArchive` (9), one per layout, shared by every slide on it, and living in the document stylesheet | *Confirmed* |
-| 2 | `builds` → `KN.BuildArchive` (8) | *never seen, decoded from the schema* |
+| 2 | `builds` → `KN.BuildArchive` (8) | *Confirmed — `keynote-builds.key`, §Builds* |
 | 4 | `transition` → `KN.TransitionArchive` | *Confirmed* |
 | 5, 6, 20, 30 | title, body, slide-number and object placeholders | *Confirmed* |
 | 7 | `owned_drawables` | *Confirmed* |
@@ -3487,21 +3504,35 @@ the slide's `audio clips` still count zero, and the saved package holds no new
 `Data/` entry. An app trap worth the whole probe: a `make` that succeeds and
 does nothing.
 
-### Builds — decoded from the schema, never measured
+### Builds — measured at last
 
-`KN.SlideArchive.builds` (2) and `buildChunks` (43) are **empty in every deck in
-this corpus and in all 182 bundled `.kth` themes**. Keynote's scripting
-dictionary has no build vocabulary at all — `transition properties` on a slide
-is the entire animation surface it exposes — and template mining does not help
-because a theme carries masters, not animations. Nothing available can make one.
+Keynote's scripting dictionary has no build vocabulary and a theme carries
+masters, not animations, so for a long time nothing available could make one.
+The Animate inspector on an unlocked screen can
+(`scripts/applescript/keynote-builds-ui.applescript`), and
+`keynote-builds.key` now carries eight: a Dissolve build-in and a Disappear
+build-out on each of four objects. What measurement added to the schema
+reading below:
 
-So the shape below is the 15.3.1 schema and nothing else. It is decoded anyway,
-so that a deck from *outside* is reported rather than counted as nothing, and
-`tests/keynote.rs` fails the day a fixture grows one — which is the signal to
-come back and measure it, not to trust it.
+- **`animationAttributes.animation_type` is the direction**: the literal
+  string `"In"` or `"Out"` (a transition writes `"Transition"` there). That
+  is what tells a build-in from a build-out — nothing else in the archive
+  does.
+- **Effect identifiers are not the menu names.** Dissolve stores
+  `apple:dissolve character`; **Disappear stores `apple:bc-appear`**. The
+  menu name is a rendering.
+- `delivery` (2) reads `"All at Once"` verbatim; `eventTrigger` = 1;
+  `custom_textDelivery` = 1 and `custom_deliveryOption` = 1 on every one of
+  the eight; one `KN.BuildChunkArchive` per build.
+
+Those parts are **Confirmed** against the fixture
+(`tests/keynote.rs::builds_exist_exactly_where_they_were_added`). Action
+builds, motion paths, by-bullet-group ranges, chunk delays and the rest of
+the `custom_*` block remain schema-only:
 
 ```text
- KN.BuildArchive (8)                                        *** UNVERIFIED ***
+ KN.BuildArchive (8)                       fields below not in the fixture:
+                                           *** UNVERIFIED ***
    ├── 1 drawable      → what is animated
    ├── 2 delivery      required string; values unknown, carried verbatim
    ├── 4 attributes  → KN.BuildAttributesArchive
@@ -3525,8 +3556,9 @@ come back and measure it, not to trust it.
 The **chunks are the delivery**: one stage each, in the order the slide lists
 them, each with its own delay, duration and automatic flag — which is where "With
 Build 2, after 0.3 s" would live. `startOffset`/`endOffset` are where a
-by-bullet-group text build would put its range. All of that is a reading of the
-schema; none of it has been watched.
+by-bullet-group text build would put its range. That part is a reading of the
+schema; the fixture's chunks are all single-stage, so it has still not been
+watched doing anything interesting.
 
 ### Recordings and cameras — identified, never authored
 

@@ -2592,3 +2592,36 @@ fixture, and what the app accepted.
 - If a phase discovers the format resists its plan (it will), the agent's
   brief is to shrink scope and land what is *proven* rather than force the
   roadmap; this file gets amended to match reality.
+
+## After the build-out
+
+- 2026-08-18 — **The unlocked screen, and the six features that needed it.**
+  The user sat down at the Mac, the screen unlocked, and ground rule 7's
+  blocked half opened: UI scripting works again. Six fixtures now exist that
+  no dictionary and no template could produce — `pages-footnotes`,
+  `pages-comments`, `pages-tracked`, `pages-bookmarks`, `keynote-builds`,
+  `numbers-hidden` — with reproducible recipes in
+  `scripts/applescript/*-ui.applescript` behind `make-fixtures.sh --ui`
+  (which probes for AX windows and skips cleanly when locked). What they
+  settled, each previously Unverified or wrong:
+  - The change/highlight anchor tables (21/22/23) are **wrappers** with
+    repeated field-1 entries like every attribute table; the schema-only
+    reading was one level too shallow and reported every comment unattached.
+    Comments anchor through `TSWP.HighlightArchive` at exactly the selected
+    characters; changes anchor the same way; the author storage finally
+    carries a real author.
+  - A footnote mark is **U+000E**, not U+FFFC; the notes are the corpus's
+    first kind-2 storages, anchors at 26 and 77 as made.
+  - A bookmark archive is nameless (`{UUID, 2 varints}`), and the table's
+    terminator entries are not bookmarks (a reader counting entries said 3
+    where 2 exist).
+  - Builds: `animation_type` `"In"`/`"Out"` is what separates build-in from
+    build-out; menu "Disappear" stores `apple:bc-appear`. Eight measured;
+    action builds and chunk timing remain schema-only.
+  - `iwork tables` now reads hidden rows/columns from the extents (the model
+    count fields are dead, as 1b found); `numbers-hidden` exercises
+    user-hidden rows for the first time.
+  Registry: 212, 2008, 2013, 2035, 2060, 2062, 3056 and KN 8 upgraded to
+  Confirmed. Five tripwires flipped into pinning tests; tripwires remain for
+  replies, resolved state, cell comments, table 25, and accept/reject
+  residue. Full suite green (14 binaries), fmt/clippy clean.

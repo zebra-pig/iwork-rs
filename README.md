@@ -154,7 +154,7 @@ iwork structure Report.pages              # mode, paper, page templates, threads
 iwork metadata  Report.pages              # the two plists, the identity, the build
                                           # history, locale, template, custom formats
 iwork annotations Report.pages            # authors, comments and their anchors,
-                                          # tracked changes — none of which exists
+                                          # tracked changes
 iwork duplicate Report.pages copy.pages   # a copy with a *new* document identity
 iwork new "/Applications/Pages.app/Contents/SharedSupport/Templates/08_Journal_Newsletter/ISO.template" \
           Newsletter.pages                # a document from a template bundle
@@ -475,7 +475,8 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | Table of contents: both settings archives, its rules and its entries | ✅ | — | — |
 | Columns: equal and non-equal, as fractions that add up to one | ✅ | — | — |
 | A page number's format is on the attachment, not on the section | ✅ | — | — |
-| No footnote body and no bookmark exists to decode, anywhere | ✅ | — | — |
+| Footnotes: marks on `U+000E`, notes as kind-2 storages, made via the UI | ✅ | — | — |
+| Bookmarks: nameless UUID archives; terminator entries are not bookmarks | ✅ | — | — |
 | Write a header or footer; only the touched stream is rewritten | ✅ | — | — |
 | **Pages opens the edited document, saves it, and the header is still there** | ✅ | — | — |
 | Deleting a section break is refused by name | ✅ | — | — |
@@ -521,9 +522,10 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | A copy's object streams are the original's, byte for byte | ✅ | ✅ | ✅ |
 | **Pages saves the re-identified copy twice and moves only the version** | ✅ | — | — |
 | A password-protected package is refused by name, hint and all | ✅ | (same shape) | (same shape) |
-| No comment, no reply, no tracked change and no author exists to decode, anywhere | ✅ | ✅ | ✅ |
-| Change tracking is off and its ten fields are at their defaults, everywhere | ✅ | — | — |
+| Comments anchor through highlights at the selected characters, with a real author | ✅ | — | — |
+| Tracked changes: insertions and a deletion, anchored, in one session | ✅ | — | — |
 | An edit through a tracked change is refused by name | ✅ | ✅ | ✅ |
+| Keynote builds: in/out told apart by `animation_type`, effects by stored id | — | — | ✅ |
 | Alt text (`accessibility_description`) read — 59 of them, in twelve fixtures | ✅ | ✅ | ✅ |
 | The show: theme, slide size, slide tree, layouts in the app's order | — | — | ✅ |
 | Every slide's layout is one the theme lists; every layout has a name | — | — | ✅ |
@@ -620,15 +622,13 @@ eight wire values were got by handing Keynote a patched PowerPoint file and
 reading back what its importer wrote; the **presentation type** and the two
 self-playing delays, which have no scripting term; and the **soundtrack**, which
 has none either — `make new audio clip` is accepted by Keynote and then does
-nothing at all. Builds are the largest gap and the most honest: there is not one
-in six decks or in 182 themes, so `KN.BuildArchive` is decoded from the 15.3.1
-schema, reported if it is ever met, and guarded by a test that fails the day a
-fixture produces one.
-
-**There are no builds anywhere.** Not in the six decks, not in any of the 182
-bundled `.kth` themes, and nothing in Keynote's dictionary will make one — so
-the build count this crate reports is honestly zero and `KN.BuildArchive` stays
-Inferred.
+nothing at all. Builds went from the largest gap to a measured fact when the
+screen was unlocked: no dictionary and no theme will make one, but the Animate
+inspector will, and `keynote-builds.key` carries eight. A build-in and a
+build-out are told apart by `animation_type` (`"In"`/`"Out"`), and the menu's
+"Disappear" stores the identifier `apple:bc-appear`. Action builds, motion
+paths and by-bullet delivery remain schema-only — see
+[§13](FORMAT.md#13-keynote-structure--kn).
 
 ## Testing
 
@@ -654,9 +654,15 @@ instead:
 
 ```
 scripts/make-fixtures.sh          # into tests/fixtures/generated/, gitignored
+scripts/make-fixtures.sh --ui     # + the six only the menus can make
 ```
 
-Twenty-seven documents that between them cover plain and styled text, non-Latin
+`--ui` adds the fixtures nothing scriptable can produce — footnotes, comments,
+tracked changes, bookmarks, Keynote builds, hand-hidden rows — by driving the
+apps' menus, which works only while the screen is unlocked; the script probes
+and skips cleanly when it is not.
+
+Twenty-seven documents (thirty-three with `--ui`) that between them cover plain and styled text, non-Latin
 text including emoji, a table and an image, lists, sections and facing pages, a
 table of contents, a page-layout document with linked text boxes, page
 numbering, columns, a password-protected document, two sheets of typed cells and
