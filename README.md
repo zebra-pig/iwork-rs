@@ -109,8 +109,11 @@ iwork charts    Budget.numbers            # every chart: type, placement, the da
                                           # follows — the two are not the same
 
 iwork slides    Talk.key                  # every slide: layout, placeholders and
-                                          # their text, presenter notes, transition,
-                                          # build count
+                                          # their text, presenter notes, the
+                                          # transition with its per-effect
+                                          # parameters, builds; and for the show,
+                                          # playback, soundtrack, recording and
+                                          # live-video cameras
 iwork layouts   Talk.key                  # the theme's slide layouts, and which
                                           # slides are built on each
 iwork set-notes Talk.key 2652498 "…" out.key
@@ -503,8 +506,17 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | Text roles per slide: title, body, number, notes, text box | — | — | ✅ |
 | A skipped slide has no number and the rest count past it | — | — | ✅ |
 | "Title showing" is ownership — membership of `owned_drawables` | — | — | ✅ |
-| Transitions read by the identifier the app's dictionary lists (5 of them) | — | — | ✅ |
-| Builds: zero in four decks and in all 182 bundled themes, and nothing can make one | — | — | ✅ |
+| Transitions read by the identifier the app's dictionary lists — **all 44** | — | — | ✅ |
+| Each effect's `custom_*` parameters, diffed across 44 otherwise identical slides | — | — | ✅ |
+| The parameters follow the effect, not the duration, delay or automatic flag | — | — | ✅ |
+| Magic Move's whole surface: fade unmatched, acceleration, text granularity | — | — | ✅ |
+| No transition anywhere carries a parameter the 15.3.1 schema does not name | — | — | ✅ |
+| The app writes no transition direction — absent in six decks and 182 themes | — | — | ✅ |
+| Playback: loop, play on open, restart-when-idle, and its **minutes-vs-seconds** trap | — | — | ✅ |
+| Presentation type and the two self-playing delays sit at their defaults, written | — | — | ✅ |
+| A soundtrack in every deck, empty in all of them; its track list is a data-id list | — | — | ✅ |
+| Builds: zero in six decks and in all 182 bundled themes, and nothing can make one | — | — | ✅ |
+| No recorded presentation exists; one live-video camera per deck, and it is the default | — | — | ✅ |
 | **The app agrees about every slide** — 34 layout names and 14 slides, nine fields each | — | — | ✅ |
 | Skip and unskip a slide; unskipping restores the bytes exactly | — | — | ✅ |
 | Reorder slides: a permutation of the slide tree, nothing else touched | — | — | ✅ |
@@ -527,12 +539,14 @@ four further Pages documents and one Keynote deck — 654 styles in all.
 
 ### Keynote status
 
-Keynote is verified against four decks — 993 to 1466 objects, 1 to 19 slides,
-17 slide layouts each — and against its own scripting dictionary, which is the
-richest of the three: `scripts/slide-oracle.sh` asks the app for the slide
-count, the layouts by name, and every slide's number, base layout, skipped
-flag, title, body, presenter notes and transition, and every one of those is
-compared.
+Keynote is verified against six decks — 1 to 46 slides, 17 slide layouts each —
+and against its own scripting dictionary, which is the richest of the three:
+`scripts/slide-oracle.sh` asks the app for the slide count, the layouts by name,
+the four playback settings, and every slide's number, base layout, skipped flag,
+title, body, presenter notes and transition, and every one of those is compared.
+The effect table is compared too — the app names an effect in English, the
+document names it by identifier, and all 44 pairings are checked against the
+app rather than transcribed from the dictionary.
 
 Layers 1–3 are exactly as predicted — same stored ZIP, same Snappy framing,
 same object stream, text in the same `TSWP.StorageArchive`, styles in the same
@@ -557,6 +571,25 @@ tree entry and an external-reference declaration rather than one object.
 **"Title showing" and "slide numbers showing" are not the fields they sound
 like.** The first is whether the slide owns the placeholder; the second is a
 flag on every slide's node, not on the show.
+
+**A transition's parameters belong to its effect.** `keynote-transitions` is 44
+blank slides carrying all 44 effects the dictionary lists, identical in every
+other respect, and diffing them is how the `custom_*` block was read: eleven of
+the effects bring a parameter and thirty-three bring none. Keynote writes the
+ones the effect *has*, false values included, so they are read as optionals —
+`apple:scale` carries `custom_bounce` = false, which is not the same as having
+no bounce at all.
+
+Three things about a transition cannot be reached from a script and are marked
+as such in [§13](FORMAT.md#13-keynote-structure--kn): the **direction**, whose
+eight wire values were got by handing Keynote a patched PowerPoint file and
+reading back what its importer wrote; the **presentation type** and the two
+self-playing delays, which have no scripting term; and the **soundtrack**, which
+has none either — `make new audio clip` is accepted by Keynote and then does
+nothing at all. Builds are the largest gap and the most honest: there is not one
+in six decks or in 182 themes, so `KN.BuildArchive` is decoded from the 15.3.1
+schema, reported if it is ever met, and guarded by a test that fails the day a
+fixture produces one.
 
 **There are no builds anywhere.** Not in the four decks, not in any of the 182
 bundled `.kth` themes, and nothing in Keynote's dictionary will make one — so
