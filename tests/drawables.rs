@@ -703,6 +703,28 @@ fn replacing_media_refuses_an_image_with_a_thumbnail() {
     }
 }
 
+/// A table drawable has no object style: its field 2 is the table model, not a
+/// style reference. Reading it as one reported a style that does not exist for
+/// every table in the corpus.
+#[test]
+fn a_table_drawable_reports_no_object_style() {
+    let path = fixture!("numbers-values.numbers");
+    let doc = Document::open(&path).unwrap();
+    let tables: Vec<_> = doc
+        .drawables()
+        .into_iter()
+        .filter(|d| d.kind == Kind::Table)
+        .collect();
+    assert!(!tables.is_empty(), "the fixture has tables");
+    for table in tables {
+        assert_eq!(
+            table.style, None,
+            "table {} claimed a style it does not have",
+            table.identifier
+        );
+    }
+}
+
 /// Media that lives in the app's theme bundle has no bytes in the document, so
 /// there is nothing to replace and saying so is better than inventing an entry.
 #[test]

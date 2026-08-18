@@ -1137,6 +1137,11 @@ pub fn drawables(document: &crate::Document) -> Vec<Drawable> {
             Kind::Movie => body.bytes(19).and_then(reference),
             // A mask's field 2 is its path source, not a style — it has none.
             Kind::Mask | Kind::Group => None,
+            // A table's field 2 is its `TST.TableModelArchive` (6001), not a
+            // style: a `TableInfoArchive` has no object style. Reading it as one
+            // reported a bogus style — and `object_style` then read field 10 of
+            // the *model* as an override count — for every table in the corpus.
+            Kind::Table => None,
             _ => body.bytes(2).and_then(reference),
         };
 

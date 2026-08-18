@@ -728,6 +728,27 @@ fn decode(
             .unwrap_or_default()
     };
 
+    // The title and caption references live on the `TSD.DrawableArchive`
+    // (fields 10 and 11), not on the `TSCH` archive read through `reference`
+    // above. Reach the drawable archive through the path the drawable was found
+    // by, and read them.
+    let drawable_archive = objects.get(&drawable.identifier).and_then(|(_, payload)| {
+        if drawable.path.is_empty() {
+            Some(payload.clone())
+        } else {
+            crate::style::get_path(payload, &drawable.path).and_then(|value| match value {
+                Value::Bytes(raw) => decode_nested(&raw),
+                _ => None,
+            })
+        }
+    });
+    let drawable_ref = |number: u32| -> Option<u64> {
+        drawable_archive
+            .as_ref()
+            .and_then(|d| d.bytes(number).and_then(decode_nested))
+            .and_then(|r| r.varint(1))
+    };
+
     let mediator = reference(field::MEDIATOR);
     Chart {
         identifier: drawable.identifier,
@@ -769,11 +790,15 @@ fn decode(
             .map(|(number, name)| (*number, *name))
             .collect(),
         placement: drawable.placement.clone(),
-        frame: drawable.base_rect(None),
+        // The rectangle the app reports, with the rotated-bounding-box
+        // correction `Drawable::frame` applies — the same the drawable reader
+        // uses. It equals `base_rect` whenever the chart is unrotated, which is
+        // every chart in the corpus, but a rotated one is now framed correctly.
+        frame: drawable.frame(None),
         rotation: drawable.geometry.angle,
         parent: drawable.parent,
-        title: None,
-        caption: None,
+        title: drawable_ref(crate::drawable::field::TITLE),
+        caption: drawable_ref(crate::drawable::field::CAPTION),
         references: mediator.and_then(|id| data_references(id, objects, names)),
     }
 }

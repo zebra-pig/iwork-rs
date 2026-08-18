@@ -161,6 +161,34 @@ fn the_zoo_holds_the_numbers_it_was_built_from() {
     assert_eq!(hundreds.len(), 17, "one hundred per chart type");
 }
 
+/// A chart's title and caption references live on its `TSD.DrawableArchive`
+/// (fields 10 and 11), and every chart in this deck carries both. They were
+/// hard-coded `None` before — a claim of absence the archives contradict — and
+/// each now resolves to the storage object the drawable points at.
+#[test]
+fn a_chart_reads_its_title_and_caption_references() {
+    let doc = fixture!("keynote-charts.key");
+    let charts = doc.charts();
+    assert!(!charts.is_empty(), "the deck has charts");
+    for chart in &charts {
+        let title = chart.title.expect("every chart in this deck has a title");
+        let caption = chart
+            .caption
+            .expect("every chart in this deck has a caption");
+        // The references resolve to real objects in the document.
+        assert!(
+            doc.object(title).is_some(),
+            "chart {} title {title} resolves",
+            chart.identifier
+        );
+        assert!(
+            doc.object(caption).is_some(),
+            "chart {} caption {caption} resolves",
+            chart.identifier
+        );
+    }
+}
+
 /// The seventeen legacy chart types Keynote's `add chart` accepts, and the
 /// `TSCH.ChartType` each one produces.
 ///

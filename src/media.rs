@@ -52,7 +52,7 @@ pub mod field {
 /// Sixty lines is cheaper than a dependency for a hash whose only job here is
 /// to reproduce a value the app already computed — and which is checked against
 /// `shasum` over every stored media file in the corpus by
-/// `tests/media.rs::every_digest_is_the_sha1_of_the_bytes`.
+/// `tests/drawables.rs::every_digest_is_the_sha1_of_the_bytes`.
 pub fn sha1(data: &[u8]) -> [u8; 20] {
     let mut h: [u32; 5] = [0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0];
     let mut message = data.to_vec();
