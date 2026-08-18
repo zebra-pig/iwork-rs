@@ -2034,8 +2034,8 @@ paragraph-style property `show_in_bookmarks_list` (43) are present and are the
 Deleting the `U+0004` that begins a section merges two sections into one, and
 which of the two keeps its three section templates, its eighteen header and
 footer storages, its guide storage and its background fill is not something any
-probe here could establish. Pages will not perform the
-edit for anyone to watch:
+probe here could establish. Pages will not perform the edit for anyone to
+watch:
 
 - `delete section 2 of document 1` answers **-10000**, "AppleEvent handler
   failed";
