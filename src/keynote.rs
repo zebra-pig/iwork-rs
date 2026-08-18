@@ -251,12 +251,15 @@ pub mod transition_field {
 
 /// Field numbers of `KN.BuildArchive` (8) and its attributes.
 ///
-/// **Unverified in this corpus.** No document here and none of the 182 bundled
-/// themes carries a build, and nothing in Keynote's dictionary makes one, so
-/// every name below comes from the 15.3.1 schema and none of it has been
-/// exercised. It is decoded anyway so that a deck from outside is *reported*
-/// rather than silently counted as nothing — and so that
-/// [`tests`](crate::keynote) fails the day one turns up.
+/// **Partly measured at last.** `keynote-builds.key` carries eight builds —
+/// four Dissolve build-ins and four Disappear build-outs — made from the
+/// Animate inspector on an unlocked screen, so `delivery`, `eventTrigger`, the
+/// animation attributes and the `animation_type` that tells an "In" from an
+/// "Out" are Confirmed against the fixture. None of the 182 bundled themes has
+/// a build, and Keynote's dictionary still has no build vocabulary, so the
+/// action-build, motion-path, by-bullet-group and chunk-timing fields below
+/// remain schema-only — decoded anyway so a deck from outside is *reported*,
+/// and pinned by [`tests`](crate::keynote) against the fixture's eight.
 pub mod build_field {
     pub const DRAWABLE: u32 = 1;
     /// `required string delivery` — carried verbatim, because nothing here
@@ -724,15 +727,16 @@ impl Default for Transition {
 
 /// One `KN.BuildArchive` (8) — one animation of one drawable.
 ///
-/// **Unverified, and honestly so.** There is no build in any of the six decks
-/// of this corpus nor in any of the 182 bundled themes, Keynote's scripting
-/// dictionary has no build vocabulary at all, and a theme carries masters
-/// rather than animations — so nothing available can make one to be watched.
-/// Every field below is named from the 15.3.1 schema. What this type is for is
-/// that a deck from *outside* is reported rather than counted as nothing:
-/// `iwork slides` says how many builds a slide carries and what they say, and
-/// `tests/keynote.rs` fails the day a fixture grows one, which is the signal to
-/// come back and measure it.
+/// **Measured, for the parts a fixture could reach.** `keynote-builds.key`
+/// carries eight builds, and against them `delivery`, `event_trigger`, the
+/// animation attributes and the `animation_type` string (`"In"` / `"Out"`,
+/// where a transition writes `"Transition"`) are Confirmed. The effect
+/// identifiers are not the menu names — Dissolve stores `apple:dissolve
+/// character` and Disappear stores `apple:bc-appear`. The remaining fields
+/// (action builds, motion paths, by-bullet-group ranges) stay schema-only:
+/// none of the seven decks here nor the 182 bundled themes exercises them, and
+/// Keynote's dictionary has no build vocabulary, so `iwork slides` reports what
+/// a build says and `tests/keynote.rs` pins the fixture's eight.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Build {
     pub identifier: u64,
@@ -757,8 +761,9 @@ pub struct Build {
     pub unknown_attributes: Vec<u32>,
 }
 
-/// One `KN.BuildChunkArchive` (153) — one stage of a build. Unverified for the
-/// same reason [`Build`] is.
+/// One `KN.BuildChunkArchive` (153) — one stage of a build. The fixture's eight
+/// builds each have a single chunk, so the shape is Confirmed but the chunk
+/// timing that would carry "With Build 2, after 0.3 s" is still schema-only.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BuildChunk {
     pub identifier: u64,
@@ -838,8 +843,9 @@ pub struct Slide {
     /// `drawables_z_order` (42), back to front.
     pub z_order: Vec<u64>,
     pub transition: Transition,
-    /// The `KN.BuildArchive`s the slide lists (2). Empty in every document this
-    /// crate has ever been shown — see [`Build`].
+    /// The `KN.BuildArchive`s the slide lists (2). Empty everywhere but
+    /// `keynote-builds.key`, whose four animated objects carry eight between
+    /// them — see [`Build`].
     pub builds: Vec<Build>,
     /// The `KN.BuildChunkArchive`s it lists (43), in order.
     pub build_chunks: Vec<BuildChunk>,
@@ -949,9 +955,9 @@ pub struct Show {
     /// the per-slide flag instead. See [`Slide::number_visible`] and
     /// [`Show::numbers_shown_on`].
     pub slide_numbers_visible: bool,
-    /// `loop_presentation` (8) — the app's `auto loop`. **Measured**: false in
-    /// five decks and true in `keynote-playback`, which is the only thing about
-    /// it that differs from them.
+    /// `loop_presentation` (8) — the app's `auto loop`. **Measured**: true in
+    /// `keynote-playback` and false in every other deck, which is the only
+    /// thing about it that differs from them.
     pub loop_presentation: bool,
     /// `mode` (9): 0 normal, 1 auto-play (self-playing), 2 hyperlinks only.
     /// Written explicitly, at 0, by every deck here. **Schema-only** — the
@@ -1013,9 +1019,9 @@ impl Show {
         self.idle_timer_delay / 60.0
     }
 
-    /// How many builds the whole deck carries. Zero everywhere so far; a
-    /// non-zero one is the signal that [`Build`]'s schema-only decode finally
-    /// has something to be measured against.
+    /// How many builds the whole deck carries. Zero in every deck but
+    /// `keynote-builds.key`, which has eight — the fixture [`Build`] was
+    /// measured against.
     pub fn build_count(&self) -> usize {
         self.slides.iter().map(|s| s.builds.len()).sum()
     }
@@ -1603,6 +1609,106 @@ fn node_of(document: &crate::Document, slide: u64) -> Result<(u64, Message), Err
     by_slide.ok_or(Error::NoSuchObject(slide))
 }
 
+/// The node order held in a `KN.SlideTreeArchive`, **refusing the read if any
+/// entry is not a bare `{1: node}` reference**.
+///
+/// [`move_slide`] and [`insert_into_slide_tree`] rebuild the repeated `slides`
+/// field from these ids, re-emitting each as a fresh `{1: id}` message — which
+/// reproduces a bare reference byte for byte but would silently drop an entry
+/// that carried anything else, and its slide with it. Every entry Keynote
+/// writes is a bare reference, so refusing the odd one costs nothing and keeps
+/// the rebuild honest.
+fn slide_tree_order(tree: &Message) -> Result<Vec<u64>, Error> {
+    let mut order = Vec::new();
+    for value in tree.all(slide_tree_field::SLIDES) {
+        let Value::Bytes(raw) = value else {
+            return Err(Error::Format(
+                "KN.SlideTreeArchive has a slide entry that is not a message; \
+                 refusing to rewrite a tree this crate would not reproduce"
+                    .into(),
+            ));
+        };
+        let target = decode_nested(raw)
+            .as_ref()
+            .and_then(reference_target)
+            .ok_or_else(|| {
+                Error::Format(
+                    "KN.SlideTreeArchive has a slide entry that is not a bare reference; \
+                     refusing to rewrite a tree this crate would not reproduce"
+                        .into(),
+                )
+            })?;
+        order.push(target);
+    }
+    Ok(order)
+}
+
+/// The show, its slide tree, and the node order — the reading every reorder
+/// starts from. Errors if the document is not a deck, has no tree, or holds a
+/// tree entry [`slide_tree_order`] will not reproduce.
+fn read_slide_tree(document: &crate::Document) -> Result<(u64, Message, Message, Vec<u64>), Error> {
+    let (show_id, show_archive) = document
+        .objects()
+        .find(|(_, o)| o.message_type() == TYPE_SHOW)
+        .map(|(_, o)| (o.identifier, Message::decode(o.payload())))
+        .ok_or_else(|| Error::Format("no KN.ShowArchive: not a Keynote document".into()))?;
+    let show_archive = show_archive.map_err(|e| Error::Format(format!("KN.ShowArchive: {e}")))?;
+    let tree_raw = show_archive
+        .bytes(show_field::SLIDE_TREE)
+        .ok_or_else(|| Error::Format("KN.ShowArchive has no slide tree".into()))?;
+    let tree = decode_nested(tree_raw)
+        .ok_or_else(|| Error::Format("KN.ShowArchive slide tree does not decode".into()))?;
+    let order = slide_tree_order(&tree)?;
+    Ok((show_id, show_archive, tree, order))
+}
+
+/// Write a new node order back into the show, keeping every other field of the
+/// `KN.SlideTreeArchive` verbatim. The entries are re-emitted as bare
+/// references, which reproduces what [`slide_tree_order`] accepted byte for
+/// byte, so an order that ends where it began reproduces the original stream.
+fn write_slide_order(
+    document: &mut crate::Document,
+    show_id: u64,
+    mut show_archive: Message,
+    tree: &Message,
+    order: &[u64],
+) -> Result<(), Error> {
+    let mut rebuilt = Message::default();
+    for field in &tree.fields {
+        if field.number != slide_tree_field::SLIDES {
+            rebuilt.fields.push(field.clone());
+        }
+    }
+    for id in order {
+        let mut entry = Message::default();
+        entry.set(1, Value::Varint(*id));
+        rebuilt.append_in_order(slide_tree_field::SLIDES, Value::Bytes(entry.encode()));
+    }
+    show_archive.set(show_field::SLIDE_TREE, Value::Bytes(rebuilt.encode()));
+    document.set_archive_of(show_id, &show_archive)
+}
+
+/// The node of a slide that is actually **in the show's deck** — refusing a
+/// slide layout, whose node lives in the theme's `templates`, not the show's
+/// slide tree.
+///
+/// [`node_of`] resolves a layout id perfectly well, because a layout has a
+/// `KN.SlideNodeArchive` too; membership of the slide tree is the only thing
+/// that tells a slide from a template. Without this guard, `set_slide_skipped`
+/// writes `isSkipped` into a theme node and the CLI reports "slide N is
+/// skipped" about a layout, silently.
+fn slide_node_in_deck(document: &crate::Document, slide: u64) -> Result<(u64, Message), Error> {
+    let (node, archive) = node_of(document, slide)?;
+    let (_, _, _, order) = read_slide_tree(document)?;
+    if !order.contains(&node) {
+        return Err(Error::Format(format!(
+            "object {slide} is not a slide in the show's deck — a slide layout, or a node \
+             the slide tree does not list; refusing to treat it as a slide"
+        )));
+    }
+    Ok((node, archive))
+}
+
 /// Skip a slide, or stop skipping it.
 ///
 /// The whole of the feature is `KN.SlideNodeArchive.isSkipped` (4), which the
@@ -1610,13 +1716,17 @@ fn node_of(document: &crate::Document, slide: u64) -> Result<(u64, Message), Err
 /// number's *place* in nothing: the app renumbers the deck around it and
 /// answers `slide number` with -1.
 ///
+/// Refuses an id that is not a slide in the show's deck — a slide layout has a
+/// node too, and writing `isSkipped` into a theme template is a silent
+/// mis-edit. See [`slide_node_in_deck`].
+///
 /// Returns whether the flag changed.
 pub fn set_slide_skipped(
     document: &mut crate::Document,
     slide: u64,
     skipped: bool,
 ) -> Result<bool, Error> {
-    let (node, mut archive) = node_of(document, slide)?;
+    let (node, mut archive) = slide_node_in_deck(document, slide)?;
     let was = flag(&archive, node_field::SKIPPED, false);
     if was == skipped {
         return Ok(false);
@@ -1637,49 +1747,35 @@ pub fn set_slide_skipped(
 /// `KN.ShowArchive.slideTree.slides`: Keynote's own `move` was watched doing
 /// that and touching nothing else, every node and every slide component byte
 /// for byte where it was.
+///
+/// Refuses a slide the deck does not list (a slide layout among them) and an
+/// out-of-range target — a clamp would report "now at position 5" for a
+/// `move … 99` on a six-slide deck, which is a lie about where the slide went.
+/// The permutation only ever re-emits entries [`slide_tree_order`] accepted as
+/// bare references, so it is byte-for-byte lossless or it is refused.
 pub fn move_slide(document: &mut crate::Document, slide: u64, to: usize) -> Result<usize, Error> {
     let (node, _) = node_of(document, slide)?;
-    let (show_id, show_archive) = document
-        .objects()
-        .find(|(_, o)| o.message_type() == TYPE_SHOW)
-        .map(|(_, o)| (o.identifier, Message::decode(o.payload())))
-        .ok_or_else(|| Error::Format("no KN.ShowArchive: not a Keynote document".into()))?;
-    let mut show_archive =
-        show_archive.map_err(|e| Error::Format(format!("KN.ShowArchive: {e}")))?;
-
-    let Some(tree_raw) = show_archive.bytes(show_field::SLIDE_TREE) else {
-        return Err(Error::Format("KN.ShowArchive has no slide tree".into()));
-    };
-    let mut tree = decode_nested(tree_raw)
-        .ok_or_else(|| Error::Format("KN.ShowArchive slide tree does not decode".into()))?;
-    let mut order = references(&tree, slide_tree_field::SLIDES);
-    let from = order
-        .iter()
-        .position(|id| *id == node)
-        .ok_or_else(|| Error::Format(format!("slide {slide} is not in the deck")))?;
-    let to = to.min(order.len().saturating_sub(1));
+    let (show_id, show_archive, tree, mut order) = read_slide_tree(document)?;
+    let from = order.iter().position(|id| *id == node).ok_or_else(|| {
+        Error::Format(format!(
+            "object {slide} is not a slide in the show's deck — a slide layout, perhaps; \
+             refusing to move it"
+        ))
+    })?;
+    if to >= order.len() {
+        return Err(Error::Format(format!(
+            "target position {to} is past the end of a {}-slide deck; \
+             a move must land on an existing position (0..{})",
+            order.len(),
+            order.len() - 1
+        )));
+    }
     if from == to {
         return Ok(from);
     }
     let moved = order.remove(from);
     order.insert(to, moved);
-
-    // Rewrite the repeated field in place: the entries keep the encoding they
-    // had, only their order changes.
-    let mut rebuilt = Message::default();
-    for field in &tree.fields {
-        if field.number != slide_tree_field::SLIDES {
-            rebuilt.fields.push(field.clone());
-        }
-    }
-    for id in &order {
-        let mut entry = Message::default();
-        entry.set(1, Value::Varint(*id));
-        rebuilt.append_in_order(slide_tree_field::SLIDES, Value::Bytes(entry.encode()));
-    }
-    tree = rebuilt;
-    show_archive.set(show_field::SLIDE_TREE, Value::Bytes(tree.encode()));
-    document.set_archive_of(show_id, &show_archive)?;
+    write_slide_order(document, show_id, show_archive, &tree, &order)?;
     Ok(to)
 }
 
@@ -1738,13 +1834,11 @@ pub fn duplicate_slide(document: &mut crate::Document, slide: u64) -> Result<Sli
             (stream.to_string(), slide)
         }
     };
-    if stream.starts_with("Index/TemplateSlide") {
-        return Err(Error::Format(format!(
-            "object {source_id} is a slide layout, not a slide; \
-             Keynote's own dictionary will not copy one either"
-        )));
-    }
-    let (node_id, node_archive) = node_of(document, source_id)?;
+    // What tells a slide from a layout is deck membership, not the stream name:
+    // a layout has a node and a `TemplateSlide` stream, but its node is not in
+    // the show's slide tree. Keynote's own dictionary will not copy a layout
+    // either.
+    let (node_id, node_archive) = slide_node_in_deck(document, source_id)?;
 
     // -- allocate identifiers for every object in the stream ----------------
     let source_objects: Vec<u64> = document
@@ -1860,43 +1954,28 @@ fn remap_references(message: &mut Message, map: &BTreeMap<u64, u64>, depth: usiz
 
 /// Put `new_node` straight after `after` in the show's slide tree, and say
 /// where it landed.
+///
+/// Errors if `after` is not in the tree, rather than appending at the end: a
+/// duplicate whose anchor the deck does not list is a slide inserted nowhere in
+/// particular, which is not an operation worth guessing at.
 fn insert_into_slide_tree(
     document: &mut crate::Document,
     after: u64,
     new_node: u64,
 ) -> Result<usize, Error> {
-    let (show_id, show_archive) = document
-        .objects()
-        .find(|(_, o)| o.message_type() == TYPE_SHOW)
-        .map(|(_, o)| (o.identifier, Message::decode(o.payload())))
-        .ok_or_else(|| Error::Format("no KN.ShowArchive: not a Keynote document".into()))?;
-    let mut show_archive =
-        show_archive.map_err(|e| Error::Format(format!("KN.ShowArchive: {e}")))?;
-    let tree_raw = show_archive
-        .bytes(show_field::SLIDE_TREE)
-        .ok_or_else(|| Error::Format("KN.ShowArchive has no slide tree".into()))?;
-    let tree = decode_nested(tree_raw)
-        .ok_or_else(|| Error::Format("KN.ShowArchive slide tree does not decode".into()))?;
-    let mut order = references(&tree, slide_tree_field::SLIDES);
+    let (show_id, show_archive, tree, mut order) = read_slide_tree(document)?;
     let index = order
         .iter()
         .position(|id| *id == after)
-        .map_or(order.len(), |position| position + 1);
+        .map(|position| position + 1)
+        .ok_or_else(|| {
+            Error::Format(format!(
+                "slide node {after} is not in the show's slide tree; \
+                 refusing to insert a copy at the end instead"
+            ))
+        })?;
     order.insert(index, new_node);
-
-    let mut rebuilt = Message::default();
-    for field in &tree.fields {
-        if field.number != slide_tree_field::SLIDES {
-            rebuilt.fields.push(field.clone());
-        }
-    }
-    for id in &order {
-        let mut entry = Message::default();
-        entry.set(1, Value::Varint(*id));
-        rebuilt.append_in_order(slide_tree_field::SLIDES, Value::Bytes(entry.encode()));
-    }
-    show_archive.set(show_field::SLIDE_TREE, Value::Bytes(rebuilt.encode()));
-    document.set_archive_of(show_id, &show_archive)?;
+    write_slide_order(document, show_id, show_archive, &tree, &order)?;
     Ok(index)
 }
 
@@ -1920,6 +1999,18 @@ fn clone_component(
         .and_then(|name| name.strip_suffix(".iwa"))
         .unwrap_or(stream)
         .to_string();
+    // The source must have a `TSP.ComponentInfo` to copy. Without one, the new
+    // stream is declared by nobody: `declare_external_references` adds zero
+    // declarations — the `Document → new-slide` one included — and Keynote
+    // opens the deck, counts the extra slide, and answers `missing value` for
+    // its layout, its title and its body. A named error beats an `Ok` that
+    // reports `media: 0` and leaves that quiet failure behind.
+    if !document.components().iter().any(|c| c.identifier == source) {
+        return Err(Error::Format(format!(
+            "slide {source} has no TSP.ComponentInfo to copy; refusing to duplicate a slide \
+             whose component the package does not declare"
+        )));
+    }
     let mut media = 0usize;
     document.update_package_metadata(|metadata| {
         let Some(entry) = metadata
@@ -1993,8 +2084,10 @@ fn clone_component(
             }
         }
         // The locator is only written when it differs from the preferred one,
-        // which for a copy it always does.
-        info.set(3, Value::Bytes(locator.as_bytes().to_vec()));
+        // which for a copy it always does. Field 3 was skipped as the source's
+        // fields were copied above, so it is inserted in ascending order here
+        // rather than appended past field 12 — the crate's `set_in_order` rule.
+        info.set_in_order(3, Value::Bytes(locator.as_bytes().to_vec()));
         metadata.append_in_order(3, Value::Bytes(info.encode()));
     })?;
     Ok(media)

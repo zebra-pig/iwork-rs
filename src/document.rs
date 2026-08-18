@@ -2925,19 +2925,44 @@ impl Document {
 
     /// Replace a slide's presenter notes.
     ///
-    /// Notes are an ordinary `TSWP.StorageArchive` of kind 4, so this is
-    /// [`Document::set_text`] on the storage `iwork slides` prints — named here
-    /// because "which storage" is the only hard part.
+    /// Notes are an ordinary `TSWP.StorageArchive` of kind 4, so the text edit
+    /// is [`Document::set_text`] on the storage `iwork slides` prints — "which
+    /// storage" being the only hard part.
+    ///
+    /// It also keeps the node's `hasNote` (field 8) in step with the text.
+    /// Across all 83 slide nodes in the corpus `hasNote == 1` exactly when the
+    /// note storage is non-empty — an app invariant, and one [`Document::problems`]
+    /// now enforces — so writing text into an empty-note slide must set the
+    /// flag, and clearing it must unset it, or the flag comes to say the
+    /// opposite of what the storage holds.
     pub fn set_presenter_notes(&mut self, slide: u64, text: &str) -> Result<TextEdit, Error> {
         let show = self
             .show()
             .ok_or_else(|| Error::Format("not a Keynote document".into()))?;
-        let found = show
-            .slide(slide)
-            .ok_or(Error::NoSuchObject(slide))?
+        let found = show.slide(slide).ok_or(Error::NoSuchObject(slide))?;
+        let node = found.node;
+        let storage = found
             .note_storage
             .ok_or_else(|| Error::Format(format!("slide {slide} has no presenter notes")))?;
-        self.set_text(found, text)
+
+        let edit = self.set_text(storage, text)?;
+
+        // `hasNote` follows the text. Only rewrite the node when the flag
+        // actually changes, so replacing one non-empty note with another still
+        // touches the slide stream alone.
+        let has_note = !text.is_empty();
+        let mut archive = self.archive_of(node)?;
+        let was = archive
+            .varint(crate::keynote::node_field::HAS_NOTE)
+            .is_some_and(|v| v != 0);
+        if was != has_note {
+            archive.set_in_order(
+                crate::keynote::node_field::HAS_NOTE,
+                Value::Varint(u64::from(has_note)),
+            );
+            self.set_archive_of(node, &archive)?;
+        }
+        Ok(edit)
     }
 
     /// Comments, their authors, and tracked changes.
@@ -3417,10 +3442,44 @@ impl Document {
             return problems;
         };
         let layouts: BTreeSet<u64> = show.layouts.iter().map(|l| l.identifier).collect();
+        let components: BTreeSet<u64> = self.components().iter().map(|c| c.identifier).collect();
         let mut seen_nodes: BTreeSet<u64> = BTreeSet::new();
         let mut seen_streams: BTreeMap<String, u64> = BTreeMap::new();
 
         for slide in &show.slides {
+            // Every slide stream needs a `TSP.ComponentInfo` keyed by its slide
+            // archive's id, or nothing declares it to the document — the
+            // quietest way a duplicate can fail. The existing component→stream
+            // check does not catch this: a slide with no component at all has
+            // no entry to check.
+            if !components.contains(&slide.identifier) {
+                problems.push(format!(
+                    "slide {} has no TSP.ComponentInfo, so nothing declares its stream {}",
+                    slide.identifier, slide.stream
+                ));
+            }
+            // `hasNote` (node field 8) is 1 exactly when the note storage holds
+            // text — zero mismatches across the corpus. A blind reader of the
+            // flag, and any tool that trusts it, is wrong the moment an edit
+            // sets the text without the flag or the flag without the text.
+            if let Ok(node) = self.archive_of(slide.node) {
+                let has_note_flag = node
+                    .varint(crate::keynote::node_field::HAS_NOTE)
+                    .is_some_and(|v| v != 0);
+                if has_note_flag == slide.notes.is_empty() {
+                    problems.push(format!(
+                        "slide {}: node {} says hasNote={} but its note storage is {}",
+                        slide.identifier,
+                        slide.node,
+                        u8::from(has_note_flag),
+                        if slide.notes.is_empty() {
+                            "empty"
+                        } else {
+                            "non-empty"
+                        }
+                    ));
+                }
+            }
             if !seen_nodes.insert(slide.node) {
                 problems.push(format!(
                     "slide node {} is in the slide tree more than once",

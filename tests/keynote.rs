@@ -26,7 +26,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use iwork::keynote::{PlaceholderKind, Role};
-use iwork::Document;
+use iwork::{iwa, pb, Document, Package};
 
 fn generated(name: &str) -> Option<PathBuf> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -759,6 +759,262 @@ fn a_slide_without_notes_refuses_rather_than_inventing_a_storage() {
     let path = fixture!("keynote-deck.key");
     let mut doc = Document::open(&path).unwrap();
     assert!(doc.set_presenter_notes(999_999_999, "…").is_err());
+}
+
+/// `KN.SlideNodeArchive.hasNote` (8), read straight off the node.
+fn has_note(doc: &Document, node: u64) -> bool {
+    let (_, object) = doc.object(node).expect("the node exists");
+    pb::Message::decode(object.payload())
+        .unwrap()
+        .varint(8)
+        .is_some_and(|v| v != 0)
+}
+
+/// Writing presenter notes keeps the node's `hasNote` flag in step with the
+/// text: setting text sets it, clearing to "" unsets it. Across the corpus the
+/// flag is 1 exactly when the note storage is non-empty, and `set-notes` used
+/// to leave it blind either way.
+#[test]
+fn setting_and_clearing_notes_moves_hasnote() {
+    let path = fixture!("keynote-deck.key");
+    let mut doc = Document::open(&path).unwrap();
+    let slide = doc.slides()[0].identifier;
+    let node = doc.show().unwrap().slide(slide).unwrap().node;
+    assert!(
+        has_note(&doc, node),
+        "keynote-deck ships with notes on every slide"
+    );
+
+    // Clearing the note drops the flag — and rewrites the node's stream to say so.
+    doc.set_presenter_notes(slide, "").unwrap();
+    assert!(!has_note(&doc, node), "cleared notes drop hasNote");
+    assert!(
+        doc.changed_streams().contains(&"Index/Document.iwa"),
+        "clearing rewrites the node in the document stream"
+    );
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+
+    // Writing text back sets it again.
+    doc.set_presenter_notes(slide, "Wieder Notizen").unwrap();
+    assert!(has_note(&doc, node), "text sets hasNote");
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+}
+
+/// A slide layout has a node too, so `node_of` resolves its id — but skipping
+/// it is refused, because the flag would land in a theme template and the CLI
+/// would report a layout as a skipped slide. The theme node is left untouched.
+#[test]
+fn skipping_a_layout_is_refused() {
+    let path = fixture!("keynote-deck.key");
+    let mut doc = Document::open(&path).unwrap();
+    let layout = doc.slide_layouts()[0].identifier;
+    let err = doc.set_slide_skipped(layout, true).unwrap_err().to_string();
+    assert!(err.contains("not a slide"), "{err}");
+    assert!(
+        doc.changed_streams().is_empty(),
+        "the theme node is untouched"
+    );
+}
+
+/// An out-of-range target is refused, not clamped: `move … 99` on a six-slide
+/// deck used to report "now at position 5".
+#[test]
+fn moving_a_slide_past_the_end_is_refused() {
+    let path = fixture!("keynote-deck.key");
+    let mut doc = Document::open(&path).unwrap();
+    let slide = doc.slides()[0].identifier;
+    let err = doc.move_slide(slide, 99).unwrap_err().to_string();
+    assert!(err.contains("past the end"), "{err}");
+    assert!(doc.changed_streams().is_empty(), "nothing moved");
+}
+
+/// Rewrite the show's inline `KN.SlideTreeArchive` (field 3 of the show) with
+/// `edit`, and hand back a package carrying the result — the forge every
+/// slide-tree test shares.
+fn forge_slide_tree(path: &Path, edit: impl FnOnce(&mut pb::Message)) -> Package {
+    let mut package = Package::read(path).unwrap();
+    let entry = package
+        .entries
+        .iter_mut()
+        .find(|(name, _)| name == "Index/Document.iwa")
+        .expect("a deck has Index/Document.iwa");
+    let mut objects = iwa::parse(&entry.1).unwrap();
+    let mut done = false;
+    for object in &mut objects {
+        if object.message_type() != 2 {
+            continue;
+        }
+        let mut show = pb::Message::decode(object.payload()).unwrap();
+        let raw = show.bytes(3).expect("the show has a slide tree").to_vec();
+        let mut tree = pb::decode_nested(&raw).expect("the tree decodes");
+        edit(&mut tree);
+        show.set(3, pb::Value::Bytes(tree.encode()));
+        object.messages[0].payload = show.encode();
+        done = true;
+        break;
+    }
+    assert!(done, "no KN.ShowArchive to forge");
+    entry.1 = iwa::serialize(&objects);
+    package
+}
+
+/// Drop the `TSP.ComponentInfo` that names `victim` from wherever the package
+/// metadata lives, leaving the slide's stream declared by nobody.
+fn forge_out_component(path: &Path, victim: u64) -> Package {
+    let mut package = Package::read(path).unwrap();
+    for (name, data) in package.entries.iter_mut() {
+        if !name.ends_with(".iwa") {
+            continue;
+        }
+        let Ok(mut objects) = iwa::parse(data) else {
+            continue;
+        };
+        let mut touched = false;
+        for object in &mut objects {
+            if object.message_type() != iwork::TYPE_PACKAGE_METADATA {
+                continue;
+            }
+            let mut meta = pb::Message::decode(object.payload()).unwrap();
+            let before = meta.fields.len();
+            meta.fields.retain(|f| {
+                if f.number != 3 {
+                    return true;
+                }
+                match &f.value {
+                    pb::Value::Bytes(raw) => match pb::decode_nested(raw) {
+                        Some(info) => info.varint(1) != Some(victim),
+                        None => true,
+                    },
+                    _ => true,
+                }
+            });
+            if meta.fields.len() != before {
+                object.messages[0].payload = meta.encode();
+                touched = true;
+            }
+        }
+        if touched {
+            *data = iwa::serialize(&objects);
+        }
+    }
+    package
+}
+
+/// A slide-tree entry that is not a bare `{1: node}` reference is refused, not
+/// silently dropped — a reorder used to rebuild the tree from the entries it
+/// recognised and lose the odd one, and its slide with it.
+#[test]
+fn moving_refuses_a_tree_entry_it_cannot_reproduce() {
+    let path = fixture!("keynote-deck.key");
+    let package = forge_slide_tree(&path, |tree| {
+        // Give the first slide entry an extra field, so it is no longer bare.
+        let first = tree
+            .fields
+            .iter_mut()
+            .find(|f| f.number == 2)
+            .expect("the tree lists slides");
+        let pb::Value::Bytes(raw) = &first.value else {
+            panic!("a slide entry is bytes");
+        };
+        let mut entry = pb::decode_nested(raw).unwrap();
+        entry.set(2, pb::Value::Varint(0));
+        first.value = pb::Value::Bytes(entry.encode());
+    });
+    let mut doc = Document::from_package(package).unwrap();
+    let slide = doc.slides()[0].identifier;
+    let err = doc.move_slide(slide, 1).unwrap_err().to_string();
+    assert!(err.contains("bare reference"), "{err}");
+}
+
+/// A slide the deck's tree does not list cannot be duplicated: membership of
+/// the slide tree is what tells a slide from a template, not the stream name.
+#[test]
+fn duplicating_a_node_the_tree_does_not_list_is_refused() {
+    let path = fixture!("keynote-deck.key");
+    let doc = Document::open(&path).unwrap();
+    let victim = doc.slides()[2].identifier;
+    let victim_node = doc.show().unwrap().slide(victim).unwrap().node;
+    drop(doc);
+
+    // Drop the slide's tree entry, but keep its node, slide and component: it
+    // is now a slide the deck does not list.
+    let package = forge_slide_tree(&path, |tree| {
+        tree.fields.retain(|f| {
+            if f.number != 2 {
+                return true;
+            }
+            match &f.value {
+                pb::Value::Bytes(raw) => {
+                    match pb::decode_nested(raw).and_then(|e| iwork::style::reference_target(&e)) {
+                        Some(node) => node != victim_node,
+                        None => true,
+                    }
+                }
+                _ => true,
+            }
+        });
+    });
+    let mut doc = Document::from_package(package).unwrap();
+    let err = doc.duplicate_slide(victim).unwrap_err().to_string();
+    assert!(err.contains("not a slide in the show's deck"), "{err}");
+}
+
+/// A slide whose `TSP.ComponentInfo` is missing cannot be duplicated: the copy
+/// would be declared by nobody and Keynote would answer `missing value` for it.
+/// `problems()` reports the same gap on the source deck, which the old
+/// component→stream check could not see.
+#[test]
+fn duplicating_a_slide_whose_component_is_missing_is_refused() {
+    let path = fixture!("keynote-deck.key");
+    let victim = Document::open(&path).unwrap().slides()[1].identifier;
+    let package = forge_out_component(&path, victim);
+
+    let doc = Document::from_package(package.clone()).unwrap();
+    assert!(
+        doc.problems()
+            .iter()
+            .any(|p| p.contains("no TSP.ComponentInfo")),
+        "check flags the missing component: {:?}",
+        doc.problems()
+    );
+
+    let mut doc = Document::from_package(package).unwrap();
+    let err = doc.duplicate_slide(victim).unwrap_err().to_string();
+    assert!(err.contains("ComponentInfo"), "{err}");
+}
+
+/// A cloned `TSP.ComponentInfo`'s fields stay in ascending order — the locator
+/// (field 3) is written last but belongs between 2 and 4, so it is inserted in
+/// order rather than appended past field 12.
+#[test]
+fn a_cloned_component_keeps_its_fields_in_order() {
+    let path = fixture!("keynote-deck.key");
+    let mut doc = Document::open(&path).unwrap();
+    let copy = doc.duplicate_slide(doc.slides()[1].identifier).unwrap();
+
+    // Find the new component and read its field numbers in the order stored.
+    // Read from the edited streams (`objects`), not the original package.
+    let meta = doc
+        .objects()
+        .find(|(_, o)| o.message_type() == iwork::TYPE_PACKAGE_METADATA)
+        .map(|(_, o)| pb::Message::decode(o.payload()).unwrap())
+        .expect("package metadata");
+    let info = meta
+        .all(3)
+        .filter_map(|v| match v {
+            pb::Value::Bytes(raw) => pb::Message::decode(raw).ok(),
+            _ => None,
+        })
+        .find(|info| info.varint(1) == Some(copy.identifier))
+        .expect("the copy's component");
+    let numbers: Vec<u32> = info.fields.iter().map(|f| f.number).collect();
+    let mut sorted = numbers.clone();
+    sorted.sort_unstable();
+    assert_eq!(
+        numbers, sorted,
+        "component fields are ascending: {numbers:?}"
+    );
+    assert!(numbers.contains(&3), "the locator was written");
 }
 
 /// A layout is not a slide, and copying one is refused by name — Keynote's own
