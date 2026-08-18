@@ -55,6 +55,8 @@ tables
   iwork organise  <file> [<table>]         sort rules, filters, categories,
                                            pivots, conditional highlighting,
                                            custom cell formats
+  iwork formulas  <file> [<table>]         every formula, with its cell, its
+                                           text and the value the app cached
   iwork set-cell  <file> <table> <cell> <value> <out>
   iwork set-cell  <file> <table> <row> <col> <value> <out>
                                            write one value into one cell
@@ -169,6 +171,8 @@ fn main() -> ExitCode {
         ["csv", file, table] => csv(file, table),
         ["organise", file] => organise(file, None),
         ["organise", file, table] => organise(file, Some(table)),
+        ["formulas", file] => formulas(file, None),
+        ["formulas", file, table] => formulas(file, Some(table)),
         ["set-cell", file, table, cell, value, out] => reference_position(cell)
             .and_then(|(row, column)| set_cell(file, table, row, column, value, out)),
         ["set-cell", file, table, row, column, value, out] => index(row)
@@ -1340,18 +1344,29 @@ fn organise(path: &str, wanted: Option<&str>) -> Result<(), Error> {
         println!();
     }
 
-    let tables: Vec<iwork::Table> = match wanted {
-        Some(name) => vec![doc
-            .table(name)
-            .ok_or_else(|| Error::Format(format!("no table called '{name}' in {path}")))?],
-        None => doc.tables(),
-    };
-    if tables.is_empty() {
+    // Every table, always: a rule's condition is a formula, and a formula
+    // resolves names against the whole document.
+    let tables = doc.tables();
+    let index = Some(iwork::table::names(&tables));
+    let chosen: Vec<usize> = tables
+        .iter()
+        .enumerate()
+        .filter(|(_, table)| match wanted {
+            Some(name) => table.name == name || table.identifier.to_string() == name,
+            None => true,
+        })
+        .map(|(at, _)| at)
+        .collect();
+    if let (Some(name), true) = (wanted, chosen.is_empty()) {
+        return Err(Error::Format(format!("no table called '{name}' in {path}")));
+    }
+    if chosen.is_empty() {
         println!("no tables");
         return Ok(());
     }
 
-    for table in &tables {
+    for position in chosen {
+        let table = &tables[position];
         println!("== table {} {} ==", table.identifier, table.name);
         let hidden_rows = hidden_list(&table.row_extents);
         let hidden_columns = hidden_list(&table.column_extents);
@@ -1401,7 +1416,7 @@ fn organise(path: &str, wanted: Option<&str>) -> Result<(), Error> {
                     "    rule {at}: column {}, {}, {}",
                     rule.column.map(column_name).unwrap_or("?".into()),
                     if rule.enabled { "enabled" } else { "disabled" },
-                    describe(&rule.predicate)
+                    describe_in(&rule.predicate, index.as_ref(), position, rule.column)
                 );
             }
         }
@@ -1480,7 +1495,7 @@ fn organise(path: &str, wanted: Option<&str>) -> Result<(), Error> {
             for rule in &set.rules {
                 println!(
                     "    {} -> cell style {:?}, text style {:?}",
-                    describe(&rule.predicate),
+                    describe_in(&rule.predicate, index.as_ref(), position, None),
                     rule.cell_style,
                     rule.text_style
                 );
@@ -1511,8 +1526,14 @@ fn print_groups(category: &iwork::table::Category, _depth: usize) {
     walk(root, 0);
 }
 
-/// A predicate in one line: its code, and whatever it compares against.
-fn describe(predicate: &iwork::table::Predicate) -> String {
+/// A predicate in one line: its code, whatever it compares against, and — when
+/// the condition is a formula — the formula itself.
+fn describe_in(
+    predicate: &iwork::table::Predicate,
+    index: Option<&iwork::formula::Names>,
+    table: usize,
+    column: Option<usize>,
+) -> String {
     let mut text = format!("predicate {}", predicate.kind);
     if predicate.qualifiers != (0, 0) {
         text.push_str(&format!(" {:?}", predicate.qualifiers));
@@ -1520,13 +1541,55 @@ fn describe(predicate: &iwork::table::Predicate) -> String {
     for value in &predicate.values {
         text.push_str(&format!(" {:?}", value.to_text()));
     }
-    if predicate.has_formula {
-        text.push_str(" (against a formula)");
+    match index.and_then(|index| {
+        iwork::table::predicate_text(predicate, index, table, column.unwrap_or(0))
+    }) {
+        Some(formula) => text.push_str(&format!(" {formula}")),
+        None if predicate.has_formula => text.push_str(" (against a formula)"),
+        None => {}
     }
     if predicate.pre_pivot {
         text.push_str(" [pre-pivot form]");
     }
     text
+}
+
+/// Every formula in the document: where it is, what it says, what it cached.
+fn formulas(path: &str, wanted: Option<&str>) -> Result<(), Error> {
+    let doc = Document::open(path)?;
+    let tables = doc.tables();
+    let all = iwork::table::formulas(&tables);
+    let listed: Vec<&iwork::table::FormulaCell> = all
+        .iter()
+        .filter(|f| match wanted {
+            Some(name) => f.table_name == name || f.table.to_string() == name,
+            None => true,
+        })
+        .collect();
+    if listed.is_empty() {
+        println!("no formulas");
+        return Ok(());
+    }
+    let mut last = None;
+    for formula in listed {
+        if last != Some(formula.table) {
+            match &formula.sheet {
+                Some(sheet) => println!(
+                    "== table {} {} (sheet {sheet}) ==",
+                    formula.table, formula.table_name
+                ),
+                None => println!("== table {} {} ==", formula.table, formula.table_name),
+            }
+            last = Some(formula.table);
+        }
+        println!(
+            "{:<6} {:<48} = {}",
+            formula.reference,
+            formula.text,
+            formula.value.to_text()
+        );
+    }
+    Ok(())
 }
 
 fn find_table(path: &str, wanted: &str) -> Result<iwork::Table, Error> {
@@ -1536,7 +1599,17 @@ fn find_table(path: &str, wanted: &str) -> Result<iwork::Table, Error> {
 }
 
 fn cells(path: &str, wanted: &str, raw: bool) -> Result<(), Error> {
-    let table = find_table(path, wanted)?;
+    // The name index is document-wide: a formula in this table may name a
+    // column of another one, and which table owns a shared name depends on all
+    // of them.
+    let doc = Document::open(path)?;
+    let tables = doc.tables();
+    let index = iwork::table::names(&tables);
+    let position = tables
+        .iter()
+        .position(|t| t.name == wanted || t.identifier.to_string() == wanted)
+        .ok_or_else(|| Error::Format(format!("no table called '{wanted}' in {path}")))?;
+    let table = &tables[position];
     println!(
         "table {} — {} — {}×{}",
         table.identifier, table.name, table.rows, table.columns
@@ -1550,7 +1623,14 @@ fn cells(path: &str, wanted: &str, raw: bool) -> Result<(), Error> {
         if let Some(control) = cell.control {
             notes.push(format!("control: {}", control.as_str()));
         }
-        if cell.has_formula {
+        if let Some(formula) = table.formula(cell.row, cell.column) {
+            let at = iwork::formula::Site::new(
+                &index,
+                Some(position),
+                (cell.column as i64, cell.row as i64),
+            );
+            notes.push(formula.text(at));
+        } else if cell.has_formula {
             notes.push("formula".to_string());
         }
         if let Some(merge) = table.merge_at(cell.row, cell.column) {
