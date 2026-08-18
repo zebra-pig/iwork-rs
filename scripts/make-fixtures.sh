@@ -197,6 +197,36 @@ build_template() {
 	return $status
 }
 
+# copy_template NAME PATH-INSIDE-/Applications EXTENSION
+#
+# A fixture that is Apple's own bundle rather than a document an app wrote.
+# Used exactly once, for the hyperlinks — see the note beside the call.
+copy_template() {
+	local name=$1 source=$2 extension=$3
+	local target=$dir/$name.$extension
+
+	if [ ${#wanted[@]} -gt 0 ]; then
+		local match=0 candidate
+		for candidate in "${wanted[@]}"; do
+			[ "$candidate" = "$name" ] && match=1
+		done
+		[ "$match" = 1 ] || return 0
+	fi
+	if [ -e "$target" ] && [ "$force" = 0 ]; then
+		printf '  %-24s exists, left alone\n' "$name.$extension"
+		skipped=$((skipped + 1))
+		return 0
+	fi
+	if [ ! -e "/Applications/$source" ]; then
+		printf '  %-24s NOT FOUND: /Applications/%s\n' "$name.$extension" "$source" >&2
+		failed=$((failed + 1))
+		return 1
+	fi
+	cp "/Applications/$source" "$target"
+	printf '  %-24s copied from the app bundle\n' "$name.$extension"
+	built=$((built + 1))
+}
+
 printf 'building fixtures in %s\n' "$dir"
 
 script_override=
@@ -211,6 +241,16 @@ build pages-plain pages 120
 build pages-styled pages 120
 build pages-unicode pages 120
 build pages-report pages 180
+
+# Lists, which no script can make: Pages' rich text carries `font`, `size` and
+# `color` and nothing else, so a bullet, an indent level and a
+# `TSWP.ListStyleArchive` in use have to come from a template. The Real Estate
+# Flyer uses three named list styles in one storage — "None", "Bullet" and
+# "Bullet 2" — changes indent level in the middle of the last of them, and has
+# a layout break (`U+0005`) inside a paragraph for good measure.
+script_override=$here/applescript/pages-from-template.applescript
+build pages-lists pages 240 "Application/04_Real_Estate_Flyer/ISO"
+script_override=
 
 osa_warm numbers
 build numbers-values numbers 180
@@ -234,6 +274,29 @@ build_template numbers-categories 240 "Application/21_BasicCategories/Traditiona
 build_template numbers-pivot 300 "Application/21_Pivot_Table_Basics/Traditional"
 build_template numbers-rules 300 "Application/26_Stocks/Traditional"
 build_template numbers-sorted 240 "Application/44_Notetaking_Colorful_Log_PM/Traditional"
+
+# The only hyperlinks in the whole install, and the one fixture no app can be
+# made to write.
+#
+# All 901 bundled templates were scanned for `TSWP.HyperlinkFieldArchive`
+# (2032): **five objects in three Numbers templates**, and none at all in the
+# 640 Pages templates or the 182 Keynote themes. Then every route to making one
+# was tried and every one failed. No app's scripting dictionary has a link
+# command — `sdef` over all three returns nothing but `sourceURL`. Setting a
+# Pages body text to a sentence containing `https://example.com` and an e-mail
+# address does not auto-link it. And **instantiating any of the three templates
+# strips the links**: Numbers writes the document out with the text and without
+# the smart fields, so `numbers-links` built the ordinary way had none.
+#
+# So this fixture is Apple's template bundle itself, renamed. A `.nmbtemplate`
+# is the same ZIP a `.numbers` is, Numbers opens the copy and reads its text
+# back through `app-check.sh`, and it carries what nothing else here can: two
+# links in one storage, one `mailto:` and one `http:`, one of them terminated
+# by an entry with no field and one running to the end of the text with no
+# terminator at all — the two shapes a smart-field run comes in.
+copy_template numbers-links \
+	"Numbers Creator Studio.app/Contents/SharedSupport/Templates/46_Business_Modern_Invoice_PM/Traditional.nmbtemplate" \
+	numbers
 
 osa_warm key
 build keynote-deck key 240 "$png"

@@ -733,11 +733,14 @@ impl Document {
             .map(|t| text::entry_indices(&t, text::Anchoring::Paragraph))
             .unwrap_or_default();
 
+        // Both tables are sparse and both carry forward: a paragraph with no
+        // entry, and a paragraph whose entry names nothing, keep what the
+        // paragraph before them had.
         let carried = |entries: &[(u64, Option<u64>)], at: u64| {
             entries
                 .iter()
                 .rev()
-                .find(|(index, _)| *index <= at)
+                .find(|(index, value)| *index <= at && value.is_some())
                 .and_then(|(_, value)| *value)
         };
         Ok(text::paragraph_ranges(&text)
@@ -781,15 +784,26 @@ impl Document {
             .map(|t| t.anchoring)
             .unwrap_or(text::Anchoring::Run);
         let entries = text::entry_indices(&table, anchoring);
-        let Some(identifier) = entries
-            .iter()
-            .rev()
-            .find(|(at, _)| *at <= index)
-            .and_then(|(_, target)| *target)
-        else {
+        // A paragraph entry with no object means "whatever was in force here"
+        // — it is what Pages writes for a paragraph an edit has just created —
+        // so resolving one walks back to the last entry that names a style. A
+        // *run* entry with no object is a terminator and means exactly what it
+        // says: no attribute from here on.
+        let resolved = match anchoring {
+            text::Anchoring::Paragraph => entries
+                .iter()
+                .rev()
+                .find(|(at, target)| *at <= index && target.is_some()),
+            _ => entries.iter().rev().find(|(at, _)| *at <= index),
+        };
+        let Some(identifier) = resolved.and_then(|(_, target)| *target) else {
             return Ok(None);
         };
 
+        // What the *variations* set on the way down, and nothing from the named
+        // style itself — a named style's bags carry every property it has,
+        // defaults included, and calling those overrides would say a paragraph
+        // overrides sixty things when it overrides one.
         let mut overrides: Vec<String> = Vec::new();
         let mut named = None;
         let mut name = None;
@@ -800,6 +814,11 @@ impl Document {
             let Some(style) = self.text_style(current) else {
                 break;
             };
+            if style.name.is_some() {
+                named = Some(current);
+                name = style.name.clone();
+                break;
+            }
             for bag in [11u32, 12u32] {
                 let Some(properties) = style.archive.bytes(bag).and_then(crate::pb::decode_nested)
                 else {
@@ -816,11 +835,6 @@ impl Document {
                         overrides.push(label);
                     }
                 }
-            }
-            if style.name.is_some() {
-                named = Some(current);
-                name = style.name.clone();
-                break;
             }
             walker = style.parent;
         }

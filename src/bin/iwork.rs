@@ -1595,17 +1595,40 @@ fn apply_style(
 fn paragraphs(path: &str, storage: u64) -> Result<(), Error> {
     let doc = Document::open(path)?;
     let text: Vec<u16> = doc.storage_text(storage)?.encode_utf16().collect();
-    let ranges = doc.paragraph_ranges(storage)?;
-    for (index, range) in ranges.iter().enumerate() {
-        let slice = &text[range.start as usize..range.end as usize];
+    let list = doc.list_paragraphs(storage)?;
+    for (index, paragraph) in list.iter().enumerate() {
+        let slice = &text[paragraph.range.start as usize..paragraph.range.end as usize];
+        let style = doc
+            .style_of_run(storage, paragraph.range.start, style::StyleKind::Paragraph)?
+            .map(|resolved| {
+                let name = resolved
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| format!("style {}", resolved.style));
+                match (resolved.is_variation, resolved.overrides.len()) {
+                    (true, 0) => format!("{name} (variation)"),
+                    (true, n) => format!("{name} + {n} override(s)"),
+                    (false, _) => name,
+                }
+            })
+            .unwrap_or_else(|| "-".to_string());
+        let bullet = match doc.text_style(paragraph.style.unwrap_or(0)) {
+            Some(list_style) => list_style
+                .name
+                .unwrap_or_else(|| format!("list {}", list_style.identifier)),
+            None => "-".to_string(),
+        };
         println!(
-            "  {index:<4} {:>7}..{:<7} {}",
-            range.start,
-            range.end,
+            "  {index:<4} {:>7}..{:<7} L{}  {:<28} {:<14} {}",
+            paragraph.range.start,
+            paragraph.range.end,
+            paragraph.level,
+            style,
+            bullet,
             snippet(slice)
         );
     }
-    println!("\n{} paragraph(s), {} characters", ranges.len(), text.len());
+    println!("\n{} paragraph(s), {} characters", list.len(), text.len());
     Ok(())
 }
 

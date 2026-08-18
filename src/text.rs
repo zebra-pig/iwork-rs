@@ -147,10 +147,15 @@ pub const TABLES: &[Table] = &[
         anchoring: Anchoring::Character,
         points_at: "TSWP.FootnoteReferenceAttachmentArchive (2008)",
     },
+    // Anchored like a paragraph, not like an attachment: a section entry sits
+    // on the character *after* the `U+0004` that begins it, which is a
+    // paragraph start — `pages-report` has one at 0 and one at 146, reading
+    // `…123-4567\n\u{4}Company Name`, with the entry on the `C`. Deleting the
+    // break itself is still refused; see [`destroyed_anchors`].
     Table {
         field: 17,
         name: "table_section",
-        anchoring: Anchoring::Character,
+        anchoring: Anchoring::Paragraph,
         points_at: "TP.SectionArchive / TSWP.SectionPlaceholderArchive (10011)",
     },
     Table {
@@ -418,18 +423,20 @@ impl Edit {
     /// minus `[12, 74)` came back as `[0 Title, 12 Red, 66 Body]`. Paragraph
     /// style is anchored to the paragraph start, not carried by the characters.
     pub fn remap(self, index: u64, anchoring: Anchoring) -> Option<u64> {
-        if index >= self.end() {
-            return Some(index - self.removed + self.inserted);
-        }
         match anchoring {
-            Anchoring::Character if index < self.at => Some(index),
-            Anchoring::Character => None,
+            // A paragraph entry at the edit's own index marks a paragraph start
+            // the edit did not move, and a run table's first entry is where the
+            // first run begins — text inserted at the very start of a storage
+            // takes its attributes, there being no earlier run to take them
+            // from. Both come before the shift, or an insertion at 0 would
+            // leave the table starting late and the first characters with no
+            // attribute at all.
             Anchoring::Paragraph if index <= self.at => Some(index),
+            Anchoring::Run | Anchoring::Range if index == 0 => Some(0),
+            Anchoring::Character if index < self.at => Some(index),
+            _ if index >= self.end() => Some(index - self.removed + self.inserted),
+            Anchoring::Character => None,
             Anchoring::Paragraph => Some(self.at),
-            // A run table's first entry is where the first run begins, and text
-            // inserted at the very start of the storage takes its attributes:
-            // there is no earlier run to take them from.
-            _ if index == 0 => Some(0),
             _ if index < self.at => Some(index),
             _ => Some(self.at + self.inserted),
         }
