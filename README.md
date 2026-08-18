@@ -63,6 +63,8 @@ iwork cells     Budget.numbers 904769 --raw   # …and the cell record behind ea
 iwork csv       Budget.numbers Zellarten  # one table as CSV
 iwork organise  Budget.numbers            # sort rules, filters, categories,
                                           # pivots, highlighting, custom formats
+iwork set-cell  Budget.numbers Zellarten B3 n:43 out.numbers
+iwork set-cell  Budget.numbers Zellarten 2 1 n:43 out.numbers   # the same cell
 
 iwork styles       Report.pages           # every text style, with its object id
 iwork style        Report.pages 3712      # one style, field by field, and what uses it
@@ -222,6 +224,26 @@ it are documents made from Apple's own templates, because Numbers' scripting
 interface has no command that sorts, filters, categorises, highlights or pivots
 anything.
 
+**A cell can be written, one at a time.** `iwork set-cell` puts text, a number,
+a boolean, a date or a duration into a cell that already exists, and Numbers
+opens the result and reports the new value. Two things make that safe rather
+than merely possible. The record is **edited, never rebuilt** — the encoder is
+the decoder's exact inverse on all 2515 records in the corpus, so a cell keeps
+its style keys, its control definition, its conditional-highlighting keys and
+the bytes nobody has decoded. And the interned string and format lists are
+**refcounted both ways**: a string another cell already holds is shared, and one
+nobody points at any more is removed, which is what the app itself does.
+
+Editing a number rewrites **one** of a Numbers document's 97 package entries.
+Writing a cell the value it already holds rewrites none.
+
+What it refuses, rather than writing something plausible: a formula cell (taking
+a formula out means editing `TSCE`), a rich-text cell, a cell covered by a
+merge, a row with no stored cells, and any object carrying version patches.
+A formula that *reads* an edited cell keeps its stale cached value — Numbers
+recalculates it on open, so the app is right and a reader trusting the cache is
+not.
+
 ## What is verified
 
 Everything below is asserted by `cargo test` when you supply fixtures.
@@ -250,11 +272,17 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | Pivot tables: source, row/column/value fields, summary functions | — | ✅ | — |
 | Conditional highlighting rules; custom cell formats | — | ✅ | — |
 | A save leaves an organised document byte-identical | — | ✅ | — |
+| Every cell record re-encodes to the bytes it came from | ✅ | ✅ | — |
+| Only the view state carries version patches; no table archive does | ✅ | ✅ | ✅ |
+| Every list key resolves, every refcount matches, every cell count adds up | ✅ | ✅ | — |
+| Write a cell: text, number, boolean, date, duration, empty | ✅ | ✅ | — |
+| A written cell keeps its styles, format and undecoded bytes | ✅ | ✅ | — |
+| Writing a cell what it already holds changes no byte | ✅ | ✅ | — |
+| **The app reads back the written value** | ✅ | ✅ | — |
 
-Tables are read, not written: nothing in this crate changes a cell. Keynote is
-the gap in that block for one reason only — neither AppleScript nor any bundled
-theme will put a table on a slide, so there is no fixture. The archives are the
-same ones Pages uses.
+Keynote is the gap in that block for one reason only — neither AppleScript nor
+any bundled theme will put a table on a slide, so there is no fixture. The
+archives are the same ones Pages uses.
 
 Developed against one real Pages document (a 15 MB German magazine article,
 485 objects, two TIFFs and two charts) and two Numbers spreadsheets from
@@ -374,7 +402,15 @@ harness that always says yes is worse than none.
   `apply_text_style` and `create_text_style` maintain the declarations;
   `iwork check` reports any that are missing.
 - **No layout, no rendering, no formula evaluation.** This reads and rewrites
-  the document; it does not understand it.
+  the document; it does not understand it. In particular, writing a cell a
+  formula depends on leaves that formula's **cached value stale**. Numbers
+  recalculates on open, so the app shows the right answer; anything that reads
+  the file without evaluating — this crate included — shows the old one.
+- **A cell is written one at a time, into a row that already has cells.**
+  `set_cell` changes a value in place. It does not add or remove rows and
+  columns, does not write a formula, does not touch rich-text cells, and gives
+  a row its first stored cell no more than it gives a table its first row —
+  each of those is refused by name.
 - **"iWork opens it" is not tested here, and it is not a formality.** The tests
   prove the bytes are structurally correct and survive an independent decode.
   They cannot prove an app will accept the result, and the difference is real:

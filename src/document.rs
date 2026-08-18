@@ -7,6 +7,7 @@ use crate::iwa::{self, ArchiveObject};
 use crate::package::Package;
 use crate::pb::{Message, Value};
 use crate::style::{self, CreatedStyle, StyleDeletion, StyleKind, StyleUse, TextStyle};
+use crate::table::{cell_type, CellValue};
 use crate::text;
 use crate::Error;
 
@@ -112,6 +113,35 @@ struct ComponentIndex {
     roots: BTreeSet<u64>,
     /// Objects each component declares in its `external_references`.
     declared: BTreeMap<u64, BTreeSet<u64>>,
+}
+
+/// Everything [`Document::set_cell`] has to find before it can write a byte.
+///
+/// A cell is addressed by row and column, but it is *stored* as a slice of one
+/// tile's row buffer, and everything it says about itself is a key into a side
+/// table that lives in another stream again. Gathering the addresses first
+/// keeps the write itself short enough to read.
+struct CellSite {
+    /// `TST.Tile` holding the row.
+    tile: u64,
+    /// Index of the row's `TileRowInfo` **among the tile's fields**, not its
+    /// row number: the field is what gets replaced.
+    tile_row: usize,
+    /// Whether this row's offsets count groups of four bytes.
+    wide: bool,
+    row: usize,
+    column: usize,
+    /// Every cell of the row, one slot per offset entry.
+    records: Vec<Option<Vec<u8>>>,
+    /// The target cell's bytes, if it has any.
+    record: Option<Vec<u8>>,
+    /// `TableDataList` for interned strings, and for data formats.
+    strings: Option<u64>,
+    formats: Option<u64>,
+    /// `TST.HeaderStorageBucket`s carrying the per-row and per-column cell
+    /// counts, which change when a cell appears or disappears.
+    row_bucket: Vec<u64>,
+    column_bucket: Option<u64>,
 }
 
 /// A run of styled text, held by `TSWP.StorageArchive`.
@@ -363,6 +393,514 @@ impl Document {
     /// table reach into one list by UUID. See [`crate::table::CustomFormat`].
     pub fn custom_formats(&self) -> Vec<crate::table::CustomFormat> {
         crate::table::custom_formats(self)
+    }
+
+    /// Write a value into a cell that already exists.
+    ///
+    /// The narrow, provable operation: the grid keeps its shape, every row and
+    /// column keeps its identity, and nothing that indexes rows by position —
+    /// a category's group nodes, a filter's hidden state — has anything to
+    /// re-point. What moves is the tile's storage for one row, and with it the
+    /// interned string and format entries the cell reaches into.
+    ///
+    /// What travels with the value:
+    ///
+    /// * the cell's **data format**, because value and format travel together.
+    ///   A cell that keeps its type keeps its format key untouched; a cell that
+    ///   changes type is given the key another cell of the new type already
+    ///   uses in this table, and its old slot's key is released — which is what
+    ///   Numbers 15.3.1 does, observed by writing a number over a text cell.
+    /// * everything this crate does not model. Bytes 2–5, byte 6's
+    ///   chosen-format bits, byte 7, any trailing bytes, the cell and text
+    ///   style keys, the control definition and — the one that would be
+    ///   invisible until someone looked at the document — the **conditional
+    ///   style and rule keys**, which are how a highlighted cell knows it is
+    ///   highlighted.
+    ///
+    /// What it refuses, by name rather than by writing something plausible:
+    /// a cell holding a formula (removing one means editing `TSCE`), a
+    /// rich-text cell (its text is a `TSWP` storage, not a table string), a
+    /// cell covered by a merge, a row with no stored cells at all, and any
+    /// object carrying version patches — see [`Document::patched_objects`].
+    pub fn set_cell(
+        &mut self,
+        wanted: &str,
+        row: usize,
+        column: usize,
+        value: CellValue,
+    ) -> Result<CellValue, Error> {
+        let table = self
+            .table(wanted)
+            .ok_or_else(|| Error::Format(format!("no table called '{wanted}'")))?;
+        let where_ = format!("{} r{row}c{column}", table.name);
+        if row >= table.rows || column >= table.columns {
+            return Err(Error::Format(format!(
+                "{where_}: the table is {}×{}",
+                table.rows, table.columns
+            )));
+        }
+        if let Some(merge) = table.merge_covering(row, column) {
+            if (merge.row, merge.column) != (row, column) {
+                return Err(Error::Format(format!(
+                    "{where_}: covered by the merge that begins at row {} column {}",
+                    merge.row, merge.column
+                )));
+            }
+        }
+        match value {
+            CellValue::Empty
+            | CellValue::Text(_)
+            | CellValue::Number(_)
+            | CellValue::Bool(_)
+            | CellValue::Date(_)
+            | CellValue::Duration(_) => {}
+            other => {
+                return Err(Error::Format(format!(
+                    "{where_}: this crate does not write {} cells",
+                    other.kind()
+                )))
+            }
+        }
+
+        let site = self.cell_site(&table, row, column)?;
+        let previous = table.value(row, column);
+        let old = match &site.record {
+            Some(bytes) => crate::table::decode_cell(bytes)
+                .map_err(|e| Error::Format(format!("{where_}: {e}")))?,
+            None => crate::table::CellRecord {
+                version: 5,
+                ..crate::table::CellRecord::default()
+            },
+        };
+        if old.formula_id.is_some() {
+            return Err(Error::Format(format!(
+                "{where_}: holds a formula, and taking one out means editing the \
+                 calculation engine — not this phase's job"
+            )));
+        }
+        if old.cell_type == cell_type::RICH_TEXT || old.rich_id.is_some() {
+            return Err(Error::Format(format!(
+                "{where_}: holds rich text, whose words are in a TSWP storage rather \
+                 than in the table"
+            )));
+        }
+
+        // Nothing to do, and nothing to damage.
+        if site.record.is_none() && value == CellValue::Empty {
+            return Ok(previous);
+        }
+
+        let record = self.rewrite_record(&table, &site, old, &value, &where_)?;
+        self.store_record(&site, record, &where_)?;
+        Ok(previous)
+    }
+
+    /// Where a cell's bytes live, and which side tables reach it.
+    fn cell_site(
+        &self,
+        table: &crate::table::Table,
+        row: usize,
+        column: usize,
+    ) -> Result<CellSite, Error> {
+        let where_ = format!("{} r{row}c{column}", table.name);
+        let model = self.archive_of(table.model)?;
+        let store = model
+            .bytes(4)
+            .and_then(crate::pb::decode_nested)
+            .ok_or_else(|| Error::Format(format!("{where_}: the model has no data store")))?;
+        let list = |field: u32| store.bytes(field).and_then(crate::table::reference);
+
+        let tiles = store
+            .bytes(3)
+            .and_then(crate::pb::decode_nested)
+            .ok_or_else(|| Error::Format(format!("{where_}: the data store has no tiles")))?;
+        let tile_size = tiles.varint(2).unwrap_or(256) as usize;
+        let wanted_tile = row / tile_size;
+        let tile = tiles
+            .all(1)
+            .filter_map(|value| match value {
+                Value::Bytes(raw) => crate::pb::decode_nested(raw),
+                _ => None,
+            })
+            .find(|entry| entry.varint(1).unwrap_or(0) as usize == wanted_tile)
+            .and_then(|entry| entry.bytes(2).and_then(crate::table::reference))
+            .ok_or_else(|| Error::Format(format!("{where_}: no tile covers row {row}")))?;
+        if self.patched_objects().iter().any(|&(id, _)| id == tile) {
+            return Err(Error::Format(format!(
+                "{where_}: tile {tile} carries version patches, and rewriting it would \
+                 leave them describing the cell as it used to be"
+            )));
+        }
+
+        let archive = self.archive_of(tile)?;
+        let tile_row = row % tile_size;
+        let position = archive
+            .fields
+            .iter()
+            .position(|field| {
+                field.number == 5
+                    && matches!(&field.value, Value::Bytes(raw)
+                        if crate::pb::decode_nested(raw)
+                            .and_then(|info| info.varint(1))
+                            .unwrap_or(u64::MAX) as usize == tile_row)
+            })
+            .ok_or_else(|| {
+                Error::Format(format!(
+                    "{where_}: row {row} has no stored cells, and giving a row its first \
+                     one is not implemented"
+                ))
+            })?;
+        let Value::Bytes(raw) = &archive.fields[position].value else {
+            unreachable!("the position was found by matching on Bytes")
+        };
+        let info = crate::pb::decode_nested(raw)
+            .ok_or_else(|| Error::Format(format!("{where_}: row storage does not decode")))?;
+        let (Some(buffer), Some(offsets)) = (info.bytes(6), info.bytes(7)) else {
+            return Err(Error::Format(format!(
+                "{where_}: row {row} has no version-5 cell storage"
+            )));
+        };
+        let wide = archive.varint(8).unwrap_or(0) != 0 || info.varint(8).unwrap_or(0) != 0;
+
+        let slots = offsets.len() / 2;
+        if column >= slots {
+            return Err(Error::Format(format!(
+                "{where_}: the row's offset array names only {slots} columns"
+            )));
+        }
+        let mut records: Vec<Option<Vec<u8>>> = vec![None; slots];
+        for (at, bytes) in crate::table::row_cells(buffer, offsets, wide)
+            .into_iter()
+            .flatten()
+        {
+            records[at] = Some(bytes.to_vec());
+        }
+        let record = records[column].clone();
+
+        Ok(CellSite {
+            tile,
+            tile_row: position,
+            wide,
+            records,
+            record,
+            column,
+            row,
+            strings: list(4),
+            formats: list(22),
+            row_bucket: store
+                .bytes(1)
+                .and_then(crate::pb::decode_nested)
+                .map(|storage| {
+                    storage
+                        .all(2)
+                        .filter_map(|value| match value {
+                            Value::Bytes(raw) => crate::table::reference(raw),
+                            _ => None,
+                        })
+                        .collect::<Vec<u64>>()
+                })
+                .unwrap_or_default(),
+            column_bucket: store.bytes(2).and_then(crate::table::reference),
+        })
+    }
+
+    /// Turn the old record into the new one, maintaining the side tables.
+    fn rewrite_record(
+        &mut self,
+        table: &crate::table::Table,
+        site: &CellSite,
+        old: crate::table::CellRecord,
+        value: &CellValue,
+        where_: &str,
+    ) -> Result<Option<crate::table::CellRecord>, Error> {
+        use crate::table::FormatSlot;
+
+        let mut record = old.clone();
+        record.version = 5;
+        record.decimal = None;
+        record.double = None;
+        record.seconds = None;
+        record.string_id = None;
+        record.rich_id = None;
+        record.formula_error_id = None;
+
+        let slot = match value {
+            CellValue::Empty => None,
+            CellValue::Text(_) => Some(FormatSlot::Text),
+            CellValue::Number(_) => Some(FormatSlot::Number),
+            CellValue::Bool(_) => Some(FormatSlot::Boolean),
+            CellValue::Date(_) => Some(FormatSlot::Date),
+            CellValue::Duration(_) => Some(FormatSlot::Duration),
+            _ => unreachable!("set_cell rejected every other value"),
+        };
+        record.cell_type = match value {
+            CellValue::Empty => cell_type::EMPTY,
+            CellValue::Text(_) => cell_type::TEXT,
+            CellValue::Number(_) => cell_type::NUMBER,
+            CellValue::Bool(_) => cell_type::BOOL,
+            CellValue::Date(_) => cell_type::DATE,
+            CellValue::Duration(_) => cell_type::DURATION,
+            _ => unreachable!("set_cell rejected every other value"),
+        };
+        match value {
+            CellValue::Number(decimal) => record.decimal = Some(*decimal),
+            CellValue::Bool(flag) => record.double = Some(if *flag { 1.0 } else { 0.0 }),
+            CellValue::Duration(seconds) => record.double = Some(*seconds),
+            CellValue::Date(seconds) => record.seconds = Some(*seconds),
+            _ => {}
+        }
+
+        // The string table first, so that rewriting a cell with the text it
+        // already held reuses its entry rather than dropping and re-adding it.
+        if let CellValue::Text(text) = value {
+            let list = site
+                .strings
+                .ok_or_else(|| Error::Format(format!("{where_}: the table has no string list")))?;
+            record.string_id = Some(self.intern_list_string(list, text)?);
+        }
+        if let Some(key) = old.string_id {
+            let list = site
+                .strings
+                .ok_or_else(|| Error::Format(format!("{where_}: the table has no string list")))?;
+            self.release_list_entry(list, key)?;
+        }
+
+        // An emptied cell keeps no record at all — the app deletes it, and the
+        // covered half of a merge shows the same thing: nothing about an empty
+        // cell is written down.
+        if slot.is_none() {
+            if let (Some(list), Some(key)) = (site.formats, old.format_id_in_current()) {
+                self.release_list_entry(list, key)?;
+            }
+            return Ok(None);
+        }
+        let slot = slot.expect("checked above");
+
+        if record.format_id_in(slot).is_none() {
+            let donor = table
+                .cells()
+                .iter()
+                .filter_map(|cell| {
+                    cell.record
+                        .format_id_in(slot)
+                        .map(|key| (cell.record.explicit_format().is_some(), key))
+                })
+                // A cell whose format nobody chose is the better loan: its key
+                // names the plain format for the slot rather than, say, the
+                // percentage a neighbour was given.
+                .min()
+                .map(|(_, key)| key)
+                .ok_or_else(|| {
+                    Error::Format(format!(
+                        "{where_}: no cell in this table carries a {slot:?} format to copy, \
+                         and one invented here would be a format the document never defined"
+                    ))
+                })?;
+            let list = site
+                .formats
+                .ok_or_else(|| Error::Format(format!("{where_}: the table has no format list")))?;
+            self.retain_list_entry(list, donor)?;
+            record.set_format_id_in(slot, Some(donor));
+
+            // The slot the cell used to be in loses its key, and byte 6 loses
+            // the claim that the user chose that format. Observed: a text cell
+            // written over with a number in Numbers 15.3.1 comes back carrying
+            // the number key only.
+            if let Some(previous) = old.current_format() {
+                if previous != slot {
+                    if let Some(key) = old.format_id_in(previous) {
+                        self.release_list_entry(list, key)?;
+                    }
+                    record.set_format_id_in(previous, None);
+                    record.forget_explicit_format(previous);
+                }
+            }
+        }
+        record.format_kind = Some(crate::table::format_kind_of(slot));
+        Ok(Some(record))
+    }
+
+    /// Put the rewritten record back into its tile, and keep the cell counts.
+    fn store_record(
+        &mut self,
+        site: &CellSite,
+        record: Option<crate::table::CellRecord>,
+        where_: &str,
+    ) -> Result<(), Error> {
+        let had = site.record.is_some();
+        let has = record.is_some();
+        let encoded = match record {
+            Some(record) => Some(
+                record
+                    .encode()
+                    .map_err(|e| Error::Format(format!("{where_}: {e}")))?,
+            ),
+            None => None,
+        };
+        let mut records = site.records.clone();
+        records[site.column] = encoded;
+        let (buffer, offsets) = crate::table::encode_row(&records, site.wide)
+            .map_err(|e| Error::Format(format!("{where_}: {e}")))?;
+        let cells = records.iter().filter(|r| r.is_some()).count() as u64;
+
+        let mut tile = self.archive_of(site.tile)?;
+        let Value::Bytes(raw) = &tile.fields[site.tile_row].value else {
+            unreachable!("cell_site found this field by matching on Bytes")
+        };
+        let mut info = crate::pb::decode_nested(raw)
+            .ok_or_else(|| Error::Format(format!("{where_}: row storage does not decode")))?;
+        info.set(2, Value::Varint(cells));
+        info.set(6, Value::Bytes(buffer));
+        info.set(7, Value::Bytes(offsets));
+        tile.fields[site.tile_row].value = Value::Bytes(info.encode());
+        self.set_archive(site.tile, &tile)?;
+
+        if had != has {
+            let step = if has { 1i64 } else { -1 };
+            let bucket = site
+                .row_bucket
+                .iter()
+                .copied()
+                .find(|&id| self.bucket_has(id, site.row))
+                .or_else(|| site.row_bucket.first().copied());
+            if let Some(bucket) = bucket {
+                self.step_bucket_count(bucket, site.row, step)?;
+            }
+            if let Some(bucket) = site.column_bucket {
+                self.step_bucket_count(bucket, site.column, step)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Does this `TST.HeaderStorageBucket` have an entry for `index`?
+    fn bucket_has(&self, bucket: u64, index: usize) -> bool {
+        self.archive_of(bucket).is_ok_and(|archive| {
+            archive.all(2).any(|value| match value {
+                Value::Bytes(raw) => crate::pb::decode_nested(raw)
+                    .and_then(|entry| entry.varint(1))
+                    .is_some_and(|at| at as usize == index),
+                _ => false,
+            })
+        })
+    }
+
+    /// Move a row's or column's stored cell count, adding the entry if the row
+    /// or column had none — which is what an all-empty column has.
+    fn step_bucket_count(&mut self, bucket: u64, index: usize, step: i64) -> Result<(), Error> {
+        let mut archive = self.archive_of(bucket)?;
+        for field in archive.fields.iter_mut() {
+            if field.number != 2 {
+                continue;
+            }
+            let Value::Bytes(raw) = &field.value else {
+                continue;
+            };
+            let Some(mut entry) = crate::pb::decode_nested(raw) else {
+                continue;
+            };
+            if entry.varint(1).unwrap_or(u64::MAX) as usize != index {
+                continue;
+            }
+            let count = entry.varint(4).unwrap_or(0) as i64 + step;
+            entry.set_in_order(4, Value::Varint(count.max(0) as u64));
+            field.value = Value::Bytes(entry.encode());
+            return self.set_archive(bucket, &archive);
+        }
+        if step > 0 {
+            let mut entry = Message::default();
+            entry.set_in_order(1, Value::Varint(index as u64));
+            entry.set_in_order(2, Value::Fixed32(0f32.to_le_bytes()));
+            entry.set_in_order(3, Value::Varint(0));
+            entry.set_in_order(4, Value::Varint(step as u64));
+            archive.append_in_order(2, Value::Bytes(entry.encode()));
+            return self.set_archive(bucket, &archive);
+        }
+        Ok(())
+    }
+
+    /// Take a reference to an interned string, adding it if it is not there.
+    ///
+    /// Numbers hands out the **smallest free key** and keeps `nextListID` as a
+    /// high-water mark that only rises — observed by watching keys 6 and 13 be
+    /// freed and then handed out again while the field stayed at 15. This takes
+    /// the simpler half of that: a key at or above the mark can collide with
+    /// nothing.
+    fn intern_list_string(&mut self, list: u64, text: &str) -> Result<u32, Error> {
+        let mut archive = self.archive_of(list)?;
+        for field in archive.fields.iter_mut() {
+            if field.number != 3 {
+                continue;
+            }
+            let Value::Bytes(raw) = &field.value else {
+                continue;
+            };
+            let Some(mut entry) = crate::pb::decode_nested(raw) else {
+                continue;
+            };
+            if entry.bytes(3) != Some(text.as_bytes()) {
+                continue;
+            }
+            let key = entry.varint(1).unwrap_or(0) as u32;
+            entry.set_in_order(2, Value::Varint(entry.varint(2).unwrap_or(0) + 1));
+            field.value = Value::Bytes(entry.encode());
+            self.set_archive(list, &archive)?;
+            return Ok(key);
+        }
+
+        let key = archive.varint(2).unwrap_or(1).max(1) as u32;
+        let mut entry = Message::default();
+        entry.set_in_order(1, Value::Varint(u64::from(key)));
+        entry.set_in_order(2, Value::Varint(1));
+        entry.set_in_order(3, Value::Bytes(text.as_bytes().to_vec()));
+        archive.set_in_order(2, Value::Varint(u64::from(key) + 1));
+        archive.append_in_order(3, Value::Bytes(entry.encode()));
+        self.set_archive(list, &archive)?;
+        Ok(key)
+    }
+
+    fn retain_list_entry(&mut self, list: u64, key: u32) -> Result<(), Error> {
+        self.step_list_entry(list, key, 1)
+    }
+
+    /// Give up one reference to a `TableDataList` entry, dropping it at zero.
+    ///
+    /// Dropping is what the app does: emptying the one cell that held a string
+    /// removed its entry outright, and the key was later handed out again to a
+    /// different string.
+    fn release_list_entry(&mut self, list: u64, key: u32) -> Result<(), Error> {
+        self.step_list_entry(list, key, -1)
+    }
+
+    fn step_list_entry(&mut self, list: u64, key: u32, step: i64) -> Result<(), Error> {
+        let mut archive = self.archive_of(list)?;
+        let mut drop = None;
+        for (at, field) in archive.fields.iter_mut().enumerate() {
+            if field.number != 3 {
+                continue;
+            }
+            let Value::Bytes(raw) = &field.value else {
+                continue;
+            };
+            let Some(mut entry) = crate::pb::decode_nested(raw) else {
+                continue;
+            };
+            if entry.varint(1).unwrap_or(0) as u32 != key {
+                continue;
+            }
+            let count = entry.varint(2).unwrap_or(0) as i64 + step;
+            if count <= 0 {
+                drop = Some(at);
+            } else {
+                entry.set_in_order(2, Value::Varint(count as u64));
+                field.value = Value::Bytes(entry.encode());
+            }
+            break;
+        }
+        if let Some(at) = drop {
+            archive.fields.remove(at);
+        }
+        self.set_archive(list, &archive)
     }
 
     // -- text styles ---------------------------------------------------------

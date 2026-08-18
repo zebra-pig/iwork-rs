@@ -26,8 +26,21 @@ tables
   iwork organise  <file> [<table>]         sort rules, filters, categories,
                                            pivots, conditional highlighting,
                                            custom cell formats
+  iwork set-cell  <file> <table> <cell> <value> <out>
+  iwork set-cell  <file> <table> <row> <col> <value> <out>
+                                           write one value into one cell
 
-A <table> is an object id, as printed by `iwork tables`, or a table name.
+A <table> is an object id, as printed by `iwork tables`, or a table name. A
+<cell> is an A1 reference; <row> and <col> are the 0-based indices the API
+uses, so `B3` and `2 1` are the same cell.
+
+A cell <value> is text unless it says otherwise: `n:` a number, `b:true` or
+`b:false`, `d:2024-03-01T10:30:00Z` a date, `dur:5400` a duration in seconds,
+`text:` text that would otherwise look like a prefix, and `empty:` to clear the
+cell. A number is stored as a decimal rather than a float, so `n:0.1` is
+exactly a tenth.
+
+  iwork set-cell Budget.numbers Sales B3 n:43 out.numbers
 
 text styles
 
@@ -97,6 +110,11 @@ fn main() -> ExitCode {
         ["csv", file, table] => csv(file, table),
         ["organise", file] => organise(file, None),
         ["organise", file, table] => organise(file, Some(table)),
+        ["set-cell", file, table, cell, value, out] => reference_position(cell)
+            .and_then(|(row, column)| set_cell(file, table, row, column, value, out)),
+        ["set-cell", file, table, row, column, value, out] => index(row)
+            .and_then(|row| Ok((row, index(column)?)))
+            .and_then(|(row, column)| set_cell(file, table, row, column, value, out)),
         ["properties"] => properties(),
         ["set-color", file, id, r, g, b, out] => set_color(file, id, r, g, b, out),
         ["paragraphs", file, storage] => {
@@ -685,6 +703,62 @@ fn cells(path: &str, wanted: &str, raw: bool) -> Result<(), Error> {
     Ok(())
 }
 
+fn set_cell(
+    path: &str,
+    table: &str,
+    row: usize,
+    column: usize,
+    value: &str,
+    out: &str,
+) -> Result<(), Error> {
+    let value = parse_cell_value(value)?;
+    let mut doc = Document::open(path)?;
+    let previous = doc.set_cell(table, row, column, value.clone())?;
+    println!(
+        "{} of table {table}: {} -> {}",
+        reference_name(row, column),
+        describe_value(&previous),
+        describe_value(&value)
+    );
+    save(&doc, out)
+}
+
+/// A cell value as the command line spells it — text unless it says otherwise.
+fn parse_cell_value(text: &str) -> Result<iwork::table::CellValue, Error> {
+    use iwork::table::CellValue;
+    let bad = |what: &str, value: &str| Error::Format(format!("'{value}' is not {what}"));
+    let Some((kind, rest)) = text.split_once(':') else {
+        return Ok(CellValue::Text(text.to_string()));
+    };
+    Ok(match kind {
+        "text" => CellValue::Text(rest.to_string()),
+        "n" => CellValue::Number(
+            iwork::table::Decimal::parse(rest).ok_or_else(|| bad("a number", rest))?,
+        ),
+        "b" => match rest {
+            "true" | "yes" | "1" => CellValue::Bool(true),
+            "false" | "no" | "0" => CellValue::Bool(false),
+            other => return Err(bad("true or false", other)),
+        },
+        "d" => CellValue::Date(
+            iwork::table::parse_date(rest)
+                .ok_or_else(|| bad("a date, as 2024-03-01 or 2024-03-01T10:30:00Z", rest))?,
+        ),
+        "dur" => CellValue::Duration(rest.parse().map_err(|_| bad("a number of seconds", rest))?),
+        "empty" => CellValue::Empty,
+        // A colon is ordinary in a cell — "Total: 40" is text, not a prefix
+        // this crate failed to understand.
+        _ => CellValue::Text(text.to_string()),
+    })
+}
+
+fn describe_value(value: &iwork::table::CellValue) -> String {
+    match value {
+        iwork::table::CellValue::Empty => "(empty)".to_string(),
+        other => format!("{} {:?}", other.kind(), other.to_text()),
+    }
+}
+
 fn csv(path: &str, wanted: &str) -> Result<(), Error> {
     let table = find_table(path, wanted)?;
     for row in table.to_rows() {
@@ -1047,6 +1121,35 @@ fn snippet(units: &[u16]) -> String {
 fn identifier(text: &str) -> Result<u64, Error> {
     text.parse()
         .map_err(|_| Error::Format(format!("'{text}' is not an object identifier")))
+}
+
+fn index(text: &str) -> Result<usize, Error> {
+    text.parse()
+        .map_err(|_| Error::Format(format!("'{text}' is not a row or column index")))
+}
+
+/// `B3` to the `(row, column)` pair the API takes — the inverse of
+/// [`reference_name`].
+fn reference_position(text: &str) -> Result<(usize, usize), Error> {
+    let bad = || Error::Format(format!("'{text}' is not a cell reference like B3"));
+    let split = text
+        .find(|c: char| c.is_ascii_digit())
+        .filter(|&at| at > 0)
+        .ok_or_else(bad)?;
+    let (letters, digits) = text.split_at(split);
+    let mut column = 0usize;
+    for letter in letters.chars() {
+        let value = letter.to_ascii_uppercase() as u32;
+        if !(b'A' as u32..=b'Z' as u32).contains(&value) {
+            return Err(bad());
+        }
+        column = column * 26 + (value - b'A' as u32 + 1) as usize;
+    }
+    let row: usize = digits.parse().map_err(|_| bad())?;
+    if row == 0 {
+        return Err(bad());
+    }
+    Ok((row - 1, column - 1))
 }
 
 /// A dotted path of field numbers, or one of the names in

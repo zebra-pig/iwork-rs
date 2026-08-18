@@ -297,6 +297,23 @@ pub enum FormatSlot {
     Text,
 }
 
+/// The `0x1000` payload's code for a format slot — the inverse of
+/// [`CellRecord::current_format`].
+///
+/// The numbering is the flag word's own order, not byte 6's, which is the
+/// disagreement that makes a decoder written from the wrong one return two keys
+/// swapped with every length still adding up.
+pub fn format_kind_of(slot: FormatSlot) -> u32 {
+    match slot {
+        FormatSlot::Number => 1,
+        FormatSlot::Currency => 2,
+        FormatSlot::Date => 3,
+        FormatSlot::Duration => 4,
+        FormatSlot::Text => 5,
+        FormatSlot::Boolean => 6,
+    }
+}
+
 /// Byte 6, bit by bit: **which format the user set on purpose.**
 ///
 /// Not a second copy of the flag word's presence bits, which is what the
@@ -368,6 +385,36 @@ impl CellRecord {
                     _ => false,
                 };
                 applies.then_some(slot)
+            }
+        }
+    }
+
+    /// The format key held in the slot [`CellRecord::format_kind`] names.
+    pub fn format_id_in_current(&self) -> Option<u32> {
+        self.format_id_in(self.current_format()?)
+    }
+
+    /// Put a format key in one slot, or take it out.
+    pub fn set_format_id_in(&mut self, slot: FormatSlot, key: Option<u32>) {
+        let field = match slot {
+            FormatSlot::Number => &mut self.number_format_id,
+            FormatSlot::Currency => &mut self.currency_format_id,
+            FormatSlot::Duration => &mut self.duration_format_id,
+            FormatSlot::Date => &mut self.date_format_id,
+            FormatSlot::Boolean => &mut self.boolean_format_id,
+            FormatSlot::Text => &mut self.text_format_id,
+        };
+        *field = key;
+    }
+
+    /// Drop byte 6's claim that the user chose this slot's format.
+    ///
+    /// The other bits stay: byte 6 is a set of independent claims, and a cell
+    /// that changes type has only stopped making one of them.
+    pub fn forget_explicit_format(&mut self, slot: FormatSlot) {
+        for &(bit, named) in EXPLICIT_FORMAT {
+            if named == slot {
+                self.extras &= !u16::from(bit);
             }
         }
     }
@@ -2128,6 +2175,47 @@ pub fn format_date(seconds: f64) -> String {
         (rest % 3600) / 60,
         rest % 60
     )
+}
+
+/// Read back what [`format_date`] writes: `2024-03-01T10:30:00Z`, or just the
+/// date, in which case the time is midnight.
+///
+/// The result is the naive seconds the cell stores — no timezone is applied,
+/// because none is stored. Numbers draws the number in the machine's zone and
+/// the two only agree if nothing pretends to convert.
+pub fn parse_date(text: &str) -> Option<f64> {
+    let text = text.trim().trim_end_matches('Z');
+    let (date, time) = match text.split_once(['T', ' ']) {
+        Some((date, time)) => (date, time),
+        None => (text, "00:00:00"),
+    };
+    let mut parts = date.split('-');
+    let year: i64 = parts.next()?.parse().ok()?;
+    let month: i64 = parts.next()?.parse().ok()?;
+    let day: i64 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let mut clock = time.split(':');
+    let hour: i64 = clock.next()?.parse().ok()?;
+    let minute: i64 = clock.next().unwrap_or("0").parse().ok()?;
+    let second: f64 = clock.next().unwrap_or("0").parse().ok()?;
+    if clock.next().is_some() || hour > 23 || minute > 59 || second >= 60.0 {
+        return None;
+    }
+    let days = days_from_civil(year, month as u32, day as u32) - 11_323;
+    Some((days * 86_400 + hour * 3600 + minute * 60) as f64 + second)
+}
+
+/// Howard Hinnant's days-from-civil, the inverse of the one below it.
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = if month > 2 { month - 3 } else { month + 9 } as i64;
+    let doy = (153 * mp + 2) / 5 + day as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
 }
 
 /// Howard Hinnant's civil-from-days, with the era shifted to 0000-03-01.
