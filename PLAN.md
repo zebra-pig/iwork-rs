@@ -176,9 +176,11 @@ Everything layered on top of the cells; depends only on Phase 1.
       AppleScript. `iwork check` learns any invariant broken along the way.
       *(`tests/cells.rs::numbers_reads_back_an_edited_cell`; `iwork check`
       gained the four table invariants in `Table::audit`.)*
-- [ ] Stretch (only if in-place editing proves solid): add a row by copying
-      an existing one. *(Not attempted — see the verification log for what it
-      would take.)*
+- [x] Stretch (only if in-place editing proves solid): add a row by copying
+      an existing one. *(Done on `feature/add-row`, not merged: `insert_row`
+      grows a plain single-tile table and Numbers reads the extra empty row
+      back; every unproven case — categorised/filtered/multi-tile/merge-crossing/
+      formula-crossing — is a named refusal. See the 2026-08-19 log entry.)*
 
 ## Phase 3 — Drawables, geometry, media
 
@@ -2706,3 +2708,80 @@ fixture, and what the app accepted.
   panic in `iwork dump` or `drawables` on a mutated document is now a test
   failure too. Full suite green in both profiles; nothing here changed a wire
   format.
+
+- 2026-08-19 — **Add-row (Phase 2 stretch, on `feature/add-row`).**
+  `Document::insert_row(table, at)`, `iwork insert-row`, FORMAT.md §5 "Inserting
+  a row", README CLI line and two status rows, `tests/rows.rs` (8 tests). `cargo
+  fmt --check` and `cargo clippy --all-targets -D warnings` clean; `cargo test
+  --all-targets` green; `IWORK_APP_CHECK=1 cargo test --test rows
+  numbers_reads_back_an_inserted_row` green. **Not merged to main; not pushed.**
+
+  **What it supports, app-verified.** A plain rectangular table held in one tile,
+  with no categories, filters, pivots, conditional highlighting, hidden or
+  collapsed rows, footer rows, merges at or below the insertion, or formulas
+  whose references would shift. `numbers-formats.numbers`'s `Formate` table
+  (17×3, no formulas, no merges) is the fixture: `insert_row("Formate", 8)`
+  grows it to 18×3, and **Numbers opens the result and reads it back** — one more
+  row, row 9 empty across all columns, and every row below the insertion holding
+  its value *and* its format and control (the checkbox, rating, slider, stepper,
+  pop-up, date and duration cells all shifted down intact). The oracle
+  (`scripts/table-oracle.sh`) reports `row count` 18 and the shifted A-column
+  values, checked against the pre-edit values in
+  `tests/rows.rs::numbers_reads_back_an_inserted_row`.
+
+  **The four objects that move**, no more — three of 97 package entries, the
+  `ColumnRowUIDMap` sharing the model's stream, every other entry byte-identical:
+
+  | Object | What insertion does |
+  |---|---|
+  | `TableModelArchive` field 6 | `number_of_rows` + 1; the dead hidden-counts left alone |
+  | `TST.Tile` | `tile_row_index ≥ at` bumped; **no new `TileRowInfo`** (the empty row has none), so `numrows` is unchanged |
+  | row `HeaderStorageBucket` | indices `≥ at` bumped, one `{at, 0, 0, 0}` added |
+  | `ColumnRowUIDMapArchive` | row half (4/5/6) rebuilt: indices shifted, a fresh per-table-unique UUID minted at `at`, re-emitted **sorted by UUID, high half first** |
+
+  **The mechanics that had to be right, and what each cost.** The tile keys rows
+  by `tile_row_index`, not position, so a shift is a per-`TileRowInfo` field-1
+  bump; the empty row deliberately gets *no* `TileRowInfo`, which matches the
+  app's own invariant for a row with no cells — and is why `set_cell` still can't
+  fill the new row (giving a row its first cell is the unbuilt "first-cell"
+  write). The `ColumnRowUIDMap` was the trap Phase 1b flagged: field 4 is
+  **sorted by UUID, not by index**, so the row arrays are regenerated from
+  scratch and re-sorted (high 64 bits first, the order the app writes) rather
+  than patched positionally. The new row UUID is the one thing **minted, not
+  copied** — uniqueness is per table (row UUIDs collide across tables), the app
+  exposes no row UUID to verify it against, so any high-entropy value the table
+  lacks serves, derived deterministically for a reproducible document.
+
+  **Refusals, by name, and the one that is subtle.** Multi-tile, categorised,
+  filtered, pivoted, conditionally highlighted, hidden/collapsed-row and
+  footer-row tables refuse because no fixture proves the write and a wrong guess
+  corrupts silently. Merges at or straddling the insertion refuse because a merge
+  is an absolute-row formula nothing here rewrites. **Formulas** get a precise
+  check: an inserted row is safe for a whole-column reference (unbounded row
+  axis) and for a relative reference whose host and referent fall on the same
+  side of `at` (both shift together), but breaks an absolute reference to a row
+  `≥ at` or a bounded range the insertion crosses — checked across *every* table,
+  since a cross-table reference into the target breaks the same way. This is why
+  `numbers-large`'s `SUM(C2:C301)` (a bounded, relative range) is refused for
+  insertion at row 5, and `numbers-values`'s `Zweite Tabelle` (`SUM(B2:B3)`, host
+  and range both below the insertion at row 1) is allowed. Every refusal is
+  decided before a byte moves; `insert_row_refuses_what_it_cannot_verify` asserts
+  `changed_streams()` is empty after each.
+
+  **The honest boundary.** The inserted row is genuinely empty — no cell storage
+  of its own — so this delivers "insert an empty row", not "insert a row with
+  values": filling the new row needs the first-cell-in-a-row write, and
+  `filling_the_inserted_row_is_refused_until_first_cell_writes_land` pins that
+  `set_cell` refuses it by name rather than half-doing it. And **no corpus
+  fixture combines a category with a filter**, so the two-addressing-schemes path
+  is refused rather than verified — being conservative where nothing can prove
+  the write, exactly as the add-row notes warned.
+
+  Recommendation: the supported case is app-verified and every unsupported case
+  is a named refusal that leaves the document byte-identical, so this is safe to
+  merge on its own terms. The one judgement call worth a human's eye before it
+  lands on main is the **formula allowance** — permitting an insert when the
+  references provably shift with their host (the `Zweite Tabelle` case) is
+  correct by construction but is *not* app-verified, only the no-formula case is;
+  a reviewer who prefers strictly-verified-only could tighten it to refuse any
+  table with a formula that references it at all.

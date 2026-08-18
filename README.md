@@ -126,6 +126,7 @@ iwork organise  Budget.numbers            # sort rules, filters, categories,
 iwork formulas  Budget.numbers            # every formula: cell, text, cached value
 iwork set-cell  Budget.numbers Zellarten B3 n:43 out.numbers
 iwork set-cell  Budget.numbers Zellarten 2 1 n:43 out.numbers   # the same cell
+iwork insert-row Budget.numbers Zellarten 8 out.numbers   # an empty row before index 8
 
 iwork charts    Budget.numbers            # every chart: type, placement, the data
                                           # it carries, and the table ranges it
@@ -345,6 +346,24 @@ A formula that *reads* an edited cell keeps its stale cached value — Numbers
 recalculates it on open, so the app is right and a reader trusting the cache is
 not.
 
+**An empty row can be inserted, into a plain table.** `iwork insert-row` grows a
+plain rectangular table held in one tile: the row count is bumped, the tile's
+row indices and the row-header bucket shift down past the insertion, and the
+`ColumnRowUIDMap` gains a fresh per-table-unique row UUID — rebuilt sorted by
+UUID, the way the app keeps it. Numbers opens the result, shows one more row with
+the new one empty, and reads every row below the insertion back with its value,
+its data format and its control (a checkbox, a rating, a slider…) intact. The
+new row is genuinely empty — it has no cell storage of its own — so filling it
+needs the *first-cell-in-a-row* write `set-cell` does not do yet. Everything the
+insert cannot maintain safely is refused **by name**: a multi-tile table, a
+categorised, filtered or pivoted one, a table with conditional highlighting,
+hidden or collapsed rows or footer rows, a merge at or straddling the insertion,
+and — the subtle one — any table whose formulas reference it at or below the
+insertion point, where an unshifted `TSCE` reference would silently compute the
+wrong answer. A whole-column reference is unaffected and allowed; a relative
+reference that moves together with its host is allowed; a bounded range the
+insertion would cross is refused.
+
 ### Drawables, geometry and media
 
 A drawable is anything placed on a page, a sheet or a slide — an image, a
@@ -475,6 +494,8 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | A written cell keeps its styles, format and undecoded bytes | ✅ | ✅ | — |
 | Writing a cell what it already holds changes no byte | ✅ | ✅ | — |
 | **The app reads back the written value** | ✅ | ✅ | — |
+| Insert an empty row into a plain single-tile table; refuse the rest by name | — | ✅ | — |
+| **The app reads back the extra row, empty, with the rows below unmoved** | — | ✅ | — |
 | Pages mode: word processing vs page layout, and the app agrees | ✅ | — | — |
 | Sections: name, text range, page numbering, background, switches | ✅ | — | — |
 | **Every section's text agrees with the app, character for character** | ✅ | — | — |

@@ -1598,6 +1598,57 @@ the write touches — the tile, the string, format and control lists, and the
 header buckets — not the tile alone, because a stale patch left on any of them
 would describe it as it used to be.
 
+### Inserting a row
+
+Writing a cell changes nothing about the grid's shape. Inserting a row changes
+it everywhere at once, and the bookkeeping is what makes the difference between a
+document the app grows by a row and one it opens with rows that claim the wrong
+cells. Four objects move, and no more — inserting an empty row into a plain
+single-tile table rewrites three of a Numbers document's 97 package entries (the
+`ColumnRowUIDMap` shares the model's stream), and every other entry is
+byte-identical. What each one does, measured against a table Numbers then read
+back with one more row, the new one empty, and every row below it unmoved:
+
+| Object | What insertion does to it |
+|---|---|
+| `TableModelArchive` field 6 | `number_of_rows` **+ 1**. The dead hidden-count fields (14, 15, 40, 41, 42) stay as they are |
+| `TST.Tile` | every `TileRowInfo` whose `tile_row_index` is `≥ at` is bumped by one. **The new row gets no `TileRowInfo`** — a row with no cells has none — so `numrows` (field 4), which counts them, is unchanged |
+| `HeaderStorageBucket` (rows) | every entry whose index is `≥ at` is bumped, and one `{index: at, size: 0, hidingState: 0, numberOfCells: 0}` is added for the new empty row |
+| `ColumnRowUIDMapArchive` | the row half (fields 4/5/6) is rebuilt: every existing row's index shifts past `at`, a **fresh per-table-unique row UUID** is minted at index `at`, and the three arrays are re-emitted **sorted by UUID** (high 64 bits first — the order the app keeps them in). The column half (fields 1/2/3) is untouched |
+
+The **empty row has no cell storage of its own**, which is the same shape the app
+gives any row that holds no cells (no `TileRowInfo`, and a zero-count bucket
+entry). It is also why `set_cell` cannot then fill it: giving a row its first
+cell needs a `TileRowInfo` built from nothing, which is a separate write this
+crate does not do yet.
+
+**The row UUID is minted, not copied** — it is the one thing an insert cannot
+take from an existing object, because the whole point of it is to differ from
+every row UUID the table already holds. Row UUIDs collide *across* tables, so the
+uniqueness scope is the one table; the value is never verified against the app,
+which exposes no row UUID at all, so any high-entropy value the table does not
+already hold serves. This crate derives it deterministically from the table's
+identity and the insertion index so an insert reproduces the same document.
+
+**What insertion refuses, and why each is more than caution.** A row inserted
+into a categorised table must move the group nodes' row *index* ranges; into a
+filtered or hand-hidden one, the hidden-state extent's row *UUIDs* — the two
+addressing schemes the organisation half of the format runs on, and no corpus
+fixture combines them to verify a write against. A merge is stored as an
+absolute-row formula in the merge owner (§Merged ranges), so a merge at or
+straddling the insertion would keep naming the rows it used to cover. And a
+formula's cell references are indexes or host-relative offsets that **nothing
+here rewrites**: an inserted row is safe for a whole-column reference (its row
+axis is unbounded), and for a relative reference whose host and referent fall on
+the same side of the insertion (both shift together), but it silently breaks an
+absolute reference to a row at or below `at`, or a bounded range the insertion
+crosses — so any of those, in this table or in another table that references it,
+is refused. Multi-tile tables (the row would have to spill into the next tile),
+conditional highlighting, collapsed groups, pivots and footer rows are refused
+for the same reason: no fixture proves the write, and a wrong guess corrupts in
+silence. The refusal is by name, and — like `set_cell` — it is decided before a
+byte moves, so a refused insert leaves the document byte-identical.
+
 ### What a Numbers document does not have
 
 No `TSWP.StorageArchive` anywhere: `iwork text` reads nothing out of a
