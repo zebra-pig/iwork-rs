@@ -323,16 +323,26 @@ confidently. Read-first, then the safest writes.
 
 ## Phase 5 — Formulas and the calculation engine (read)
 
-- [ ] Decode `TSCE` formula archives to an AST; pretty-print as the formula
+- [x] Decode `TSCE` formula archives to an AST; pretty-print as the formula
       text the user typed (cross-checked against AppleScript's `formula`
-      property, which is the oracle).
-- [ ] The reference model in full: absolute/relative flags per axis, named
+      property, which is the oracle). *(273 of 273 formulas outside a pivot
+      table match the app character for character. **A pivot is the named
+      exception**: its formulas are `CATEGORY_REF_NODE`s, which point at a
+      group rather than a rectangle, and its stored table is smaller than the
+      one the app shows.)*
+- [x] The reference model in full: absolute/relative flags per axis, named
       references, whole-row/column and header-name references, cross-table
       (`Table 2::B2`) and cross-sheet references — which resolve by table
-      *identity*, not name string; stored error states.
-- [ ] `iwork formulas <doc>`; cells CLI shows formula alongside cached value.
-- [ ] FORMAT.md: §Formulas. Writing formulas is out of scope until reading
-      is exhaustive.
+      *identity*, not name string; stored error states. *(Proven by renaming
+      the table after writing the formula. **A cross-sheet reference has no
+      sheet in it**: a table's name is document-wide, and the `Sheet::Table::`
+      form is Unverified because nothing here makes two tables share a name.)*
+- [x] `iwork formulas <doc>`; cells CLI shows formula alongside cached value.
+      *(And `iwork organise` prints each filter and highlighting rule's
+      condition, which closes the gap Phase 1b left open.)*
+- [x] FORMAT.md: §Formulas. Writing formulas is out of scope until reading
+      is exhaustive. *(Nothing writes a formula; writing rule 17 says why, and
+      `set_cell` still refuses a formula cell by name.)*
 
 ## Phase 6 — Charts (read)
 
@@ -1432,6 +1442,215 @@ fixture, and what the app accepted.
   - `resave.sh` takes any of the three documents, not just a `.pages`.
   - The **two attempts** in `app-check.sh` matter more the more binaries drive
     the apps; a Keynote phase adds another.
+
+- 2026-08-18 — **Phase 5 complete (formulas and the calculation engine, read).**
+  New module `src/formula.rs` (plus a generated `src/formula_functions.rs`),
+  `Table::formula | formula_cells | names`, `table::formulas | names |
+  predicate_text`, `iwork formulas`, formula text in `iwork cells` and rule
+  conditions in `iwork organise`, a new `iwork check` invariant, FORMAT.md §9
+  and writing rule 17, the `TSCE` registry block rebuilt from two entries to
+  twelve, README rows, and a new fixture. `cargo fmt --check` and `cargo clippy
+  --all-targets -D warnings` clean; `cargo test --all-targets` green: 115 unit +
+  16 cell + 18 drawable + 15 fixture + **14 formula** + 17 pages + 34 style +
+  22 table + 14 text + 3 doc. `IWORK_APP_CHECK=1 cargo test --all-targets`
+  green over the whole suite, twenty-one fixtures. **Nothing writes a formula.**
+
+  **The oracle, and it is the strongest one this repository has.** `formula of
+  cell` does not hand back a structure — it hands back the *text a user would
+  see in the formula bar*. The comparison is therefore character for character,
+  and it is exact everywhere except a pivot table:
+
+  | Fixture | Formulas the app reports | Matching exactly |
+  |---|--:|--:|
+  | `numbers-formulas` | 98 | **98** |
+  | `numbers-rules` | 138 | **138** |
+  | `numbers-sorted` | 15 | **15** |
+  | `numbers-links` | 13 | **13** |
+  | `numbers-values` | 7 | **7** |
+  | `numbers-large` | 2 | **2** |
+  | `numbers-pivot` | 32 | 0 — deferred, see below |
+  | **total** | **305** | **273 of 273 outside a pivot** |
+
+  Structural evidence that needs no app: **907 node arrays, 1582 nodes, across
+  all twenty-one fixtures**, every one decoding, validating field by field
+  against the 15.3.1 schema and re-encoding to the bytes it came from. Forty
+  node types and forty-eight function ids appear in the corpus.
+
+  **The new fixture is a zoo, and it exists because AppleScript can put any
+  string into a cell.** No script here will make a category, a filter or a
+  chart — but a string beginning with `=` is a formula, so the whole of `TSCE`
+  is reachable from a script even though none of its structures are.
+  `numbers-formulas.numbers` carries **ninety-five cases**, one per node type,
+  operator, reference shape, literal kind and naming rule, in nine tables shaped
+  to exercise the naming rules (no headers, two header rows, a duplicate header
+  name, header names full of punctuation). The builder reports every case the
+  app *refused* rather than leaving a silent hole: three were, and were
+  replaced — Numbers 15.3.1 parses neither a direct lambda application
+  (`LAMBDA(x,x+1)(2)`), nor a duration literal (`1d 4h`), nor a date literal.
+
+  Two of the cases are only possible because the fixture is built rather than
+  found, and both are the phase's key proofs: the table `Alt` is renamed to
+  `Neu` **after** the formula pointing at it is written, and a column is removed
+  **after** the formula pointing at it is written.
+
+  **The identity proof.** `=Alt::A1` is written, `Alt` becomes `Neu`, the
+  document is saved. Afterwards the string `Alt` is nowhere in the file, the AST
+  is unchanged, and both Numbers and this crate print `=Neu::A1`. What an AST
+  carries is a `TSP.CFUUIDArchive`, and it is **not** the table's `table_id` and
+  **not** its `haunted_owner.owner_uid` — it is the `base_owner_uid` of the
+  `TSCE.FormulaOwnerDependenciesArchive` whose `owner_kind` is 35. Matching on
+  either of the other two finds nothing at all, which is how the walk was found:
+  the first two candidates missed every table in the document. In this corpus
+  the base is the haunted UUID's lower half minus 35 — every owner a table has
+  is a numbered offset from one base — but the join is a lookup and never
+  arithmetic. The CFUUID's four words map to `TSP.UUID` as
+  `lower = w0 | w1 << 32`, `upper = w2 | w3 << 32`, checked word for word
+  against all nine tables of the zoo.
+
+  **The 35/36 finding, which was the named trap.** Fields 35 and 36 of
+  `ASTNodeArchive` changed type *in place* at 14.4: 35 from a nested
+  `ASTNodeArrayArchive` to a `string`, 36 from a nested `ASTLetNodeWhitespace`
+  to a `bool`. Field 35 keeps wire type LEN, so a ≤13.1 decoder parses a
+  whitespace string as a nested AST and says nothing is wrong. **15.3.1 writes
+  the new shape and this corpus proves it.** `=LET(x,2,y,3,x×y)` produces two
+  `LET_BIND_NODE`s, `{1: 52, 34: "x", 36: 0, 37: 1}` and
+  `{1: 52, 34: "y", 36: 1, 37: 2}` — field 36 is a varint on the wire, and it
+  carries the meaning the 14.4 name gives it, because there are also **two**
+  `END_SCOPE_NODE`s (one per binding) and only one `LET(…)` in the text. The
+  decoder's schema table gates on the version and never on the wire type found;
+  a unit test asserts that the old shape at field 36 is refused.
+
+  **What a formula's text actually needs, none of which is in the file.**
+
+  - **Header names.** Numbers prints references by the *text of header cells*,
+    worked out at render time. Nine rules, all read off the zoo: the last header
+    row names a column and the last header column names a row; a cell reference
+    uses names only when it has both and only for a body cell; a whole-column
+    reference uses the column name alone; **a range never uses names**; a name
+    that names more than one row is not a name (`numbers-links` has eleven rows
+    whose header cell reads `Item name`, and the app prints `=C2×D2`); a name
+    unique in the document needs no table prefix even across tables; where two
+    tables share a name the **first** keeps it bare (`SUM(Menge)` for `Daten`,
+    `SUM(Daten2::Menge)` for `Daten2` — which table counts as first is
+    *Inferred*, and this crate uses creation order); `$` goes in front of the
+    name of the axis it anchors; and a name containing an operator character is
+    single-quoted with an embedded `'` doubled — `A+B` → `'A+B'`, `it's` →
+    `'it''s'`, while `x y` and `SUM` are printed bare.
+  - **Unicode operators.** `×`, `÷`, `−` (U+2212, for subtraction *and*
+    negation), `≥`, `≤`, `≠`. ASCII does not match the app.
+  - **Function names are not localised**, and the separator is a comma. On a
+    machine driving Numbers in German the oracle answers `SUM`, `VLOOKUP`,
+    `IFERROR`, `FIND.CASEINSENSITIVE`.
+  - **Whitespace is nodes.** `APPEND_WHITESPACE_NODE` appends to the top of the
+    stack and `PREPEND_WHITESPACE_NODE` prepends to it; `= B60 + 1` round-trips
+    with its spaces where the user put them.
+  - **Parentheses are stored, not implied.** `=(B11+1)×2` writes a `LIST_NODE`
+    with one argument, so nothing here reasons about precedence.
+
+  **Findings worth keeping.**
+
+  - **A formula archive in a data list carries no host cell.** All four host
+    fields are absent from every entry in this corpus, so relative references
+    resolve against the cell holding the key — which is why one entry can serve
+    many cells. `=SEQUENCE(1,3)` spills into the two cells beside it and all
+    three share one key.
+  - **A number literal is stored twice** and the decimal128 is the one that is
+    right. `high == 0x3040000000000000` means an exact integer and `low` is it;
+    otherwise the value is `±mantissa × 10^exponent` and rendering from the
+    digits is what keeps `=0.1+0.2` from printing as the nearest double.
+  - **The two coordinate encodings are adjacent and different.**
+    `AST_column`/`AST_row` are zigzag `sint32`; a colon tract's relative offsets
+    are plain `int32` varints, so −1 is ten bytes. An omitted `range_end` means
+    "the same as `range_begin`". Rows saturate at `0x7fffffff` and columns at
+    `0x7fff`.
+  - **`B` and `B:B` produce the same archive**, and the app prints one of them
+    back. So does a whole row typed as `2:2`.
+  - **Two function ids have no published name.** 337 is the internal function
+    behind a spilled cell, and **Numbers itself prints `(null)` for it** — so
+    this crate prints `(null)` too and matches the app exactly. 175 appears only
+    inside a `TN.ChartMediatorArchive`, wrapping each of a chart's operands.
+    Both sit in the mined table's holes.
+  - **A well-formedness check is what makes a document-wide walk safe.** A
+    `TSCE.CellRecordExpandedArchive` is `{1: column, 2: row}`, which is a legal
+    *node* (`MULTIPLICATION_NODE` with function index 0) and a nonsensical
+    *program*; requiring the node stream to evaluate without underflowing its
+    stack rejects it. Without that check the corpus appeared to contain node
+    types in the tens of millions.
+  - **A pivot's stored table is its base and the app shows a larger view.**
+    `Sales Pivot` is 7×5 on disk and 10×6 to Numbers; the grand-total row and
+    column exist only in the view, and seventeen of the app's thirty-two
+    formulas for that table sit where there is no cell record at all.
+  - **Every document has a calculation engine**, Pages and Keynote included,
+    with the empty owner-dependencies and named-reference archives that go with
+    it. `pages-report.pages` has four real formulas in its table, including
+    `=SUM(D)` — and **no dictionary will report them**, because Pages has no
+    table property at all. That decode is verified structurally and by nothing
+    else.
+  - **There are no named ranges.** No `TSCE` archive stores one; a "name" is a
+    header cell's text. The tracked-reference store holds the ASTs of the
+    references the engine is tracking, which in this corpus are exactly the
+    header-cell references.
+
+  **Phase 1b's opaque predicate is now readable.** `numbers-rules`'s filter rule
+  reported as "predicate 37 against a formula" is
+  `=IF(LEN("–")≠LEN(A3),TRUE,IF(ISERROR(FIND.CASEINSENSITIVE("–",A3)),TRUE,FIND.CASEINSENSITIVE("–",A3)≠1))`
+  — "does not begin with an en-dash" — and its four conditional-highlighting
+  rules read `=#CELL>0`, `=#CELL<0` and two `FIND.CASEINSENSITIVE` tests for an
+  arrow. `#CELL` is this crate's spelling, not the app's: the subject of a
+  highlighting rule is a `LINKED_CELL_REF_NODE` with no coordinates at all, and
+  no dictionary reports a conditional rule, so there is no app text to match.
+
+  **What resisted.**
+
+  - **A pivot's category references are decoded and not printed the way the app
+    prints them.** `TSCE.CategoryReferenceArchive` is read in full — group-by
+    owner, column, aggregate code, group level, group path — but Numbers spells
+    one `Source::$Units $January::Electric::Bicycles (Sum)`, which needs the
+    source table's group tree, the names of its groups, the aggregate's name
+    (Apple publishes none; only `2 = Sum` is proven) and the rule for where the
+    `$` markers go. One document is behind all of it. The text is `#CATEGORY!`
+    and the oracle test counts and names those cells rather than skipping them.
+  - **`DATE_NODE` and `DURATION_NODE` literals were not obtainable.** Numbers
+    15.3.1 refuses `=1d 4h` and every date-literal spelling tried; the nodes are
+    decoded by shape and are Unverified. So are `TOKEN_NODE`, the two legacy
+    reference nodes, `COLON_NODE`, `UID_REFERENCE_NODE`, `COLON_NODE_WITH_UIDS`,
+    `VIEW_TRACT_REF_NODE`, `INTERSECTION_NODE` and the two linked column/row
+    refs.
+  - **A cross-*sheet* reference has no sheet in it.** A table's name is
+    document-wide, so `=Fern::A2` reaches a table on another sheet with no sheet
+    prefix at all. The `Sheet::Table::` form the references describe is
+    Unverified: nothing here makes two tables share a name.
+  - **Keynote has no formula fixture**, for the same reason it has no table one.
+  - **The dependency graph is untouched.** `CellRecordTileArchive`,
+    `RangePrecedentsTileArchive` and the packed `EdgesArchive` words are carried
+    through and not decoded; nothing about formula *text* needs them, and the
+    packed edge layout is unverified in every published source.
+
+  What Phase 6 (charts) should know:
+
+  - **A chart's `TSCE` references are in its `TN.ChartMediatorArchive` (12006)**,
+    and every one of them wraps its single operand in **function 175**, which
+    has no published name. `numbers-rules` has 51 of them. That is the "distinct
+    from the chart's private copy of its data" half of the phase's brief, and it
+    is already decodable: `formula::Formula::decode` on the archive, then
+    `Reference::resolve` against the host.
+  - The chart-style archives (5022–5031) are the shape that fooled the first
+    version of the AST walk here: `{1: varint, 2: message}` repeated, which is a
+    node array to a decoder that only checks field numbers. Wire types and the
+    stack check separate them.
+
+  What Phase 2's stretch (adding a row) and Phase 7 should know:
+
+  - **A formula's references are indexes, not UUIDs** — except a `#REF!`, which
+    is UUIDs. Inserting or deleting a row moves every relative reference that
+    crosses it, and the app rewrites the ASTs when it does that
+    (`TSCE.FormulaRewriteCommandArchive` is the undo record of exactly that).
+    Any row insert that does not rewrite formulas produces a document that opens
+    and computes the wrong answer, which is worse than one that refuses.
+  - **A cell caches its formula's result and the app trusts it until it
+    recalculates.** That is why `set_cell` refuses a formula cell, and why
+    writing a formula is a phase of its own rather than a small addition to this
+    one — writing rule 17 lists what it needs.
 
 ## Execution notes
 
