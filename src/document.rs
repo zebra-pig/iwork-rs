@@ -590,28 +590,6 @@ impl Document {
                 }
                 let mut storage = Message::decode(object.payload())
                     .map_err(|e| Error::Format(format!("{name}: storage {identifier}: {e}")))?;
-                if let Some(field) = text::unknown_table(&storage) {
-                    return Err(Error::UnknownAttributeTable {
-                        storage: identifier,
-                        field,
-                    });
-                }
-
-                // Change tracking, before anything is measured. Both tables
-                // *look* like run tables and would remap without complaint;
-                // `table_deletion` covers characters that are still in the text
-                // and are not going to be shown, which is a different thing
-                // from a style run and would need a probe nothing here can
-                // perform. See `crate::annotations`.
-                if let Some(field) = text::CHANGE_TABLES
-                    .iter()
-                    .find(|field| storage.get(**field).is_some())
-                {
-                    return Err(Error::TrackedChanges {
-                        storage: identifier,
-                        field: *field,
-                    });
-                }
 
                 let old = text::read(&storage);
                 let length = text::length(&old);
@@ -643,26 +621,12 @@ impl Document {
                     removed: end - start,
                     inserted: text::length(new_text),
                 };
-                if let Some((field, index, target)) =
-                    text::destroyed_anchors(&storage, edit).first()
-                {
-                    return Err(Error::AnchoredObject {
-                        storage: identifier,
-                        index: *index,
-                        table: text::table(*field)
-                            .map(|t| t.name)
-                            .unwrap_or("an anchor table"),
-                        object: *target,
-                    });
-                }
-                if let Some((index, section)) =
-                    text::destroyed_sections(&storage, &old, edit).first()
-                {
-                    return Err(Error::SectionBreak {
-                        storage: identifier,
-                        index: index - 1,
-                        section: *section,
-                    });
+                // Everything `text::apply` requires of its caller, in one
+                // question: the tables it can place and decode, the text it can
+                // read back byte for byte, change tracking, and what this
+                // particular edit would destroy. See [`text::refusal`].
+                if let Some(refusal) = text::refusal(&storage, edit) {
+                    return Err(refusal.into_error(identifier));
                 }
 
                 let mut text = String::with_capacity(old.len() - (to - from) + new_text.len());
@@ -2782,6 +2746,27 @@ impl Document {
                 problems.push(format!(
                     "{stream} storage {}: field {field} is not an attribute table \
                      this crate knows, so an edit to this storage is refused",
+                    object.identifier
+                ));
+            }
+            // A table this crate knows by number and cannot decode is worse: an
+            // edit would remap every other table in the storage and step over
+            // this one, leaving it anchored to characters that have moved. The
+            // remapper refuses; `check` is where a caller finds out first.
+            if let Some(field) = text::undecodable_table(&storage) {
+                problems.push(format!(
+                    "{stream} storage {}: field {field} ({}) does not decode as an \
+                     attribute table, so an edit to this storage is refused",
+                    object.identifier,
+                    text::table(field).map(|t| t.name).unwrap_or("unknown")
+                ));
+            }
+            // And text that is not UTF-8 is read lossily, which is fine for a
+            // reader and fatal for a writer.
+            if !text::text_is_utf8(&storage) {
+                problems.push(format!(
+                    "{stream} storage {}: the text is not valid UTF-8, so an edit to \
+                     this storage is refused",
                     object.identifier
                 ));
             }

@@ -609,6 +609,25 @@ half an object — a mark with no `TSWP.FootnoteReferenceAttachmentArchive` and
 no note — and a section break with no section behind it is a document that
 claims a section it does not have.
 
+#### And what cannot be read faithfully
+
+Two more refusals, and neither is about the edit: they are about the storage.
+**A known attribute table whose bytes do not decode** (`decode_nested` insists
+on a byte-identity round trip, because bytes that merely parse are how a string
+gets mistaken for a message) would be stepped over while every other table in
+the storage was remapped, leaving it anchored to characters that have moved.
+**Text that is not valid UTF-8** is read lossily — right for a reader, fatal for
+a writer, which would put the lossy reading back and turn every ill-formed
+sequence into a `U+FFFD` for good, moving every index after it.
+`Error::UndecodableAttributeTable` and `Error::InvalidText` name them, `iwork
+check` reports both, and no storage in the corpus is either.
+
+Everything an edit requires of a storage — those two, an unknown table, change
+tracking, a destroyed anchor, a destroyed section break — is one function,
+`text::refusal`, which `text::apply` asserts in debug builds rather than only
+describing. A contract that lists three of its six checks is how the other three
+come to be skipped.
+
 #### Indices are UTF-16 code units
 
 Everywhere: in the tables, in this crate's API, in the paragraph ranges. **Run

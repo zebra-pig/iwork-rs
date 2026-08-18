@@ -151,6 +151,20 @@ pub enum Error {
         storage: u64,
         field: u32,
     },
+    /// The storage carries an attribute table this crate knows by number whose
+    /// bytes it cannot decode and re-encode unchanged. Every *other* table
+    /// would be remapped and this one skipped, leaving it pointing into text
+    /// that has moved — a quieter corruption than refusing.
+    UndecodableAttributeTable {
+        storage: u64,
+        field: u32,
+    },
+    /// The storage's text is not valid UTF-8. Reading it is lossy and writing
+    /// the lossy reading back would replace every ill-formed sequence with
+    /// `U+FFFD` and shift every index after it, so an edit is refused.
+    InvalidText {
+        storage: u64,
+    },
     /// The storage carries `table_insertion` (21) or `table_deletion` (22):
     /// change tracking is on and there are changes in this text. A tracked
     /// deletion leaves its characters *in* the storage, so an edit through one
@@ -234,6 +248,21 @@ impl std::fmt::Display for Error {
                 f,
                 "storage {storage}: field {field} is not an attribute table this crate \
                  knows, and an edit would have to guess how its entries are anchored"
+            ),
+            Error::UndecodableAttributeTable { storage, field } => write!(
+                f,
+                "storage {storage}: field {field} ({}) does not decode as an attribute \
+                 table, so an edit would remap every other table and leave this one \
+                 pointing at characters that have moved",
+                text::table(*field)
+                    .map(|t| t.name)
+                    .unwrap_or("an attribute table")
+            ),
+            Error::InvalidText { storage } => write!(
+                f,
+                "storage {storage}: the text is not valid UTF-8, and an edit would write \
+                 back a lossy reading of it — replacing every ill-formed sequence with \
+                 U+FFFD and moving every index after it"
             ),
             Error::TrackedChanges { storage, field } => write!(
                 f,

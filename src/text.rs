@@ -290,6 +290,50 @@ pub fn unknown_table(storage: &Message) -> Option<u32> {
         .map(|field| field.number)
 }
 
+/// The first field of `storage` that *is* a known attribute table and whose
+/// bytes are not a message this crate can decode and re-encode unchanged.
+///
+/// [`crate::pb::decode_nested`] insists on that byte-identity round trip,
+/// because bytes that merely happen to parse are how a string gets mistaken for
+/// a message. A table that fails it is one [`apply`] would skip while remapping
+/// every other table in the storage — leaving the skipped one holding indices
+/// into text that has moved, which is worse than not editing at all. So it is a
+/// refusal, not something to step over.
+///
+/// An **empty** table field is not that case: an empty message is a table with
+/// no entries, there is nothing in it to remap, and `decode_nested` answers
+/// `None` for zero bytes by design.
+pub fn undecodable_table(storage: &Message) -> Option<u32> {
+    storage
+        .fields
+        .iter()
+        .find(|field| match &field.value {
+            Value::Bytes(raw) => {
+                table(field.number).is_some()
+                    && !raw.is_empty()
+                    && crate::pb::decode_nested(raw).is_none()
+            }
+            _ => false,
+        })
+        .map(|field| field.number)
+}
+
+/// Is every text run of `storage` valid UTF-8?
+///
+/// [`read`] decodes lossily, which is right for a reader — a storage whose bytes
+/// are not UTF-8 should still be listed rather than blowing up an inspection —
+/// and fatal for a writer: [`apply`] writes the text it was given back into
+/// field 3, so an edit through a lossy read replaces every ill-formed sequence
+/// with `U+FFFD` for good, and shifts every index after it. No storage in the
+/// corpus is ill-formed, and an edit to one is refused rather than performed on
+/// a string the document does not contain.
+pub fn text_is_utf8(storage: &Message) -> bool {
+    storage.all(3).all(|value| match value {
+        Value::Bytes(raw) => std::str::from_utf8(raw).is_ok(),
+        _ => true,
+    })
+}
+
 /// Characters that end a paragraph.
 ///
 /// `\n` is the obvious one. The others are not obvious and matter, because
@@ -899,6 +943,115 @@ pub fn destroyed_sections(storage: &Message, text: &str, edit: Edit) -> Vec<(u64
 }
 
 /// Why an edit to a storage is refused — everything [`apply`] requires of its
+/// caller, in one value.
+///
+/// [`crate::Document::replace_text`] turns each of these into the
+/// [`crate::Error`] that names it; the storage identifier, which this module
+/// does not have, is what it adds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Refusal {
+    /// A length-delimited field that is not an attribute table this crate
+    /// knows — see [`unknown_table`].
+    UnknownTable(u32),
+    /// A known attribute table whose bytes do not decode — see
+    /// [`undecodable_table`].
+    UndecodableTable(u32),
+    /// Field 3 is not valid UTF-8 — see [`text_is_utf8`].
+    InvalidText,
+    /// The storage carries `table_insertion` or `table_deletion` — see
+    /// [`CHANGE_TABLES`].
+    TrackedChanges(u32),
+    /// The removed range covers the character an object is anchored to — see
+    /// [`destroyed_anchors`].
+    AnchoredObject {
+        field: u32,
+        index: u64,
+        object: Option<u64>,
+    },
+    /// The removed range covers the `U+0004` a section begins after — see
+    /// [`destroyed_sections`].
+    SectionBreak {
+        /// Index of the section's first character; the break is one before it.
+        index: u64,
+        section: Option<u64>,
+    },
+}
+
+impl Refusal {
+    /// The error a `Document` reports for this refusal, given the storage it
+    /// was found in.
+    pub fn into_error(self, storage: u64) -> crate::Error {
+        match self {
+            Refusal::UnknownTable(field) => crate::Error::UnknownAttributeTable { storage, field },
+            Refusal::UndecodableTable(field) => {
+                crate::Error::UndecodableAttributeTable { storage, field }
+            }
+            Refusal::InvalidText => crate::Error::InvalidText { storage },
+            Refusal::TrackedChanges(field) => crate::Error::TrackedChanges { storage, field },
+            Refusal::AnchoredObject {
+                field,
+                index,
+                object,
+            } => crate::Error::AnchoredObject {
+                storage,
+                index,
+                table: table(field).map(|t| t.name).unwrap_or("an anchor table"),
+                object,
+            },
+            Refusal::SectionBreak { index, section } => crate::Error::SectionBreak {
+                storage,
+                index: index - 1,
+                section,
+            },
+        }
+    }
+}
+
+/// Everything that must be true of `storage` before [`apply`] may touch it.
+///
+/// One function rather than five call sites, so that the contract [`apply`]
+/// documents and the checks a caller performs cannot drift apart: `apply`
+/// asserts this in debug builds, and [`crate::Document::replace_text`] is the
+/// caller that turns it into an error.
+///
+/// The order is the order the answers are worth having: what the crate cannot
+/// read at all, then what it will not edit at all, then what this particular
+/// edit would destroy.
+pub fn refusal(storage: &Message, edit: Edit) -> Option<Refusal> {
+    if let Some(field) = unknown_table(storage) {
+        return Some(Refusal::UnknownTable(field));
+    }
+    if let Some(field) = undecodable_table(storage) {
+        return Some(Refusal::UndecodableTable(field));
+    }
+    if !text_is_utf8(storage) {
+        return Some(Refusal::InvalidText);
+    }
+    // Change tracking, before anything is measured. Both tables *look* like run
+    // tables and would remap without complaint; `table_deletion` covers
+    // characters that are still in the text and are not going to be shown,
+    // which is a different thing from a style run and would need a probe
+    // nothing here can perform. See `crate::annotations`.
+    if let Some(field) = CHANGE_TABLES
+        .iter()
+        .find(|field| storage.get(**field).is_some())
+    {
+        return Some(Refusal::TrackedChanges(*field));
+    }
+    if let Some((field, index, object)) = destroyed_anchors(storage, edit).into_iter().next() {
+        return Some(Refusal::AnchoredObject {
+            field,
+            index,
+            object,
+        });
+    }
+    let text = read(storage);
+    if let Some((index, section)) = destroyed_sections(storage, &text, edit).into_iter().next() {
+        return Some(Refusal::SectionBreak { index, section });
+    }
+    None
+}
+
 /// Apply `edit` to a storage archive, remapping every attribute table it
 /// carries.
 ///
@@ -907,9 +1060,18 @@ pub fn destroyed_sections(storage: &Message, text: &str, edit: Edit) -> Vec<(u64
 /// part that has to be right about the tables, and is separated so that it can
 /// be tested on storages built by hand.
 ///
-/// The caller is responsible for having checked [`unknown_table`] and
-/// [`destroyed_anchors`] first.
+/// **The caller must have found [`refusal`] `None` first.** That is the whole
+/// precondition — an unknown table, a table that does not decode, text that is
+/// not UTF-8, change tracking, a destroyed anchor, a destroyed section break —
+/// and it is asserted here in debug builds rather than only described, because
+/// a contract listing three of the six checks is how the other three come to be
+/// skipped.
 pub fn apply(storage: &mut Message, edit: Edit, new_text: &str) -> EditReport {
+    debug_assert!(
+        refusal(storage, edit).is_none(),
+        "apply() was called on a storage it must refuse: {:?}",
+        refusal(storage, edit)
+    );
     let old_text = read(storage);
     let old_starts: Vec<u64> = paragraph_ranges(&old_text)
         .iter()
@@ -1508,6 +1670,75 @@ mod tests {
         assert_eq!(
             destroyed_sections(&s, text, over_the_break),
             vec![(6, Some(901))]
+        );
+    }
+
+    /// A table this crate knows by number and cannot decode is a refusal, not a
+    /// table to step over: [`apply`] would remap every other table in the
+    /// storage and leave this one anchored to characters that have moved.
+    #[test]
+    fn a_table_that_does_not_decode_is_refused() {
+        let mut s = storage("abcdef", vec![(5, vec![entry(0, Some(9))])]);
+        let nothing = Edit {
+            at: 0,
+            removed: 0,
+            inserted: 0,
+        };
+        assert_eq!(undecodable_table(&s), None);
+        assert_eq!(refusal(&s, nothing), None);
+
+        // A short string that parses as a message but does not re-encode to the
+        // same bytes — the case `decode_nested`'s round trip exists for.
+        s.set(8, Value::Bytes(b"Grosse Uberschrift".to_vec()));
+        assert_eq!(undecodable_table(&s), Some(8));
+        assert_eq!(refusal(&s, nothing), Some(Refusal::UndecodableTable(8)));
+
+        // An empty table field is not that case: an empty message is a table
+        // with no entries and there is nothing in it to remap.
+        s.set(8, Value::Bytes(Vec::new()));
+        assert_eq!(undecodable_table(&s), None);
+        assert_eq!(refusal(&s, nothing), None);
+    }
+
+    /// Text that is not UTF-8 is read lossily, and writing a lossy reading back
+    /// replaces every ill-formed sequence with `U+FFFD` for good.
+    #[test]
+    fn text_that_is_not_utf8_is_refused() {
+        let mut s = storage("abcdef", vec![(5, vec![entry(0, Some(9))])]);
+        assert!(text_is_utf8(&s));
+        s.set(3, Value::Bytes(vec![b'a', 0xFF, 0xFE, b'b']));
+        assert!(!text_is_utf8(&s));
+        assert_eq!(
+            refusal(
+                &s,
+                Edit {
+                    at: 0,
+                    removed: 1,
+                    inserted: 0
+                }
+            ),
+            Some(Refusal::InvalidText)
+        );
+        assert_eq!(read(&s), "a\u{FFFD}\u{FFFD}b", "the reader stays lossy");
+    }
+
+    /// The contract is enforced, not only described: `apply` on a storage
+    /// [`refusal`] would refuse is a bug in the caller, and a debug build says
+    /// so rather than remapping half the storage.
+    #[test]
+    #[should_panic(expected = "must refuse")]
+    #[cfg(debug_assertions)]
+    fn apply_asserts_its_preconditions() {
+        let text = "Company Name\u{FFFC}\nProject";
+        let mut s = storage(text, vec![(9, vec![entry(12, Some(57435))])]);
+        apply(
+            &mut s,
+            Edit {
+                at: 9,
+                removed: 6,
+                inserted: 0,
+            },
+            "Company N\nProject",
         );
     }
 

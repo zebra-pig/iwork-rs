@@ -419,6 +419,64 @@ fn a_footnote_whose_mark_is_gone_is_a_problem() {
     );
 }
 
+/// A storage this crate cannot read faithfully is not edited badly.
+///
+/// Two ways in, neither of them producible by this crate — hence [`forge`]:
+///
+/// * an attribute table whose bytes do not decode. Every *other* table would be
+///   remapped and this one stepped over, leaving it anchored to characters that
+///   have moved;
+/// * text that is not valid UTF-8. The reader is lossy on purpose; the writer
+///   would put the lossy reading back and turn every ill-formed sequence into a
+///   `U+FFFD` for good, moving every index after it.
+#[test]
+fn a_storage_this_crate_cannot_read_faithfully_is_not_edited() {
+    let path = fixture!("pages-plain.pages");
+    let storage = Document::open(&path)
+        .unwrap()
+        .text_storages()
+        .into_iter()
+        .next()
+        .unwrap()
+        .identifier;
+
+    // A short string in the character-style table: it parses as a message and
+    // does not re-encode to the same bytes, which is what `decode_nested`'s
+    // round trip is for.
+    let mut doc = forge(&path, storage, |archive| {
+        archive.set_in_order(8, iwork::pb::Value::Bytes(b"Grosse Uberschrift".to_vec()));
+    });
+    match doc.set_text(storage, "Ein anderer Absatz.") {
+        Err(Error::UndecodableAttributeTable { storage: s, field }) => {
+            assert_eq!(s, storage);
+            assert_eq!(field, 8);
+        }
+        other => panic!("expected a named refusal, got {other:?}"),
+    }
+    assert!(doc.changed_streams().is_empty());
+    assert!(
+        doc.problems().iter().any(|p| p.contains("does not decode")),
+        "check says nothing about it: {:?}",
+        doc.problems()
+    );
+
+    // Text that is not UTF-8. `String::from_utf8_lossy` reads it; nothing
+    // writes it back.
+    let mut doc = forge(&path, storage, |archive| {
+        archive.set_in_order(3, iwork::pb::Value::Bytes(vec![b'a', 0xFF, 0xFE, b'b']));
+    });
+    match doc.insert_text(storage, 1, "x") {
+        Err(Error::InvalidText { storage: s }) => assert_eq!(s, storage),
+        other => panic!("expected a named refusal, got {other:?}"),
+    }
+    assert!(doc.changed_streams().is_empty());
+    assert!(
+        doc.problems().iter().any(|p| p.contains("not valid UTF-8")),
+        "check says nothing about it: {:?}",
+        doc.problems()
+    );
+}
+
 // -- what a storage carries --------------------------------------------------
 
 /// Every storage in the corpus is made of fields this crate can place. A field
