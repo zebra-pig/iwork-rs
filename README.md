@@ -79,6 +79,8 @@ iwork cells     Budget.numbers 904769 --raw   # …and the cell record behind ea
 iwork csv       Budget.numbers Zellarten  # one table as CSV
 iwork organise  Budget.numbers            # sort rules, filters, categories,
                                           # pivots, highlighting, custom formats
+                                          # — with each rule's condition as a formula
+iwork formulas  Budget.numbers            # every formula: cell, text, cached value
 iwork set-cell  Budget.numbers Zellarten B3 n:43 out.numbers
 iwork set-cell  Budget.numbers Zellarten 2 1 n:43 out.numbers   # the same cell
 
@@ -419,6 +421,17 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | **The app reads back the moved rectangle** | — | — | ✅ |
 | Replace an image's bytes; registry and drawables stay in step | — | — | ✅ |
 | A replacement is refused when edit state would make it a lie | ✅ | — | ✅ |
+| Formulas: the AST, its 40 node types and 48 function ids in this corpus | ✅ | ✅ | — (no fixture) |
+| Every formula archive re-encodes to the bytes it came from (907 of them) | ✅ | ✅ | ✅ |
+| Every formula validates field by field against the 15.3.1 schema | ✅ | ✅ | ✅ |
+| The reference model: absolute/relative per axis, whole row, whole column | ✅ | ✅ | — |
+| Number literals from their decimal128, not from the double beside it | ✅ | ✅ | — |
+| Cross-table references resolve by identity — **proven by a renamed table** | — | ✅ | — |
+| Header-name references, with quoting, scoping and ambiguity | ✅ | ✅ | — |
+| A stored `#REF!`, made by deleting a column a formula pointed at | — | ✅ | — |
+| `LET`/`LAMBDA`: bindings, continuations, symbols — the 14.4 shape of fields 34–37 | — | ✅ | — |
+| Filter and conditional-highlighting conditions read as formulas | — | ✅ | — |
+| **Every formula matches the app's text, character for character** (273 of 273 outside pivots) | — | ✅ | — |
 
 Keynote is the gap in that block for one reason only — neither AppleScript nor
 any bundled theme will put a table on a slide, so there is no fixture. The

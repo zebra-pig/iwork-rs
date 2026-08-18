@@ -2053,6 +2053,344 @@ the hole in the first place.
 
 ---
 
+## 9. Formulas — `TSCE`
+
+The calculation engine, which is the same in all three apps: Pages tables carry
+formulas, Keynote's could, and the archives are identical because `TSCE` lives
+in the shared registry. Everything below was decoded from documents Numbers
+15.3.1 wrote and, wherever the app will say anything, checked against what the
+app prints in its formula bar — `formula of cell`, which is the strongest
+oracle in this repository because it hands back the *text*, not a structure.
+
+The corpus for it is `numbers-formulas.numbers`, a zoo of **ninety-five
+formulas** built by AppleScript: one per node type, operator, reference shape,
+literal kind and naming rule, plus a table renamed after the formula pointing at
+it was written and a column deleted after the formula pointing at it was
+written. `scripts/applescript/numbers-formulas.applescript` is the whole list.
+
+### Where a formula is
+
+A cell holds a **key**, not a formula: the `0x200` payload of its record (§5) is
+a `uint32` into the table's FORMULA `TST.TableDataList`, and the entry there
+carries a `TSCE.FormulaArchive` at field 5.
+
+Two consequences, and both are load-bearing:
+
+* **The archive has no host cell.** `FormulaArchive` has `host_column` (2),
+  `host_row` (3) and their two sign bools (4, 5), and 15.3.1 leaves all four out
+  of every entry in this corpus. The host is the cell that holds the key, so
+  relative references resolve against *the referring cell*.
+* **One entry can serve many cells.** `=SEQUENCE(1,3)` spills into the two cells
+  beside it and all three key the same formula; a filled-down column is the same
+  trick. The refcount on the list entry is how many cells point at it, exactly
+  as for strings and formats.
+
+Formula archives are also found at `TST.FormulaPredicateArchive` field 7 and its
+pre-pivot twin's field 1 (a filter or conditional-highlighting condition — §5),
+in the merge owner's formula store (§5, "Merged cells"),
+in `TSCE.TrackedReferenceArchive` (4005) inside the tracked-reference store, and
+in `TN.ChartMediatorArchive` (12006), which is where a chart keeps its
+references back into a table.
+
+### The AST
+
+`FormulaArchive.AST_node_array` (field 1) is an `ASTNodeArrayArchive`: a
+repeated field 1 of `ASTNodeArchive`, in **post-order**. Evaluate the stream
+onto a stack; each node pops its operands and pushes its result; one value is
+left at the end.
+
+That last sentence is also the test. A node array whose stream underflows its
+own stack is not a node array, and this is how a walk of a whole document tells
+a formula apart from the many other repeated-field-1 messages an iWork file is
+full of — `TSCE.CellRecordExpandedArchive` is `{1: column, 2: row}`, which is a
+legal *node* (`MULTIPLICATION_NODE` with `AST_function_node_index` 0) and a
+nonsensical *program*. `Ast::is_well_formed` is that check, and `iwork check`
+runs it over every formula in every table.
+
+`ASTNodeArchive` has forty-six fields; the discriminator is `AST_node_type`
+(field 1), and the full table with wire types is `NODE_FIELDS` in
+`src/formula.rs`. The node types this corpus produces, with what the app writes
+them for:
+
+| # | Node | Written by | Payload |
+|--:|---|---|---|
+| 1–6 | `ADDITION`…`CONCATENATION` | `+ − × ÷ ^ &` | — (binary) |
+| 7–12 | `GREATER_THAN`…`NOT_EQUAL_TO` | `> ≥ < ≤ = ≠` | — (binary) |
+| 13 | `NEGATION` | unary `−` | — |
+| 14 | `PLUS_SIGN` | unary `+` | — |
+| 15 | `PERCENT` | postfix `%` | — |
+| 16 | `FUNCTION` | any call | 2 index, 3 arity |
+| 17 | `NUMBER` | a literal | 4 double, 42/43 decimal128 |
+| 18 | `BOOLEAN` | `TRUE`, `FALSE` | 5 |
+| 19 | `STRING` | `"…"` | 6, **unescaped** |
+| 22 | `EMPTY_ARGUMENT` | `SUM(A1,,B1)` | — |
+| 24 | `ARRAY` | `{1,2;3,4}` | 11 columns, 12 rows |
+| 25 | `LIST` | `(…)` — parentheses | 13 arity |
+| 32/33 | `APPEND`/`PREPEND_WHITESPACE` | spaces the user typed | 25 |
+| 34/35 | `BEGIN`/`END_THUNK` | a lazily evaluated argument | — |
+| 36 | `CELL_REFERENCE` | `A1`, `$B$2`, `B`, `2:2` | 26 column, 27 row, 28 table |
+| 46 | `REFERENCE_ERROR_WITH_UIDS` | `#REF!` | 26/27 saturated, 38 uids |
+| 52 | `LET_BIND` | `LET(x,…)` | 34 name, 36 continuation, 37 symbol |
+| 53 | `VAR` | a bound variable | 37 symbol |
+| 54 | `END_SCOPE` | closes one `LET` binding | — |
+| 55 | `LAMBDA` | `LAMBDA(x,…)` | 45 idents |
+| 56/57 | `BEGIN`/`END_LAMBDA_THUNK` | a lambda's body | — |
+| 63 | `LINKED_CELL_REF` | the cell a highlighting rule styles | 28 table only |
+| 66 | `CATEGORY_REF` | a pivot cell | 39 reference, 44 levels |
+| 67 | `COLON_TRACT` | any range | 33 sticky bits, 40 tract |
+| 70 | `SPILL_RANGE` | postfix `#` | — |
+
+Forty node types and forty-eight function ids appear across the twenty-one
+fixtures, in 907 node arrays and 1582 nodes. Types this crate names but has
+never seen: `DATE`(20) and `DURATION`(21) literals, `TOKEN`(23), `THUNK`(26)
+with an inline nested array, the two legacy reference nodes (27, 28),
+`COLON`(29), `REFERENCE_ERROR`(30), `UNKNOWN_FUNCTION`(31), `COLON_NODE_WITH_UIDS`(45),
+`UID_REFERENCE`(48), `LINKED_COLUMN`/`ROW_REF`(64, 65), `VIEW_TRACT_REF`(68) and
+`INTERSECTION`(69). They are decoded by shape and are **Unverified**.
+
+> **The trap: fields 35 and 36 changed type in place at 14.4.** Up to 13.1,
+> field 35 was `AST_let_e2`, a nested `ASTNodeArrayArchive`, and field 36 was
+> `AST_let_whitespace`, a nested `ASTLetNodeWhitespace`. From 14.4 they are
+> `AST_let_whitespace` (a **string**) and `AST_let_is_continuation` (a **bool**).
+> Field 35 keeps wire type LEN, so an old schema parses a whitespace string as a
+> nested AST and reports nothing wrong; field 36 goes LEN → varint, so an old
+> schema throws.
+>
+> **15.3.1 writes the new shape, and this corpus proves it.** `=LET(x,2,y,3,x×y)`
+> produces two `LET_BIND_NODE`s: `{1: 52, 34: "x", 36: 0, 37: 1}` and
+> `{1: 52, 34: "y", 36: 1, 37: 2}`. Field 36 is a varint on the wire and it
+> carries the meaning the 14.4 name gives it — the second binding *continues*
+> the first `LET` rather than opening a new one — because there are also two
+> `END_SCOPE_NODE`s, one per binding, and only one `LET(…)` in the text. A
+> decoder must gate on the document's version and never on the wire type found.
+
+### Number literals are stored twice
+
+`NUMBER_NODE` carries a binary double at field 4 **and** an IEEE-754 decimal128
+at fields 42 (low) and 43 (high). The decimal is the authoritative one:
+
+```
+sign     = high >> 63
+exponent = ((high >> 49) & 0x3fff) − 6176
+mantissa = ((high & (2^49 − 1)) << 64) | low
+value    = ±mantissa × 10^exponent
+```
+
+`high == 0x3040000000000000` is exponent 0 with an empty high mantissa, i.e. an
+exact integer, and `low` *is* the integer — which is what keeps `1` from being
+printed as `1.0`. `0.1` is `low = 1, high = (6176−1) << 49`, and rendering it
+from the digits rather than from the double is what makes `=0.1+0.2` print as
+`=0.1+0.2`. Formula text never uses exponent notation, so `1e−5` is `0.00001`.
+
+A literal is never negative: a leading minus is a separate `NEGATION_NODE`.
+
+### The reference model
+
+A reference names a column and a row, each **absolutely or relatively**, and
+either axis may be absent — which is what a whole-column or whole-row reference
+is.
+
+`CELL_REFERENCE_NODE` (36) carries `AST_column` (26) and `AST_row` (27), each an
+`{1: index, 2: absolute}` pair. **The index is a zigzag `sint32`**: absolute
+means the 0-based index, relative means a signed offset from the host cell.
+Numbers writes `2: false` explicitly rather than relying on the default.
+
+* `=B25` in `C25` → column `{1: 1, 2: 0}` = −1, row `{1: 0, 2: 0}` = 0.
+* `=$B$2` → column `{1: 2, 2: 1}` = absolute 1, row `{1: 2, 2: 1}` = absolute 1.
+* `=B$2`, `=$B2` → one flag each; the axes are independent.
+* `=SUM(B)` → **field 27 absent**. A whole column.
+* `=SUM(2:2)` → **field 26 absent**. A whole row.
+* `=COUNT(B:B)` produces the same archive as `=SUM(B)`: one shape, two
+  spellings, and the app prints one of them back.
+
+`COLON_TRACT_NODE` (67) is every range. It carries `AST_sticky_bits` (33) —
+four required bools, `begin_row`, `begin_column`, `end_row`, `end_column` — and
+`AST_colon_tract` (40), which holds up to four lists: `relative_column` (1),
+`relative_row` (2), `absolute_column` (3), `absolute_row` (4), each an entry of
+`{1: range_begin, 2: range_end?}`.
+
+* **The relative offsets are plain `int32` varints, not zigzag.** −1 is ten
+  bytes. The adjacent `AST_column`/`AST_row` *are* zigzag. Mixing the two
+  decodings is the silent-corruption bug of this schema.
+* **An omitted `range_end` means `range_end == range_begin`**, not 0 and not
+  unbounded.
+* The sticky bits choose which list each end reads. `=SUM($B2:B$4)` writes
+  sticky `{0,1,1,0}` and **both** lists on both axes; the begin column comes
+  from `absolute_column[0]`, the end column from `relative_column[0]`.
+
+The saturation sentinels differ by axis: a row saturates at `0x7fffffff` and a
+column at `0x7fff`. A reference with both saturated is a stored `#REF!`, written
+as `REFERENCE_ERROR_WITH_UIDS` (46) with an `AST_tract_list` (38) of the UUIDs
+that used to be there. The fixture makes one by deleting a column after the
+formula pointing at it was written.
+
+### Cross-table references resolve by identity
+
+A reference outside its own table carries `AST_cross_table_reference_extra_info`
+(field 28), whose field 1 is a `TSP.CFUUIDArchive`. **No table name appears in
+any formula anywhere in the file.**
+
+The UUID is the target table's `base_owner_uid`, and reaching it is a two-step
+walk that nothing else in the format needs:
+
+```
+TST.TableModelArchive.haunted_owner (84) → TSCE.HauntedOwnerArchive.owner_uid
+  → the TSCE.FormulaOwnerDependenciesArchive (4008) whose formula_owner_uid is
+    that UUID and whose owner_kind (3) is 35
+    → its base_owner_uid (12)          ← this is what an AST writes
+```
+
+Matching on `haunted_owner.owner_uid` itself finds nothing: in this corpus the
+base is the haunted UUID's lower half minus 35, because every owner a table has
+is a numbered offset from one base — but the join is a lookup and never
+arithmetic.
+
+The `TSP.CFUUIDArchive` form splits the 128-bit value into four 32-bit words:
+`lower = w0 | w1 << 32`, `upper = w2 | w3 << 32`, where `w0`…`w3` are fields
+2–5. Checked word for word against the `base_owner_uid` of all nine tables of
+the zoo.
+
+**The proof that this is identity and not name.** The fixture writes
+`=Alt::A1`, then renames the table `Alt` to `Neu`, then saves. Afterwards the
+string `Alt` is nowhere in the document, the AST is byte-identical to what it
+would have been, and both Numbers and this crate print `=Neu::A1`.
+
+Cross-table references are **relative** like any other: `=Daten::B2` written in
+`C35` stores column −1 and row −33 and resolves them against the host's
+position, in the other table's coordinate space.
+
+### Header names, which are not in the file either
+
+Numbers prints references by **the text of header cells**, and works it out at
+render time from the cells themselves. There is a document-wide cache of these
+names — `TST.HeaderNameMgrArchive` (6366) and its `HeaderNameMgrTileArchive`
+(6365) fragments, reached from `CalculationEngineArchive.header_name_manager`
+(field 14) — but the names in it are copies of cell text.
+
+The rules, all read off the zoo and the corpus:
+
+1. **A column is named by the last header row; a row by the last header
+   column.** `Doppelkopf` has two header rows and the app prints the second
+   one's text.
+2. **A cell reference uses names only when it has both**, and the cell must be
+   a body cell — row ≥ header rows *and* column ≥ header columns. A reference
+   into the header row prints `B1`; a reference into a table with a header row
+   and no header column prints `C2`.
+3. **A whole-column reference uses the column name alone**, a whole-row
+   reference the row name alone.
+4. **A range never uses names.** `=SUM(B2:B4)` stays in A1 notation in a table
+   where every row and column is named.
+5. **A name must name one thing.** `numbers-links.numbers` has eleven rows whose
+   header cell all read `Item name`, and the app prints `=C2×D2` there.
+6. **A name that is unique in the document needs no table prefix, across tables
+   as well as within one.** `=Daten::B2` prints as `=Menge Schrauben`.
+7. **Where two tables share a name, the first one keeps it bare.** `Menge` is a
+   column header of both `Daten` and `Daten2`; the app prints `SUM(Menge)` for
+   the first and `SUM(Daten2::Menge)` for the second. Which table counts as
+   first is *Inferred*: this crate uses document order — tables sorted by object
+   identifier, which is creation order — and one document is behind it.
+8. **A `$` goes in front of the name of the axis it anchors**: `$Wert $addition`,
+   `Wert $addition`, `$Wert addition`.
+9. **A name is wrapped in single quotes when it contains an operator
+   character**, and an embedded `'` is doubled. `A+B` → `'A+B'`,
+   `Preis (netto)` → `'Preis (netto)'`, `it's` → `'it''s'`,
+   `groesser-gleich` → `'groesser-gleich'`. A space does not force quoting
+   (`x y`), and neither does a function's name (`SUM`). Proven characters:
+   `+ - ( ) '`; the rest of the set in `NEEDS_QUOTING` is the grammar's other
+   operators and is Inferred.
+
+### The text a formula prints as
+
+This crate's canonical output is **the app's**, and the comparison is character
+for character. Two things that surprise:
+
+* **The operators are Unicode.** `×` (U+00D7), `÷` (U+00F7), `−` (U+2212 for
+  both subtraction and negation), `≥`, `≤`, `≠`. Emitting ASCII `*`, `/`, `-`,
+  `>=`, `<=`, `<>` does not match the app.
+* **Function names are not localised and the separator is a comma.** On a
+  machine whose Numbers is running in German, the oracle reports `SUM`,
+  `VLOOKUP`, `IFERROR`, `FIND.CASEINSENSITIVE` and `SUM(1,2,3,4,5)`. The only
+  spellings Numbers localises in a formula are the operators, and those are the
+  same everywhere too.
+
+Whitespace the user typed is preserved as its own nodes:
+`APPEND_WHITESPACE_NODE` appends to the value on top of the stack,
+`PREPEND_WHITESPACE_NODE` prepends to it. `= B60 + 1` is a reference, an append,
+a literal, a prepend, an addition and one more prepend, and it round-trips.
+
+Parentheses are not implied by precedence — they are a `LIST_NODE` with one
+argument, so `=(B11+1)×2` is stored with the grouping the user typed and this
+crate never has to reason about precedence.
+
+Three renderings are the crate's own rather than the app's, because the app has
+no formula text for them:
+
+| Node | Printed | Why |
+|---|---|---|
+| `LINKED_CELL_REF` (63) | `#CELL` | The subject of a conditional-highlighting rule: a node with no coordinates at all. No dictionary reports a conditional rule, so there is nothing to match. `=#CELL>0` reads the way the rule reads. |
+| `LINKED_COLUMN_REF` / `LINKED_ROW_REF` | `#COLUMN`, `#ROW` | Same, unexercised. |
+| `CATEGORY_REF` (66) | `#CATEGORY!` | See below. |
+
+And one function id has no name anywhere: **337**, the internal function behind
+a spilled cell, which **Numbers itself prints as `(null)`** — so this crate
+prints `(null)` too and matches the app exactly. **175** is the same kind of
+hole and appears only inside `TN.ChartMediatorArchive`, wrapping each of a
+chart's operands; it has no name to give it either.
+
+### What is not printed the way the app prints it
+
+A pivot cell's formula is a `CATEGORY_REF_NODE` (66) carrying a
+`TSCE.CategoryReferenceArchive`: a group-by owner UUID, the column being
+summarised, an aggregate code, a group level and a path of group UUIDs down the
+category tree. Numbers spells one as
+
+```
+Table 1 as Pivot Source Table::$Units $January::Electric::Bicycles (Sum)
+```
+
+which needs the source table's group tree, the names of its groups, the
+aggregate's name (Apple publishes none; only `2 = Sum` is proven — §5) and the
+rule for where the `$` markers go. The 32 formulas of `numbers-pivot.numbers`
+are the only ones in this corpus. The archive is decoded to
+`formula::CategoryReference` and the text is `#CATEGORY!`; the oracle test
+counts these separately and names them rather than skipping them.
+
+A second thing about pivots was found while measuring that gap and belongs
+here: **a pivot's stored table is its base, and the app shows a larger view.**
+`Sales Pivot` is 7×5 on disk and 10×6 to Numbers — the grand-total row and the
+grand-total column exist only in the view, and seventeen of the app's
+thirty-two formulas for that table sit at positions with no cell record at all.
+`TSCE.CoordMapperArchive` is the base→view mapping; nothing here reads it.
+
+Everywhere else the agreement is exact: **273 of 273 formulas outside a pivot
+match the app character for character**, across `numbers-values`,
+`numbers-formulas`, `numbers-large`, `numbers-links`, `numbers-rules` and
+`numbers-sorted`.
+
+### The calculation engine object
+
+`TSCE.CalculationEngineArchive` (4000) is one per document and **every document
+has one**, Pages and Keynote included, with the empty
+`FormulaOwnerDependenciesArchive` and `NamedReferenceManagerArchive` that go
+with it. Its `dependency_tracker` (2) holds the owner-id map and the list of
+per-owner dependency archives; `saved_locale_identifier` is field **16** in
+modern files (field 5 is a 4.2-era compatibility value and reading it gives the
+wrong locale).
+
+Dependency edges — `TSCE.CellRecordTileArchive` (4009),
+`RangePrecedentsTileArchive` (4010), the packed `EdgesArchive` words — are
+recalculation metadata. This crate carries them through untouched and does not
+decode them; nothing about formula *text* needs them.
+
+**There are no named ranges.** No `TSCE` archive stores one and no Numbers
+feature makes one: a "name" is a header cell's text, resolved at render time as
+above. The `NamedReferenceManagerArchive` (4003) and the tracked-reference store
+(4004) hold ASTs for the references the engine is *tracking*, keyed by formula
+id — in this corpus they are the header-cell references, one per named row and
+column.
+
+---
+
 ## Writing documents
 
 Generate **from a template**, not from nothing. The container, the framing and
@@ -2126,7 +2464,15 @@ Rules a writer must respect:
     its guides and its background is a question Pages will not answer for
     anyone —
     it refuses the edit from a script. §8 has the four ways that was checked.
-17. **A field you cannot place is not a field to skip.** A storage's attribute
+17. **Never write a formula.** Reading one is settled (§9); writing one is
+    not, and the gap is not the AST. A written formula has to be *evaluated*
+    before it is saved, because the cell caches the result and the app trusts
+    that cache until it recalculates; it has to be registered in the
+    calculation engine's dependency graph, whose edge encoding nobody has
+    decoded; and a reference into another table has to be written as that
+    table's `base_owner_uid` and tracked. `set_cell` refuses a formula cell by
+    name, and that refusal stands.
+18. **A field you cannot place is not a field to skip.** A storage's attribute
     tables are told apart by field number and by nothing else, and an
     unrecognised one is far more likely to be a table than not. Refusing the
     edit is the safe answer; carrying it through unchanged while every other

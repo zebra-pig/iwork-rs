@@ -648,17 +648,98 @@ const ENTRIES: &[Entry] = &[
         confidence: Confirmed,
         app: App::Any,
     },
-    // -- calculation engine (Numbers) ---------------------------------------
+    // -- calculation engine --------------------------------------------------
+    //
+    // Both entries this block used to have were wrong, and wrong in the same
+    // way: they named 4008 the engine and 4009 the formula archive, one slot
+    // late each. **`TSCE.FormulaArchive` has no type id at all** — it is never
+    // an object, only a field of one (a `TST.TableDataList` entry, a filter
+    // predicate, a tracked reference, a chart mediator). The twelve ids below
+    // are the whole of `TSCE`, from the registry dumped out of the installed
+    // 15.3.1 binaries, and 4000, 4003, 4004, 4005 and 4008 have all been
+    // decoded out of documents here.
+    //
+    // `TSCE` is in the *shared* registry: every Pages document and every
+    // Keynote deck carries a calculation engine, an owner-dependencies archive
+    // and a named-reference manager, empty or not.
     Entry {
-        message_type: 4008,
+        message_type: 4000,
         name: "TSCE.CalculationEngineArchive",
+        confidence: Confirmed,
+        app: App::Any,
+    },
+    Entry {
+        message_type: 4001,
+        name: "TSCE.FormulaRewriteCommandArchive",
+        confidence: Unverified,
+        app: App::Any,
+    },
+    Entry {
+        message_type: 4003,
+        name: "TSCE.NamedReferenceManagerArchive",
+        confidence: Confirmed,
+        app: App::Any,
+    },
+    // Renamed from `TSCE.ReferenceTrackerArchive` at 11.2, same id. Holds one
+    // AST per tracked reference; in this corpus they are the header-cell
+    // references a name resolves through.
+    Entry {
+        message_type: 4004,
+        name: "TSCE.TrackedReferenceStoreArchive",
+        confidence: Confirmed,
+        app: App::Any,
+    },
+    Entry {
+        message_type: 4005,
+        name: "TSCE.TrackedReferenceArchive",
         confidence: Inferred,
         app: App::Any,
     },
     Entry {
+        message_type: 4007,
+        name: "TSCE.RemoteDataStoreArchive",
+        confidence: Inferred,
+        app: App::Any,
+    },
+    // The per-owner hub, and the one a cross-table reference is resolved
+    // through: the archive whose `owner_kind` is 35 maps a table's haunted
+    // owner UUID to the `base_owner_uid` every AST writes.
+    Entry {
+        message_type: 4008,
+        name: "TSCE.FormulaOwnerDependenciesArchive",
+        confidence: Confirmed,
+        app: App::Any,
+    },
+    Entry {
         message_type: 4009,
-        name: "TSCE.FormulaArchive",
+        name: "TSCE.CellRecordTileArchive",
+        confidence: Inferred,
+        app: App::Any,
+    },
+    Entry {
+        message_type: 4010,
+        name: "TSCE.RangePrecedentsTileArchive",
         confidence: Unverified,
+        app: App::Any,
+    },
+    Entry {
+        message_type: 4011,
+        name: "TSCE.ReferencesToDirtyArchive",
+        confidence: Unverified,
+        app: App::Any,
+    },
+    // The document-wide cache of header names, and the fragments it is tiled
+    // into. Reached from `CalculationEngineArchive.header_name_manager`.
+    Entry {
+        message_type: 6365,
+        name: "TST.HeaderNameMgrTileArchive",
+        confidence: Inferred,
+        app: App::Any,
+    },
+    Entry {
+        message_type: 6366,
+        name: "TST.HeaderNameMgrArchive",
+        confidence: Inferred,
         app: App::Any,
     },
     // The stylesheet a document's styles are actually listed in. Not in the TSS
