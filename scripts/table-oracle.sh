@@ -41,9 +41,14 @@ document=$(cd "$(dirname "$document")" && pwd)/$(basename "$document")
 osa_acquire
 
 osa_warm numbers || exit 1
-if ! osa_run "$timeout" "$here/applescript/table-oracle.applescript" "$document"; then
-	status=$?
-	printf 'table-oracle: Numbers did not answer for %s\n' "$document" >&2
+# `$?` after `if ! cmd` is the *negated* status, so reading it there reported
+# success for every failure and this script exited 0 with nothing to say. A
+# caller then saw an empty answer from a healthy-looking run, which is the one
+# failure mode a harness must never have. Take the status before testing it.
+osa_run "$timeout" "$here/applescript/table-oracle.applescript" "$document"
+status=$?
+if [ "$status" -ne 0 ]; then
+	printf 'table-oracle: Numbers did not answer for %s (status %s)\n' "$document" "$status" >&2
 	printf '%s\n' "$OSA_STDERR" | sed 's/^/  /' >&2
 	osa_reset numbers
 	exit "$status"
