@@ -34,6 +34,7 @@
 //! claiming to understand something it has never seen — [`Error::Format`] says
 //! so instead.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 
 use crate::Error;
@@ -112,7 +113,22 @@ struct Reader<'a> {
     bytes: &'a [u8],
     offsets: Vec<usize>,
     ref_size: usize,
+    /// How many more values may be materialised before the read is refused. The
+    /// object table is a DAG, not a tree — a container holds *indices*, so a
+    /// leaf shared by several keys is legitimate — but that same sharing lets a
+    /// ~140-byte file describe an exponential fan-out (four references per node,
+    /// a dozen levels deep) that walks to hundreds of megabytes of `Plist`. The
+    /// depth limit bounds the path, not the count; this bounds the count. A
+    /// budget rather than a visited-set, because visiting a shared leaf twice is
+    /// what a real plist does and must stay allowed.
+    budget: Cell<usize>,
 }
+
+/// The most `Plist` values a single binary plist may expand to. Real
+/// `Properties.plist` files carry a couple of dozen; this is high enough that
+/// no genuine iWork metadata approaches it and low enough that the fan-out bomb
+/// is refused in well under a second.
+const MAX_NODES: usize = 1 << 20;
 
 /// Read a property list in either of the two forms an iWork package uses.
 ///
@@ -167,6 +183,7 @@ fn parse_binary(bytes: &[u8]) -> Result<Plist, Error> {
         bytes,
         offsets,
         ref_size,
+        budget: Cell::new(MAX_NODES),
     };
     reader.object(root, 0)
 }
@@ -177,6 +194,17 @@ impl Reader<'_> {
             return Err(Error::Format(
                 "binary property list nests too deeply".into(),
             ));
+        }
+        // Spend one from the total-nodes budget. A DAG can name far more values
+        // than it has objects, so this — not the depth limit — is what stops a
+        // fan-out bomb.
+        match self.budget.get() {
+            0 => {
+                return Err(Error::Format(
+                    "binary property list expands to too many values".into(),
+                ))
+            }
+            remaining => self.budget.set(remaining - 1),
         }
         let start = *self
             .offsets
@@ -199,6 +227,16 @@ impl Reader<'_> {
             },
             0x1 => {
                 let width = 1usize << low;
+                // The module doc promises 16-byte integers are refused, and the
+                // accumulator behind `be` is a `u64`: a width past eight would
+                // silently truncate a value it cannot hold — `0x14` and the
+                // 32-, 64- … -byte widths above it all read wrong rather than
+                // erroring. Refuse them, as promised.
+                if width > 8 {
+                    return Err(Error::Format(format!(
+                        "binary property list: {width}-byte integer is wider than this crate reads"
+                    )));
+                }
                 let raw = self.slice(body, width)?;
                 // Integers are signed only at eight bytes wide; narrower ones
                 // are unsigned, which is why this is not a single sign-extend.
@@ -396,9 +434,7 @@ mod xml {
                     .parse()
                     .map(Plist::Real)
                     .map_err(|_| Error::Format("XML property list: bad <real>".into())),
-                "data" => Ok(Plist::Data(
-                    self.until_close("data")?.trim().as_bytes().to_vec(),
-                )),
+                "data" => Ok(Plist::Data(base64_decode(&self.until_close("data")?)?)),
                 "array" => {
                     let mut items = Vec::new();
                     while !self.at_close("array") {
@@ -485,6 +521,45 @@ mod xml {
                 }
             }
         }
+    }
+
+    /// Decode the base64 body of an XML `<data>` element to the bytes it stands
+    /// for. CoreFoundation writes the payload line-wrapped and indented, so
+    /// whitespace is skipped; padding `=` carries no bits and is skipped too.
+    ///
+    /// A tiny hand-rolled decoder rather than a dependency — the crate takes
+    /// none — and it refuses a character outside the alphabet rather than
+    /// returning the base64 *text* as though it were the bytes, which is what
+    /// this branch used to do.
+    fn base64_decode(text: &str) -> Result<Vec<u8>, Error> {
+        fn sextet(c: u8) -> Option<u32> {
+            match c {
+                b'A'..=b'Z' => Some(u32::from(c - b'A')),
+                b'a'..=b'z' => Some(u32::from(c - b'a') + 26),
+                b'0'..=b'9' => Some(u32::from(c - b'0') + 52),
+                b'+' => Some(62),
+                b'/' => Some(63),
+                _ => None,
+            }
+        }
+        let mut out = Vec::new();
+        let mut acc = 0u32;
+        let mut bits = 0u32;
+        for &c in text.as_bytes() {
+            if c == b'=' || c.is_ascii_whitespace() {
+                continue;
+            }
+            let value = sextet(c).ok_or_else(|| {
+                Error::Format("XML property list: <data> is not base64".into())
+            })?;
+            acc = (acc << 6) | value;
+            bits += 6;
+            if bits >= 8 {
+                bits -= 8;
+                out.push((acc >> bits) as u8);
+            }
+        }
+        Ok(out)
     }
 
     fn unescape(text: &str) -> String {
@@ -786,5 +861,94 @@ mod tests {
     fn a_file_that_is_not_a_plist_is_refused_by_name() {
         assert!(matches!(parse(b"PK\x03\x04"), Err(Error::Format(_))));
         assert!(matches!(parse(b"bplist00"), Err(Error::Format(_))));
+    }
+
+    /// The object table is a DAG, and a container holds *indices*: a handful of
+    /// arrays, each referencing the next one several times, describes an
+    /// exponential number of values in a few dozen bytes. The depth limit does
+    /// not catch it — the tree is shallow — so the total-nodes budget must, and
+    /// quickly.
+    #[test]
+    fn a_fan_out_bomb_is_refused_and_bounded() {
+        const FAN: usize = 8;
+        const LEVELS: usize = 7; // 8^7 = 2^21 values, past MAX_NODES = 2^20
+
+        let mut body = Vec::new();
+        let mut offsets = Vec::new();
+        for level in 0..LEVELS {
+            offsets.push(HEADER.len() + body.len());
+            body.push(0xa0 | FAN as u8); // an array of FAN references
+            for _ in 0..FAN {
+                body.push((level + 1) as u8); // all pointing at the next object
+            }
+        }
+        offsets.push(HEADER.len() + body.len());
+        body.push(0x08); // the shared leaf: false
+
+        let mut bytes = HEADER.to_vec();
+        bytes.extend_from_slice(&body);
+        let table_at = bytes.len();
+        for offset in &offsets {
+            bytes.push(*offset as u8);
+        }
+        bytes.extend_from_slice(&[0, 0, 0, 0, 0]);
+        bytes.push(0); // sort version
+        bytes.push(1); // offset size
+        bytes.push(1); // ref size
+        bytes.extend_from_slice(&(offsets.len() as u64).to_be_bytes());
+        bytes.extend_from_slice(&0u64.to_be_bytes()); // root
+        bytes.extend_from_slice(&(table_at as u64).to_be_bytes());
+        assert!(bytes.len() < 200, "the bomb is small: {} bytes", bytes.len());
+
+        let start = std::time::Instant::now();
+        let error = parse(&bytes).unwrap_err();
+        assert!(matches!(error, Error::Format(_)), "{error}");
+        assert!(
+            start.elapsed().as_secs() < 5,
+            "the fan-out was materialised rather than bounded"
+        );
+    }
+
+    /// A 16-byte integer marker (`0x14`) is refused, as the module doc promises:
+    /// the `u64` accumulator behind it would keep only the low eight bytes and
+    /// report a value it never held.
+    #[test]
+    fn a_sixteen_byte_integer_is_refused_not_truncated() {
+        let mut bytes = HEADER.to_vec();
+        let object_at = bytes.len();
+        bytes.push(0x14); // integer, width 1 << 4 = 16
+        bytes.extend_from_slice(&[0xff; 16]); // a value far past i64::MAX
+        let table_at = bytes.len();
+        bytes.push(object_at as u8);
+        bytes.extend_from_slice(&[0, 0, 0, 0, 0]);
+        bytes.push(0); // sort version
+        bytes.push(1); // offset size
+        bytes.push(1); // ref size
+        bytes.extend_from_slice(&1u64.to_be_bytes()); // count
+        bytes.extend_from_slice(&0u64.to_be_bytes()); // root
+        bytes.extend_from_slice(&(table_at as u64).to_be_bytes());
+
+        let error = parse(&bytes).unwrap_err();
+        assert!(
+            matches!(error, Error::Format(_)),
+            "a 16-byte integer decoded rather than being refused: {error}"
+        );
+    }
+
+    /// An XML `<data>` element carries base64, and it is decoded to the bytes it
+    /// stands for — not returned as the base64 text, which is what it used to be.
+    #[test]
+    fn xml_data_is_base64_decoded() {
+        let xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><data>
+SGVsbG8sIHdvcmxk
+</data></plist>"#;
+        assert_eq!(parse(xml).unwrap(), Plist::Data(b"Hello, world".to_vec()));
+    }
+
+    #[test]
+    fn xml_data_that_is_not_base64_is_refused() {
+        let xml = br#"<plist version="1.0"><data>not base64 !!</data></plist>"#;
+        assert!(matches!(parse(xml), Err(Error::Format(_))));
     }
 }
