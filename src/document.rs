@@ -2393,8 +2393,33 @@ impl Document {
             .ok_or(Error::NoSuchStyle(style_identifier))?
             .kind;
         let mut archive = self.storage_archive(storage)?;
-        let length = text::length(&text::read(&archive));
+        let body = text::read(&archive);
+        let length = text::length(&body);
         let table_field = kind.attribute_table();
+
+        // A paragraph style applies to whole paragraphs, so the range grows to
+        // the paragraphs it touches. Writing a paragraph run inside a paragraph
+        // is not a smaller version of the same edit — it is a table iWork never
+        // writes, and Keynote's own parser is documented as rendering a text box
+        // 2^16 points tall and then crashing on one.
+        let range = match kind {
+            StyleKind::Paragraph | StyleKind::List => {
+                let paragraphs = text::paragraph_ranges(&body);
+                let start = paragraphs
+                    .iter()
+                    .rev()
+                    .find(|p| p.start <= range.start)
+                    .map(|p| p.start)
+                    .unwrap_or(range.start);
+                let end = paragraphs
+                    .iter()
+                    .find(|p| p.end >= range.end)
+                    .map(|p| p.end)
+                    .unwrap_or(range.end);
+                start..end.max(start)
+            }
+            StyleKind::Character => range,
+        };
 
         let mut table = match archive.bytes(table_field) {
             Some(raw) => crate::pb::decode_nested(raw).ok_or_else(|| {
@@ -2484,29 +2509,95 @@ impl Document {
                 problems.push(format!("storage {} does not decode", object.identifier));
                 continue;
             };
-            let length = text::length(&text::read(&storage));
-            for &field in text::ATTRIBUTE_TABLES {
+            let body = text::read(&storage);
+            let length = text::length(&body);
+            let starts: Vec<u64> = text::paragraph_ranges(&body)
+                .into_iter()
+                .map(|r| r.start)
+                .collect();
+
+            // A field this crate cannot place is not a fault in the document —
+            // it is a gap in the crate, and one that makes an edit unsafe. Say
+            // so, because `check` is where a caller finds out before writing.
+            if let Some(field) = text::unknown_table(&storage) {
+                problems.push(format!(
+                    "{stream} storage {}: field {field} is not an attribute table \
+                     this crate knows, so an edit to this storage is refused",
+                    object.identifier
+                ));
+            }
+
+            for spec in text::TABLES {
+                let field = spec.field;
                 let Some(table) = storage.bytes(field).and_then(crate::pb::decode_nested) else {
                     continue;
                 };
+                let where_ = format!("{stream} storage {} {}", object.identifier, spec.name);
+                if spec.anchoring == text::Anchoring::Range {
+                    // These carry explicit ranges rather than run starts, so
+                    // the rules are different: a range has to fit in the text
+                    // and cover something.
+                    for (location, span) in text::ranges(&table) {
+                        if location + span > length {
+                            problems.push(format!(
+                                "{where_}: range {location}..{} runs past the text, \
+                                 which is {length} long",
+                                location + span
+                            ));
+                        }
+                        if span == 0 {
+                            problems.push(format!("{where_}: range at {location} is empty"));
+                        }
+                    }
+                    continue;
+                }
+                let entries = text::entry_indices(&table, spec.anchoring);
                 let mut previous: Option<u64> = None;
-                for run in style::runs(&table) {
-                    let where_ = format!("{stream} storage {} table {field}", object.identifier);
-                    if previous.is_some_and(|p| run.start <= p) {
+                for (index, _) in &entries {
+                    if previous.is_some_and(|p| *index <= p) {
                         problems.push(format!(
-                            "{where_}: run index {} does not increase (after {})",
-                            run.start,
+                            "{where_}: entry index {index} does not increase (after {})",
                             previous.unwrap()
                         ));
                     }
-                    previous = Some(run.start);
-                    if run.start > length {
+                    previous = Some(*index);
+                    if *index > length {
                         problems.push(format!(
-                            "{where_}: run starts at {} but the text is {length} long",
-                            run.start
+                            "{where_}: entry at {index} but the text is {length} long"
                         ));
                     }
-                    let Some(target) = run.style else { continue };
+                    // A paragraph attribute may only sit where a paragraph
+                    // begins, or at the very end of the text — the slot the
+                    // style of a paragraph not yet typed comes from. Keynote
+                    // renders a text box 2^16 points tall and then crashes on a
+                    // paragraph run past the end of the text.
+                    if spec.anchoring == text::Anchoring::Paragraph
+                        && *index != length
+                        && !starts.contains(index)
+                    {
+                        problems.push(format!(
+                            "{where_}: entry at {index} is neither a paragraph start \
+                             nor the end of the text"
+                        ));
+                    }
+                }
+                // A run or paragraph table describes the text from its first
+                // entry onward, so one that starts late leaves characters with
+                // no attribute at all. An anchor table is a set of points and
+                // has no such obligation.
+                if let Some((first, _)) = entries.first() {
+                    if *first != 0 && spec.anchoring != text::Anchoring::Character {
+                        problems.push(format!(
+                            "{where_}: the first entry is at {first}, so characters \
+                             0..{first} have no attribute"
+                        ));
+                    }
+                }
+                for (index, target) in &entries {
+                    let where_ = format!("{stream} storage {} table {field}", object.identifier);
+                    let _ = index;
+                    let Some(target) = target else { continue };
+                    let target = *target;
                     if self.object(target).is_none() {
                         problems.push(format!("{where_}: run points at missing object {target}"));
                     } else if let Some(kind) = styles.get(&target) {

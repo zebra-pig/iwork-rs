@@ -995,6 +995,8 @@ fn applying_a_style_from_another_component_declares_it() {
     let created = doc.create_text_style(VARIATION, "").unwrap();
     doc.apply_text_style(STORAGE, 11..25, created.identifier)
         .unwrap();
+    // 11..25 is most of the second paragraph; the run comes back as 11..26,
+    // the whole of it, because a paragraph style applies to paragraphs.
 
     let doc = reopen(&doc, "declare");
     assert_eq!(
@@ -1008,7 +1010,7 @@ fn applying_a_style_from_another_component_declares_it() {
             .into_iter()
             .map(|u| u.range)
             .collect::<Vec<Range<u64>>>(),
-        vec![11..25]
+        vec![11..26]
     );
 }
 
@@ -1020,6 +1022,8 @@ fn declaring_the_same_references_twice_adds_nothing() {
     let created = doc.create_text_style(VARIATION, "").unwrap();
     doc.apply_text_style(STORAGE, 11..25, created.identifier)
         .unwrap();
+    // 11..25 is most of the second paragraph; the run comes back as 11..26,
+    // the whole of it, because a paragraph style applies to paragraphs.
     assert_eq!(doc.declare_external_references(), 0);
     assert_eq!(doc.declare_external_references(), 0);
 }

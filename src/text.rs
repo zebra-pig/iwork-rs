@@ -268,6 +268,13 @@ pub fn unknown_table(storage: &Message) -> Option<u32> {
 /// the test that would have caught it skips storages it believes have fewer
 /// than two paragraphs, which is exactly what this bug made them look like.
 ///
+/// `U+000C` is the **page or column break** a user inserts from the Insert
+/// menu, and it ends a paragraph the same way. Found by checking this rule
+/// against all 901 template bundles the three apps ship: 40 Pages templates put
+/// a paragraph run immediately after one, always in the shape `…\n\u{c}Text`,
+/// and every one of those runs was reported as landing off a paragraph
+/// boundary until it was counted.
+///
 /// `U+0005` appears where a Pages document changes layout mid-storage.
 /// Verified in a Pages article at `…\n\n\u{5}Features\n`, where the run sits on
 /// the `F`.
@@ -278,7 +285,7 @@ pub fn unknown_table(storage: &Message) -> Option<u32> {
 /// paragraph table has a run on the `C`. It also turns up alone as the whole of
 /// a body storage in a document whose text lives in shapes, which is the same
 /// character doing the same job with nothing either side of it.
-pub const PARAGRAPH_BREAKS: &[u16] = &[0x000A, 0x000D, 0x0005, 0x0004];
+pub const PARAGRAPH_BREAKS: &[u16] = &[0x000A, 0x000D, 0x000C, 0x0005, 0x0004];
 
 /// Length of a storage's text in UTF-16 code units — the unit run indices are
 /// counted in.
@@ -705,6 +712,15 @@ pub fn para_data(table: &Message) -> Vec<(u64, Option<u64>)> {
         .0
         .into_iter()
         .map(|entry| (entry.index, entry.message.varint(2)))
+        .collect()
+}
+
+/// The `(location, length)` of every entry of an overlapping-field table.
+pub fn ranges(table: &Message) -> Vec<(u64, u64)> {
+    split(table, Anchoring::Range)
+        .0
+        .iter()
+        .filter_map(|entry| range_of(&entry.message))
         .collect()
 }
 
