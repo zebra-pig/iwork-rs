@@ -704,7 +704,10 @@ pub struct ListEntry {
     pub rich_text: Option<u64>,
     /// Field 12 — `CONTROL_CELL_SPEC`, as a `TST.CellSpecArchive`.
     pub cell_spec: Option<Message>,
-    /// Field 5 — `FORMULA`. Kept undecoded; formulas are Phase 5's job.
+    /// Field 5 — `FORMULA`, decoded to its AST. A formula stored here carries
+    /// **no host cell**: the cell that holds the key is the host, which is why
+    /// one entry can serve every cell of a filled-down column.
+    pub formula: Option<crate::formula::Formula>,
     pub has_formula: bool,
 }
 
@@ -747,6 +750,10 @@ impl DataList {
                     format: entry.bytes(6).and_then(decode_nested),
                     rich_text: entry.bytes(9).and_then(reference),
                     cell_spec: entry.bytes(12).and_then(decode_nested),
+                    formula: entry
+                        .bytes(5)
+                        .and_then(decode_nested)
+                        .and_then(|a| crate::formula::Formula::decode(&a)),
                     has_formula: entry.get(5).is_some(),
                 },
             );
@@ -1015,7 +1022,7 @@ pub struct Cell {
     pub format: CellFormat,
     pub control: Option<CellControl>,
     /// Set when the cell carries a formula. The formula itself is a `TSCE`
-    /// archive in the table's formula list; reading it is Phase 5.
+    /// archive in the table's formula list; [`Table::formula`] reads it.
     pub has_formula: bool,
     /// The record as it was on the wire, for callers that want more than this
     /// crate models yet.
@@ -1304,10 +1311,10 @@ pub struct SortRule {
 /// What a filter or a conditional-highlighting rule tests.
 ///
 /// The condition itself is a `predicate_type` code plus up to three arguments,
-/// and the arguments are either immediate values or a `TSCE` formula. This
-/// crate reads the code and the immediate values and leaves the formula to
-/// Phase 5 — a rule that compares against another cell says so through
-/// [`Predicate::has_formula`] rather than being reported as having no argument.
+/// and the arguments are either immediate values or a `TSCE` formula. Both are
+/// read: the code and the immediate values here, and the condition itself in
+/// [`Predicate::formula`], which is what turns "predicate 37 against a formula"
+/// into the test the user wrote.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Predicate {
     /// `predicate_type`. Apple publishes no names for these; the code is
@@ -1315,6 +1322,10 @@ pub struct Predicate {
     pub kind: i64,
     pub qualifiers: (i64, i64),
     pub values: Vec<CellValue>,
+    /// The condition itself, when the rule compares against a formula rather
+    /// than an immediate value. Rendering it is what turns "predicate 37
+    /// against a formula" into the test the user wrote.
+    pub formula: Option<crate::formula::Formula>,
     pub has_formula: bool,
     /// True for the older `…PrePivot` shape, whose fields are numbered
     /// differently at the same numbers — see `FORMAT.md`.
@@ -1344,6 +1355,10 @@ impl Predicate {
                 message.varint(3).unwrap_or(0) as i64,
             ),
             values,
+            formula: message
+                .bytes(7)
+                .and_then(decode_nested)
+                .and_then(|a| crate::formula::Formula::decode(&a)),
             has_formula: message.get(7).is_some(),
             pre_pivot: false,
         }
@@ -1361,6 +1376,10 @@ impl Predicate {
                 message.varint(4).unwrap_or(0) as i64,
             ),
             values: Vec::new(),
+            formula: message
+                .bytes(1)
+                .and_then(decode_nested)
+                .and_then(|a| crate::formula::Formula::decode(&a)),
             has_formula: message.get(1).is_some(),
             pre_pivot: true,
         }
@@ -1947,6 +1966,13 @@ pub struct Table {
     /// everything that refers to it from outside, a pivot's source reference
     /// included.
     pub haunted_uid: Uuid,
+    /// `base_owner_uid` — the UUID every **cross-table reference** in an AST is
+    /// written with, reached from `haunted_uid` through the
+    /// `TSCE.FormulaOwnerDependenciesArchive` whose `owner_kind` is 35. It is
+    /// not `haunted_uid` and not `table_id`; in this corpus its lower half is
+    /// `haunted_uid`'s minus 35, because every owner a table has is a numbered
+    /// offset from one base, but the join is by lookup and never by arithmetic.
+    pub base_uid: Uuid,
     /// Sort rules, in the order they are applied.
     pub sort_rules: Vec<SortRule>,
     /// The table's filter, when it has one with rules.
@@ -1989,6 +2015,56 @@ impl Table {
         self.cell(row, column)
             .map(|c| c.value.clone())
             .unwrap_or(CellValue::Empty)
+    }
+
+    /// The formula at a position, following the cell's key into the table's
+    /// FORMULA list.
+    pub fn formula(&self, row: usize, column: usize) -> Option<&crate::formula::Formula> {
+        let key = self.cell(row, column)?.record.formula_id?;
+        self.side.formulas.entries.get(&key)?.formula.as_ref()
+    }
+
+    /// Every stored formula of this table, in reading order, with the cell that
+    /// hosts it.
+    pub fn formula_cells(&self) -> Vec<(usize, usize, &crate::formula::Formula)> {
+        self.cells
+            .iter()
+            .filter_map(|cell| {
+                let key = cell.record.formula_id?;
+                let formula = self.side.formulas.entries.get(&key)?.formula.as_ref()?;
+                Some((cell.row, cell.column, formula))
+            })
+            .collect()
+    }
+
+    /// What this table looks like to a formula: its identity, its name and the
+    /// header cells that name its rows and columns.
+    ///
+    /// A column is named by the **last** header row — `Doppelkopf` in
+    /// `numbers-formulas.numbers` has two of them and Numbers prints the second
+    /// one's text — and a row by the last header column. Only text cells give a
+    /// name; an empty or numeric header leaves the row or column unnamed, and
+    /// the app then falls back to A1 notation for the whole reference.
+    pub fn names(&self) -> crate::formula::TableNames {
+        let naming_row = self.header_rows.checked_sub(1).map(|r| r as usize);
+        let naming_column = self.header_columns.checked_sub(1).map(|c| c as usize);
+        let text_at = |row: usize, column: usize| match self.value(row, column) {
+            CellValue::Text(text) if !text.is_empty() => Some(text),
+            _ => None,
+        };
+        crate::formula::TableNames {
+            uid: self.base_uid,
+            name: self.name.clone(),
+            sheet: self.sheet.clone(),
+            header_rows: self.header_rows as usize,
+            header_columns: self.header_columns as usize,
+            column_names: (0..self.columns)
+                .map(|column| naming_row.and_then(|row| text_at(row, column)))
+                .collect(),
+            row_names: (0..self.rows)
+                .map(|row| naming_column.and_then(|column| text_at(row, column)))
+                .collect(),
+        }
     }
 
     /// Height of a row in points, falling back to the table's default.
@@ -2061,6 +2137,10 @@ impl Table {
     ///   lists this way, and removing the entry outright at zero — a released
     ///   string and its key both disappeared, and the key was later handed out
     ///   again to a different string.
+    /// * **Every formula decodes, validates and evaluates.** A FORMULA entry
+    ///   whose AST carries a field the schema does not have, or whose node
+    ///   stream underflows its own stack, is not a formula this crate can be
+    ///   trusted about.
     /// * **A row's or column's `numberOfCells` is how many records it has.**
     ///   The app keeps these in step to the unit: filling one empty cell moved
     ///   both its row's and its column's count by one, and creating the
@@ -2126,6 +2206,26 @@ impl Table {
                         "{name} entry {} is at or above the list's next key {}",
                         entry.key, list.next_key
                     ));
+                }
+            }
+        }
+
+        // Every formula in the list decodes, is a shape the 15.3.1 schema has,
+        // and is a well-formed RPN program. A formula that fails any of these
+        // is a formula this crate would either misread or silently drop, and
+        // both are worse than saying so.
+        for entry in self.side.formulas.entries.values() {
+            match &entry.formula {
+                None => says(format!("formula entry {} would not decode", entry.key)),
+                Some(formula) => {
+                    if let Err(reason) = formula.validate() {
+                        says(format!("formula entry {}: {reason}", entry.key));
+                    } else if !formula.ast.is_well_formed() {
+                        says(format!(
+                            "formula entry {} is not a well-formed expression",
+                            entry.key
+                        ));
+                    }
                 }
             }
         }
@@ -2283,8 +2383,49 @@ pub fn tables(document: &crate::Document) -> Vec<Table> {
         }
     }
     out.sort_by_key(|t| t.identifier);
+    resolve_base_uids(document, &mut out);
     resolve_pivot_sources(&mut out);
     out
+}
+
+/// `TSCE.FormulaOwnerDependenciesArchive` (4008) — the owner hub.
+pub const TYPE_FORMULA_OWNER_DEPENDENCIES: u32 = 4008;
+/// `owner_kind` of the owner that stands for the table itself.
+const OWNER_KIND_HAUNTED: u64 = 35;
+
+/// Give every table the UUID a formula refers to it by.
+///
+/// A table's `haunted_owner.owner_uid` is not what an AST writes. The document
+/// carries one `FormulaOwnerDependenciesArchive` per owner, and the one whose
+/// `owner_kind` is 35 (the "haunted" owner, i.e. the table) maps that UUID to
+/// `base_owner_uid` — which *is* what an AST writes. Every cross-table
+/// reference in `numbers-formulas.numbers` matches a table this way, and none
+/// of them matches a table name, a `table_id` or a haunted UUID.
+fn resolve_base_uids(document: &crate::Document, tables: &mut [Table]) {
+    let mut bases: BTreeMap<Uuid, Uuid> = BTreeMap::new();
+    for (_, object) in document.objects() {
+        if object.message_type() != TYPE_FORMULA_OWNER_DEPENDENCIES {
+            continue;
+        }
+        let Ok(owner) = Message::decode(object.payload()) else {
+            continue;
+        };
+        if owner.varint(3) != Some(OWNER_KIND_HAUNTED) {
+            continue;
+        }
+        let (Some(uid), Some(base)) = (
+            owner.bytes(1).and_then(Uuid::read),
+            owner.bytes(12).and_then(Uuid::read),
+        ) else {
+            continue;
+        };
+        bases.insert(uid, base);
+    }
+    for table in tables {
+        if let Some(base) = bases.get(&table.haunted_uid) {
+            table.base_uid = *base;
+        }
+    }
 }
 
 /// Point a pivot's fields at columns of the table it summarises.
@@ -2445,6 +2586,7 @@ fn read_table(
             .and_then(decode_nested)
             .and_then(|owner| owner.bytes(1).and_then(Uuid::read))
             .unwrap_or_default(),
+        base_uid: Uuid::default(),
         uids,
         row_states,
         column_states,
@@ -2947,6 +3089,87 @@ fn resolve(row: usize, column: usize, record: CellRecord, side: &SideTables) -> 
         has_formula,
         record,
     }
+}
+
+// -- formulas ----------------------------------------------------------------
+
+/// One formula in a document: where it is, what it says, and what the app last
+/// computed for it.
+///
+/// The cached value is the cell's ordinary value — nothing here evaluates a
+/// formula, so `value` is what Numbers wrote at its last save and can be stale
+/// after this crate edits a precedent. The app recalculates on open.
+#[derive(Debug, Clone)]
+pub struct FormulaCell {
+    pub table: u64,
+    pub table_name: String,
+    pub sheet: Option<String>,
+    pub row: usize,
+    pub column: usize,
+    /// A1 position of the host cell, for a human to find it by.
+    pub reference: String,
+    /// The formula as the app spells it, `=` included.
+    pub text: String,
+    /// The value cached in the cell.
+    pub value: CellValue,
+}
+
+/// The document-wide name index every formula is printed against.
+///
+/// Order matters: where two tables carry the same header name, the first one
+/// here keeps the bare name. `tables()` returns tables sorted by object
+/// identifier, which is the order they were created in.
+pub fn names(tables: &[Table]) -> crate::formula::Names {
+    crate::formula::Names::new(tables.iter().map(Table::names).collect())
+}
+
+/// Every formula in every table, in reading order.
+pub fn formulas(tables: &[Table]) -> Vec<FormulaCell> {
+    let index = names(tables);
+    let mut out = Vec::new();
+    for (position, table) in tables.iter().enumerate() {
+        for (row, column, formula) in table.formula_cells() {
+            let at = crate::formula::Site::new(&index, Some(position), (column as i64, row as i64));
+            out.push(FormulaCell {
+                table: table.identifier,
+                table_name: table.name.clone(),
+                sheet: table.sheet.clone(),
+                row,
+                column,
+                reference: format!(
+                    "{}{}",
+                    crate::formula::column_letters(column as i64),
+                    row + 1
+                ),
+                text: formula.text(at),
+                value: table.value(row, column),
+            });
+        }
+    }
+    out
+}
+
+/// A rule's condition as formula text.
+///
+/// The predicate's own formula has no host cell of its own — it is evaluated
+/// once per row — so it is printed against the **first body cell of the column
+/// the rule tests**, which is the position its relative references are written
+/// from. That is a choice, and it is why a condition reads like a test on one
+/// cell rather than on a column.
+pub fn predicate_text(
+    predicate: &Predicate,
+    index: &crate::formula::Names,
+    table: usize,
+    column: usize,
+) -> Option<String> {
+    let formula = predicate.formula.as_ref()?;
+    let host_row = index
+        .tables
+        .get(table)
+        .map(|t| t.header_rows as i64)
+        .unwrap_or(0);
+    let at = crate::formula::Site::new(index, Some(table), (column as i64, host_row));
+    Some(formula.text(at))
 }
 
 /// `TSK.CustomFormatListArchive` — every named cell format in the document.
