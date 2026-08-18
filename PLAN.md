@@ -429,24 +429,35 @@ confidently. Read-first, then the safest writes.
 
 ## Phase 9 — Document creation and hardening
 
-- [ ] `Document::from_template(path)`: duplicate a document into a fresh
+- [x] `Document::from_template(path)`: duplicate a document into a fresh
       identity (new UUIDs, cleared view state) — the copy-don't-synthesise
       answer to "create a document". Accept `.template`/`.kth`/`.nmbtemplate`
-      bundles, which is what "create a document" means to a user.
-- [ ] Package-form documents: File > Advanced > Change File Type saves a
+      bundles, which is what "create a document" means to a user. *(Done, and
+      the identity rule turned out to differ from `save_as_new`: a document from
+      a template gets a new `stableDocumentUUID` too. No view state to clear —
+      no bundled template has any. `iwork new`.)*
+- [x] Package-form documents: File > Advanced > Change File Type saves a
       real *directory* instead of a ZIP (Apple recommends it above ~500 MB).
-      Detect and read both forms; `iwork inspect` says which it has.
+      Detect and read both forms; `iwork inspect` says which it has. *(Read,
+      written and preserved; the app opens one this crate wrote. All 901 bundled
+      templates are ZIPs, so the hand-built package was the only route.)*
 - [x] Encrypted documents: detect, fail with a named error (not a parse
       failure), refuse to write. The common hostile-bytes case. *(Done in
       phase 7 — the detection is exact and the fixture is real. What remains
       for phase 9 is the *package-form* variant of the same question, and
       whatever a hostile `.iwpv2` does to the fuzzer.)*
-- [ ] Decide and document the preview-staleness rule (byte-identity says
+- [x] Decide and document the preview-staleness rule (byte-identity says
       leave `preview*.jpg`; correctness says they now lie — pick one,
-      record it in FORMAT.md, teach `iwork check` to note it).
-- [ ] Fuzz the decoders (cargo-fuzz or dumb byte-mutation harness) so hostile
-      files fail cleanly, never panic.
-- [ ] Final pass over README/FORMAT.md; verification table updated to match
+      record it in FORMAT.md, teach `iwork check` to note it). *(Decided:
+      leave them. Nothing refers to them, the app redraws them on its next
+      save, and removing them would cost byte-identity. `iwork check` says
+      nothing; `iwork inspect` says how many. `strip_previews` is offered and
+      never automatic — FORMAT.md §1.)*
+- [x] Fuzz the decoders (cargo-fuzz or dumb byte-mutation harness) so hostile
+      files fail cleanly, never panic. *(`tests/fuzz.rs`: six levels, corpus
+      seeded, deterministic, budget-bounded, `catch_unwind`. Five panics found
+      and fixed. `cargo fuzz` needs nightly and this machine has stable only.)*
+- [x] Final pass over README/FORMAT.md; verification table updated to match
       reality.
 
 ## Verification log
@@ -2373,6 +2384,180 @@ fixture, and what the app accepted.
     `Vec<Build>` / `Vec<BuildChunk>`, and `Soundtrack::tracks` from a field to a
     method. `Show::recording` is now `Option<Recording>` rather than
     `Option<u64>`. Anything outside this repository using those would break.
+
+- 2026-08-18 — **Phase 9 complete (document creation and hardening).**
+  `package::Form` and the package form read, written and preserved;
+  `Document::from_template`, `previews`, `strip_previews`;
+  `metadata::Lineage`, `assign_identity`, `root_archive`,
+  `set_template_identifier`; `iwork new` and `iwork strip-previews`, two new
+  lines on `iwork inspect`, a 56th `iwork check` invariant; a new test file
+  (`tests/documents.rs`, ten tests) and the fuzzer (`tests/fuzz.rs`, the
+  harness plus four regression tests); FORMAT.md §1 rewritten with the two
+  shapes and the preview decision, a table of contents, §11's template-identity
+  section and writing rules 24–26; README's verification table, Limitations and
+  a fuzzing section. `cargo fmt --check` and `cargo clippy --all-targets -D
+  warnings` clean; `cargo test --all-targets` green: **156 unit** + 16 cell +
+  18 chart + **10 document** + 19 drawable + 24 fixture + 14 formula + **5
+  fuzz** + 32 keynote + 18 pages + 34 style + 22 table + 15 text + 4 doc =
+  **387**. `IWORK_APP_CHECK=1` green over the whole suite, one test target at a time, and
+  over the 26 readable fixtures. Two of the app-driving tests failed once each
+  when every test binary ran at once and passed on a rerun — the harness's
+  known "the app was busy" mode, which looks exactly like "the app refused" and
+  is why `osa_try` gives everything a second chance from a cold app. Running
+  the targets one at a time is the reliable way to see the suite green.
+
+  **The template bundles are ZIPs, all 901 of them.** The brief expected
+  Apple's bundled templates to be the directory form of a package and they are
+  not: `file` says "Zip archive data, compression method=store" for every
+  `.template`, `.nmbtemplate` and `.kth` in the three apps. So the package form
+  had to be built by hand, and that turned out to be the whole probe.
+
+  **What a package form is, measured two ways.** A fixture unzipped into
+  `PkgProbe.pages/` — and `mdls` on the two shapes of the same document is the
+  clean answer:
+
+  | On disk | `kMDItemContentType` | conforms to |
+  |---|---|---|
+  | the file | `com.apple.iwork.pages.sffpages` | — *single-file format* |
+  | the directory | `com.apple.iwork.pages.pages` | `com.apple.package`, `public.directory` |
+
+  Pages **opened the hand-built package**, read it back, and — asked to save it
+  — **wrote one file back over the directory**. `Change File Type` is a menu
+  item and the screen is locked, so what a document a *user* has set to the
+  package form does on save is unknown; what is known is that a package handed
+  to the app and saved comes back a ZIP. This crate keeps the shape instead,
+  and all three apps opened a package it wrote (`pages-book`,
+  `numbers-categories`, `keynote-charts`, each as a directory).
+
+  **A document from a template is not a copy of the template**, and the corpus
+  proved it without a new probe. `00C_Textbook_Portrait/ISO.template` has
+  `stableDocumentUUID` `A0C50246-…` against its own `documentUUID`
+  `65D82B29-…` — a template with a lineage — and `pages-toc.pages`, which Pages
+  made from exactly that bundle, has `stableDocumentUUID` equal to its own new
+  `documentUUID`. `pages-lists` and `numbers-categories` agree. So `save_as_new`
+  and `from_template` follow *two* rules, and `metadata::Lineage` is which.
+  The app also writes `TSA.DocumentArchive.template_identifier`
+  (`Application/04_Real_Estate_Flyer/ISO`, the bundle's path without its
+  extension) and the bundle has none, so `from_template` derives it from the
+  path when the template is one of the app's own and claims nothing otherwise.
+
+  There was **no view state to clear**: not one bundled template has an
+  `Index/ViewState.iwa`, a `BuildVersionHistory.plist` or a preview. All three
+  apps opened a document `from_template` wrote, **saved it, and left every UUID
+  where this crate put it** — the same acceptance signal phase 7 got for
+  `save_as_new`, and the thing Pages does *not* do to a plain byte copy.
+
+  **The preview decision, on four pieces of evidence.**
+
+  | Question | Answer |
+  |---|---|
+  | Does anything in the document refer to a preview? | **No.** The string `preview` occurs in no object stream of 928 packages |
+  | Is a document without them valid? | **Yes.** 901 templates have none; two fixtures are renamed templates the apps open; a locked package has none |
+  | Who redraws them? | **The app.** Three documents made from templates had none; after one save each by Pages, Numbers and Keynote, each had three |
+  | What would removing them cost? | Byte-identity, which a no-op save promises |
+
+  So they are **left alone**, `iwork check` stays silent, `iwork inspect` says
+  how many there are, and `strip_previews` is offered and never automatic — with
+  the app watched opening a stripped document of each of the three kinds.
+
+  **The fuzzer, and the five things it found.** `tests/fuzz.rs`: corpus-seeded,
+  splitmix64-deterministic, budget-bounded, everything under `catch_unwind`,
+  17,253 seeds. The level that matters is `object` — the mutated payload goes
+  *back* into its object and the stream is re-framed, so the document opens and
+  every reader runs on it. The obvious approach, mutating the compressed entry,
+  was tried first and dies in Snappy nearly every time.
+
+  | Where | The input | What happened |
+  |---|---|---|
+  | `iwa::decompress` | a Snappy block declaring 256 MB in six bytes | `snap` allocates the declaration. Refused now against the 64 KiB block size, which the census makes a limit: 24,358 blocks, maximum 65,536, none over |
+  | `iwa::parse` | `MessageInfo.length` = 2^60 | `vec![0; len]`. Now checked against what is left of the stream |
+  | `iwa::ArchiveObject::payload` | an `ArchiveInfo` with no `MessageInfo` — three legal bytes | `messages[0]` panicked. Answers no bytes now |
+  | `plist` | `0xDF 0x13` + eight `0xFF`: a dictionary of 2^64−1 entries | `length * 2` and `at + length` wrap — a panic in debug, a wrong length in release. Three places, all checked |
+  | `Package::from_bytes` | a ZIP entry claiming 2 GB | `Vec::with_capacity` of the claim. Capacity is now bounded by what is there |
+
+  A sixth, found by reading rather than by fuzzing: **`iwork extract` joined
+  `Data/…` names to a directory** without checking them, so
+  `Data/../../../evil` was written exactly there. `package::entry_path` is
+  public now and both callers use it, and `iwork check` reports an entry name
+  that is not a plain relative path — invariant 56.
+
+  After the fixes: **45,000 mutations at the shallow levels and 7,500 at the
+  object level, in both build profiles, plus a twenty-minute release run over
+  all six — no panics.** Debug matters as much as release here: the plist
+  overflows are only panics with overflow checks on, and release is where the
+  reach is (36,965 mutations in ten minutes against 8,167).
+
+  **`cargo fuzz` is not part of this.** There is no nightly toolchain on this
+  machine (`rustup toolchain list` → `stable-aarch64-apple-darwin` alone) and
+  libFuzzer needs `-Z sanitizer`; the brief said not to fight it, so the
+  committed harness is the whole of the fuzzing story rather than half of it.
+
+  **What could not be settled.**
+
+  - Whether a document a user has switched to the package form stays a package
+    when the app saves it. The menu item needs a window.
+  - What identifier a *user* template (in `~/Library/Containers/…`) has. Only
+    the app's own bundles have a derivable one, so nothing is claimed for the
+    rest.
+  - Whether the readers are safe against shapes this corpus does not contain.
+    Dumb mutation over 27 documents is coverage, not proof.
+
+- 2026-08-18 — **The whole build-out, in summary.** Ten phases in two days,
+  0 through 9, each one landed only what the app or the schema would confirm.
+
+  | | |
+  |---|---|
+  | Corpus | **27 documents** built by Pages, Numbers and Keynote 15.3.1 (26 in the walkers; `pages-locked.pages` is excluded by shape), plus **901 bundled templates** swept repeatedly — 927 readable packages in all |
+  | Code | 18 modules and a CLI — 27,700 lines of Rust, and 10,300 more of tests — on two dependencies (`snap`, `zip`), with none added since phase 0 |
+  | Tests | **387** — 156 unit, 227 integration across 13 files, 4 doc — all green, and green again with `IWORK_APP_CHECK=1` |
+  | `iwork check` | **56 invariants**, every one of them discovered by watching a real document keep it |
+  | CLI | **46 verbs** |
+  | Registry | **145 message types**, each carrying its evidence |
+  | FORMAT.md | 13 sections and 26 writing rules, every structural claim tagged Confirmed, Inferred or Unverified |
+
+  **What the apps confirmed, totalled.** 2,943 cells compared against Numbers,
+  every one agreeing on value, format and formula-ness; 273 of 273 formulas
+  matching the app's text character for character outside pivots; 108 chart
+  values across an 18-chart zoo; every rectangle in the drawable corpus against
+  what the app reports; four documents' sections compared character for
+  character; 46 slides and 34 layout names read back from Keynote, nine fields
+  each, and all 44 transition effect identifiers paired against the
+  dictionary's names. Every writing feature ends the same way: the app opens
+  the document, and where a dictionary can read the edit back, it reads it back.
+
+  **The three ways this repository learned things**, in order of how much they
+  produced: the apps' scripting dictionaries (the oracles above); **template
+  mining** — 901 bundles carrying the features no script can author, which is
+  where lists, pivots, categories, filters, conditional highlighting, custom
+  formats and hyperlink fields came from; and the **15.3.1 descriptors** carved
+  out of the installed binaries, which settled every field number that no
+  document in the corpus exercises. One door was opened by neither: transition
+  *direction*, which came back through Keynote's PowerPoint importer.
+
+  **What is left, and what a phase 10 would be.**
+
+  - **Footnotes, endnotes, bookmarks, comments, replies, tracked changes,
+    builds.** Six features with no source anywhere on this machine: not in the
+    corpus, not in 901 templates, not in any dictionary. Everything this crate
+    says about them is read off the 15.3.1 schema and marked Unverified, with
+    tripwire tests that fail the day a fixture finally has one. A phase 10 with
+    one real user document — or an unlocked screen — would settle all six.
+  - **Writing a formula**, which is not an AST problem: the cached value, the
+    dependency graph's edge encoding and cross-table `base_owner_uid` tracking
+    all have to be right, and rule 17 refuses until they are.
+  - **The `type == 0` version-patch mechanism**, a named phase 2 precondition
+    still open: an object carrying patches is read and never rewritten.
+  - **Structural writes** — adding a row, a column, a slide, a section — each
+    of which is several coordinated edits nothing here has watched an app
+    perform.
+  - **The PowerPoint importer as a general probe.** It reached transition
+    direction; whether `<p:anim>` survives the import and would produce a
+    `KN.BuildArchive` is the cheapest known route to the builds gap and was
+    never tried.
+  - **Rendering, layout and evaluation** stay out of scope, and everything that
+    depends on them — preview regeneration, a shape that sizes itself to its
+    text, a re-fitted image frame — stays refused or reported rather than
+    guessed.
 
 ## Execution notes
 
