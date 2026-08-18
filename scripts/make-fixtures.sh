@@ -79,6 +79,24 @@ hOepQAlKqmjLN1VFFypcTLHFFSmqmm7UuJlmm2vSP0QLCYsRK05EP0wbGZsxa87EP4YeNHiYYYcb
 Mj+WXrR4mWWXW7I/jj50+JhjjztyP0IHBYcJGy4kPLAsVIExyOP/AAAAAElFTkSuQmCC
 PNG
 
+# Two more, deliberately of different shapes: 32x24 and 64x64. What they are
+# for is the media half of the drawables work — a picture whose replacement has
+# a different aspect ratio is the case where the app crops and this crate warns,
+# and a fixture cannot show that with one image.
+wide=$assets/probe-wide.png
+base64 -d >"$wide" <<'PNG'
+iVBORw0KGgoAAAANSUhEUgAAACAAAAAYCAIAAAAUMWhjAAAAJElEQVR4nGO4o6FBU8QwasGo
+BaMWjFowasGoBaMWjFowNCwAAEUJhC7iQqksAAAAAElFTkSuQmCC
+PNG
+
+square=$assets/probe-square.png
+base64 -d >"$square" <<'PNG'
+iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAeklEQVR4nO3PUQkAIBTAwJfE
+JPbHWIbw4xAGC3Cbtc/XDRc0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUN
+aEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa8NgFMB0h
+Dwa7FBUAAAAASUVORK5CYII=
+PNG
+
 # 300 rows of plausible spreadsheet data. Numbers stores a table's cells in
 # tiles, and 300 rows is past the point where one tile holds them all.
 csv=$assets/large.csv
@@ -219,6 +237,13 @@ build_template numbers-sorted 240 "Application/44_Notetaking_Colorful_Log_PM/Tra
 
 osa_warm key
 build keynote-deck key 240 "$png"
+
+# One of every drawable a script can put on a slide, with the properties the
+# app can read back — geometry, rotation, opacity, reflection, lock — plus an
+# image whose file the app replaces, which is how a *cropped* image gets into
+# the corpus. Keynote is the only app that will create a drawable from a
+# script, and TSD is cross-app, so this deck is the shape fixture for all three.
+build keynote-shapes key 300 "$wide" "$square"
 
 printf '\n%d built, %d left alone, %d failed\n' "$built" "$skipped" "$failed"
 [ "$failed" = 0 ]
