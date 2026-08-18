@@ -12,7 +12,9 @@ Documents used:
 - a 15 MB Pages article — 485 objects, 8 streams, 2 TIFFs, 2 charts, German text
 - two Numbers spreadsheets — 738 and 647 objects, 97 and 37 streams
 - four further Pages documents, used for the style graph — 654 styles between them
-- a Keynote deck — 1204 objects, 30 streams, 19 masters, 5 slides, 33 media files
+- four Keynote decks — 993 to 1466 objects, 1 to 19 slides, 17 slide layouts
+  each, and between them every drawable a script can make, every legacy chart
+  type, five transitions and two skipped slides
 
 An older, pre-2013 `.pages` is an entirely different format — a bundle around an
 XML `index.xml.gz`. None of this applies to those.
@@ -772,37 +774,20 @@ Layers 1–3 are identical, as expected: the same stored ZIP, the same Snappy
 framing, the same object stream. Text is in `TSWP.StorageArchive` and styles in
 the same attribute tables, so §"Text" and §"Text styles" apply unchanged.
 
-Layer 4, from one deck:
+Layer 4 is a *show*: `KN.DocumentArchive` (1) → `KN.ShowArchive` (2) → a slide
+tree of `KN.SlideNodeArchive` (4), each naming a `KN.SlideArchive` (5), which is
+also what a slide layout is. **Each slide is its own component and its own
+`Index/Slide*.iwa`**, and each layout its own `Index/TemplateSlide-*.iwa`. The
+whole of it is §13.
 
-```
-1      KN.DocumentArchive      object 1; field 2 -> the show
-2      KN.ShowArchive          2: theme  3: slide tree  4: size  5: stylesheet
-4      KN.SlideNodeArchive     one per slide, in the slide tree; 2 -> the slide
-5      KN.SlideArchive         1: style  4: transition  5: title placeholder
-                               31: five body paragraph styles, one per level
-9      (unnamed)               one per Index/TemplateSlide-*.iwa
-10     KN.ThemeArchive         1.3: theme name, e.g. "58_Startup_Simple_PM"
-10024  drop-cap style          identified "dropcap-style-N" in the TSS base
-```
-
-The slide's field **31** is the trap: five bare style references, one per
-outline level. It has the shape of a stylesheet's style list and is a
-positional array — adding an entry shifts the mapping rather than listing a
-style.
-
-The slide size is a plain pair of floats in points — 1920 × 1080 in the sample,
-so Keynote stores 16:9 at pixel dimensions rather than the 1024 × 768 of older
-decks.
-
-A deck's slides may hold no text at all: in the sample every one of the slides'
-`TSWP.StorageArchive` objects is empty except one holding `U+FFFC`, and all the
-readable text belongs to the masters' placeholders. Text extraction that finds
-nothing on a slide is not necessarily a bug.
-
-Beware the outline levels: `KN.SlideArchive` field 31 is five bare style
-references, one per outline level. It looks exactly like a stylesheet's style
-list and is a *positional array* — an entry added to it does not list a style,
-it shifts the mapping from level to style.
+Two things worth knowing before reading a deck. **A deck's slides may hold no
+text at all**: in `keynote-charts` every one of the slides' own storages is
+empty and all the readable text belongs to the layouts' placeholders, so text
+extraction that finds nothing on a slide is not necessarily a bug. And
+**`KN.SlideArchive` field 31 is five bare style references, one per outline
+level** — it looks exactly like a stylesheet's style list and is a *positional
+array*, so an entry added to it does not list a style, it shifts the mapping
+from level to style.
 
 ---
 
@@ -3019,6 +3004,270 @@ The comment field beside it, `TSD.DrawableArchive.comment` (6), is read by
 
 ---
 
+## 13. Keynote structure — `KN`
+
+Only Keynote writes these archives, and **the numbering is app-scoped**: type 5
+is `KN.SlideArchive` in a deck and something else in a Numbers document, which
+is what `registry::App` exists for. Names come from the type registry carved out
+of the installed 15.3.1 binaries (`reference/protos-15.3/keynote/`), never from
+prior art; every claim below that is marked *Confirmed* was checked against
+Keynote itself through `scripts/slide-oracle.sh`, which is the richest oracle of
+the three apps' dictionaries.
+
+The corpus this rests on is four decks — `keynote-deck` (6 slides, an image
+slide, a skipped slide), `keynote-slides` (8 slides, 6 layouts, 2 skipped, 5
+transitions, slide numbers on), `keynote-shapes` (1 slide, every scriptable
+drawable), `keynote-charts` (19 slides) — plus the 182 `.kth` theme bundles the
+app ships.
+
+### The show graph
+
+```text
+ KN.DocumentArchive (1)                  object 1, root of Index/Document.iwa
+   ├── show (2) ──────────── KN.ShowArchive (2)
+   │     ├── uiState (1) ─── KN.UIStateArchive (3), in Index/ViewState.iwa
+   │     ├── theme (2) ───── KN.ThemeArchive (10)
+   │     │     ├── super (1) → TSS.ThemeArchive: name (3), stylesheet (4)
+   │     │     ├── templates (2): the slide layouts, in the app's order,
+   │     │     │   each a KN.SlideNodeArchive
+   │     │     ├── uuid (3), default_template_slide_node (5, 6)
+   │     │     ├── live_video_source_collection (9) → KN.LiveVideoSourceCollection
+   │     │     └── motion_background_style_presets (10)
+   │     ├── slideTree (3) — an INLINE KN.SlideTreeArchive, not a reference
+   │     │     └── slides (2): the deck, in order, each a KN.SlideNodeArchive
+   │     ├── size (4): TSP.Size, in points
+   │     ├── stylesheet (5), slideNumbersVisible (6), recording (7)
+   │     ├── loop (8), mode (9), autoplay delays (10, 11)
+   │     ├── idle timer (15, 16), soundtrack (17) → KN.Soundtrack (21)
+   │     └── automatically_plays_upon_open (18)
+   ├── super (3) → TSA.DocumentArchive        (field 3, not 15 or 8 — §11)
+   └── tables_custom_format_list (4)
+```
+
+**The slide tree is a positional list and that is the whole of slide order.**
+`KN.ShowArchive.slideTree` is an inline `KN.SlideTreeArchive` whose repeated
+field 2 holds one reference per slide, in deck order. Keynote's own
+`move slide 1 to after slide 3` rewrites exactly that repeated field and touches
+**nothing else** — every node and every slide component came back byte for byte
+where it was. *Confirmed.*
+
+### Nodes and slides
+
+A `KN.SlideNodeArchive` (4) is the deck's view of a slide; the
+`KN.SlideArchive` (5) is the slide. **Both slides and layouts have a node**:
+the show lists the slides' nodes, the theme lists the layouts'.
+
+| Field | `KN.SlideNodeArchive` | Evidence |
+|---|---|---|
+| 1 | `children` — absent everywhere; the tree is flat | *Confirmed absent* |
+| 2 | `slide` → the `KN.SlideArchive` | *Confirmed* |
+| 4 | **`isSkipped`** — the whole of "skip this slide" | *Confirmed* |
+| 6 | `hasBuilds`, deprecated | *Inferred* |
+| 7 | `hasTransition` | *Inferred* |
+| 8 | `hasNote` — 1 on the slides that have notes, 0 on the rest | *Confirmed* |
+| 10, 16 | `thumbnailSizes`, `thumbnails` (a `TSP.DataReference` to an `st-*.jpg`) | *Confirmed* |
+| 14 | `thumbnailsAreDirty` | *Confirmed* |
+| 18 | **`isSlideNumberVisible`** — and this is where the app's document-level `slide numbers showing` lives | *Confirmed* |
+| 21 | `depth`, 1 on slides and 0 on layouts | *Confirmed* |
+| 26, 27 | build-count and explicit-build cache versions; `0xFFFFFFFF` where unused | *Inferred* |
+| 29 | `template_slide_id`, a `TSP.UUID` — the **layout's**, so two slides on one layout carry the same value | *Confirmed* |
+| 30, 31 | live-video source ids and usage entries | *Inferred* |
+
+`KN.SlideArchive` is the same message for a slide and for a layout:
+
+| Field | Meaning | Evidence |
+|---|---|---|
+| 1 | `style` → `KN.SlideStyleArchive` (9), one per layout, shared by every slide on it, and living in the document stylesheet | *Confirmed* |
+| 2 | `builds` → `KN.BuildArchive` (8) | *never seen* |
+| 4 | `transition` → `KN.TransitionArchive` | *Confirmed* |
+| 5, 6, 20, 30 | title, body, slide-number and object placeholders | *Confirmed* |
+| 7 | `owned_drawables` | *Confirmed* |
+| 10 | `name` — **only a layout has one** | *Confirmed* |
+| 17 | `template_slide` → the layout | *Confirmed* |
+| 19 | `inDocument`, 1 everywhere | *Confirmed* |
+| 27 | `note` → `KN.NoteArchive` (15) | *Confirmed* |
+| 28 | `sage_tag_to_info_map`: `{tag, drawable}`, `"Text"` in every deck here | *Inferred* |
+| 29 | `classicStylesheetRecord`, layouts only | *Inferred* |
+| 31, 35 | `bodyParagraphStyles`, `bodyListStyles` — **five each, one per outline level** | *Confirmed* |
+| 36 | `userDefinedGuideStorage` | *Confirmed* |
+| 42 | `drawables_z_order` | *Confirmed* |
+| 43 | `buildChunks` → `KN.BuildChunkArchive` (153) | *never seen* |
+| 45 | `instructional_text_map`: `{drawable, "Slide Title"}` … , layouts only | *Confirmed* |
+
+**Field 31 is a positional array, not a style list.** Five bare style
+references, one per outline level; an entry added to it does not list a style,
+it shifts the mapping from level to style. The same is true of field 35.
+
+**Field 7 is ownership and field 42 is depth.** They hold the same members in
+every deck in this corpus, so nothing here distinguishes them by content — but
+they are not the same question, and the placeholder fields prove it: field 5 can
+name a placeholder that is in neither.
+
+### A slide is a component
+
+Each slide is its own `Index/Slide*.iwa` stream and its own `TSP.ComponentInfo`,
+**whose identifier is the `KN.SlideArchive`'s own identifier**; each layout is
+an `Index/TemplateSlide-<id>.iwa` the same way. The node lives in
+`Index/Document.iwa` with the show. Nothing else in the format splits one
+user-visible thing across two components like this, and it is why duplicating a
+slide is a package operation.
+
+The first slide of a deck is `Index/Slide.iwa` with no locator of its own; the
+rest are `Index/Slide-<id>.iwa`, and a slide the app has rewritten can be
+`Index/Slide-<id>-2.iwa`. The *component's* `preferred_locator` is `"Slide"` in
+all of them and the `locator` (field 3) is what differs. *Confirmed.*
+
+### Placeholders and roles
+
+`KN.PlaceholderArchive` (7) is `{1: TSWP.ShapeInfoArchive, 2: kind}` and the
+kind is the whole of what makes it a title:
+
+| Kind | Meaning | Named by |
+|---|---|---|
+| 0 | unclassified placeholder | — |
+| 1 | slide number | `KN.SlideArchive` field 20 |
+| 2 | title | field 5 |
+| 3 | body | field 6 |
+| 4 | object well | field 30 |
+
+Every placeholder in the corpus agrees with the field that names it.
+*Confirmed.*
+
+**"Title showing" is not a flag.** Keynote's `title showing` and `body showing`
+report whether the slide *owns* the placeholder — whether it is in
+`owned_drawables` (7) — and field 5 keeps naming it either way. Over the six
+slides of `keynote-deck` the app agrees with membership of field 7 twelve times
+out of twelve, the "Statement" slide included, whose title placeholder holds
+`"Eine Behauptung"` and is not drawn. *Confirmed.*
+
+The text on a slide, by role: title, body, slide number and object placeholder
+from fields 5, 6, 20 and 30; **presenter notes** from field 27 → `KN.NoteArchive`
+→ a `TSWP.StorageArchive` of **kind 4**, which is the only thing in a deck that
+is kind 4; and everything else owned by the slide is a text box. A slide-number
+placeholder's storage is a lone `U+FFFC` standing for a
+`TSWP.NumberAttachmentArchive`.
+
+Following "field 2 of a drawable is its storage" without checking the target's
+type reports an image slide as carrying a text box whose storage is the slide
+itself: field 2 of a `TSD.ImageArchive` is not a storage.
+
+### Numbering
+
+**A skipped slide has no number.** Keynote answers `slide number` with `-1` for
+it and numbers the rest 1, 2, 3 … around it, so the number is arithmetic over
+the deck rather than a field. *Confirmed* on `keynote-slides`, whose slides 7
+and 8 are skipped and whose sixth slide is number 6.
+
+**"Slide numbers showing" is not a document field either.** Turning it on sets
+`isSlideNumberVisible` on every node and leaves
+`KN.ShowArchive.slideNumbersVisible` (6) **absent** — absent in the deck whose
+numbers are on and absent in the deck whose numbers are off. *Confirmed.*
+
+### Size and theme
+
+The slide size is a `TSP.Size` in points: 1920 × 1080 in every deck here, so
+Keynote stores 16:9 at pixel dimensions rather than at the 1024 × 768 of older
+decks. The app's `width` and `height` report exactly those numbers.
+
+The theme's *stored* name is `TSS.ThemeArchive.name` — `"21_BasicWhite"` — and
+the app shows a localised display name, `"Basic White"`, which is **nowhere in
+the document**. A reader that wants the app's name has to have a table this
+crate does not have.
+
+### Transitions — the inventory
+
+```text
+ KN.SlideArchive.transition (4)
+   └── KN.TransitionArchive.attributes (2)
+         └── KN.TransitionAttributesArchive.animationAttributes (8)
+               └── KN.AnimationAttributesArchive
+                     1 animation_type   "Transition"
+                     2 effect           the identifier
+                     3 duration         double, seconds
+                     4 direction
+                     5 delay            double, seconds
+                     6 is_automatic     advance without a click
+                     11 random_number_seed
+                     16 writing_direction_is_rtl
+```
+
+The effect is **the identifier the app's own dictionary lists**, which is what
+makes this an inventory rather than a guess. `keynote-slides` carries five, set
+by script and read back:
+
+| App's name | `effect` |
+|---|---|
+| no transition effect | `none` |
+| dissolve | `apple:dissolve` |
+| push | `apple:push` |
+| magic move | `apple:magic-move-implied-motion-path` |
+| wipe | `apple:wipe` |
+| confetti | `com.apple.iWork.Keynote.KLNConfetti` |
+
+Duration, delay and `is_automatic` match the app's `transition duration`,
+`transition delay` and `automatic transition` exactly. The remaining
+`custom_*` fields of `KN.TransitionAttributesArchive` — twist, mosaic size and
+type, bounce, magic-move fade, timing curve, text delivery, motion blur, travel
+distance, angle, blur — are named from the schema and **unexercised**; they are
+phase 8b's. `random_number_seed` differs on every slide and is copied verbatim
+by the app's own duplicate.
+
+### Builds — nothing to report, and why
+
+`KN.SlideArchive.builds` (2) and `buildChunks` (43) are **empty in every deck in
+this corpus and in all 182 bundled `.kth` themes**. Keynote's scripting
+dictionary has no build vocabulary at all — `transition properties` on a slide
+is the entire animation surface it exposes — and template mining does not help
+because a theme carries masters, not animations. So the build *count* this crate
+reports is always zero, and `KN.BuildArchive` (8) and `KN.BuildChunkArchive`
+(153) stay Inferred. Phase 8b needs a deck from somewhere else.
+
+`KN.RecordingArchive` (16) is in the same position, and stays there on purpose:
+a recorded presentation is read and passed through, never authored (ground
+rule 8).
+
+### What a duplicate has to touch
+
+Measured by giving Keynote's own `duplicate slide n` a deck and diffing the
+saved package against a plain resave of the same deck. The app writes:
+
+1. **A new `Index/Slide-<id>.iwa`** holding the same objects as the source
+   stream, in the same order, at the same sizes — 19 objects for a text slide,
+   22 for an image slide — with every reference *inside* the stream remapped and
+   every reference *out* of it (the layout, the stylesheet, the slide style)
+   left pointing where it did.
+2. **A new `KN.SlideNodeArchive`** beside the original in `Index/Document.iwa`,
+   identical to it but for the slide it names and `thumbnailsAreDirty`. It keeps
+   the original's `template_slide_id` and even its thumbnail `TSP.DataReference`.
+3. **A new `TSP.ComponentInfo`**: the new identifier, `preferred_locator`
+   `"Slide"`, `locator` `"Slide-<id>"`, the same `external_references`, the same
+   `data_references` with the *using object* remapped, and **fresh
+   `object_uuid_map_entries`**.
+4. **One more entry in the slide tree**, straight after the original's.
+5. Nothing else. No `Data/` bytes are copied — a duplicated image slide shares
+   the original's media — and no new `TSP.DataInfo` appears.
+
+**And one thing that is not in the slide's own component at all.**
+`Index/Document.iwa`'s component declares an external reference to every slide
+component its nodes point at: `{component_identifier: <slide>}`, no
+`object_identifier`, 475 of them in a six-slide deck. A copy without that
+declaration produces the quietest failure in this document: Keynote opens the
+deck, counts the extra slide, and answers `missing value` for its base layout,
+its title and its body. That is what a slide component nothing declares looks
+like from the outside.
+
+Two components are never declared, in any of the three apps and in all 23
+documents of this corpus: `Document` and `DocumentMetadata`, objects 1 and 71.
+Every other cross-component reference, root or not, is declared.
+
+The one thing a copy may not copy is the object UUIDs — two components claiming
+the same object UUID is the single way this operation could corrupt a document
+that still opens. This crate derives them (SHA-1 of the original UUID and the
+new identifier) rather than drawing them, so the same duplicate twice gives the
+same file.
+
+---
+
 ## Writing documents
 
 Generate **from a template**, not from nothing. The container, the framing and
@@ -3121,3 +3370,17 @@ Rules a writer must respect:
     tracked deletion covers characters that are still in the text. Nothing
     available can make the app perform such an edit to be watched, so declining
     is the only honest option. §12.
+22. **A reference to a component's root has to be declared like any other.**
+    The component identifier *is* the root object's identifier, which makes a
+    reference to it look like naming a component rather than crossing into one;
+    it is not. Keynote's `Index/Document.iwa` declares every slide component its
+    nodes point at, and a slide component nothing declares does not load — the
+    app opens the deck, counts the slide, and reports `missing value` for
+    everything on it. Only `Document` and `DocumentMetadata` are ever left
+    undeclared. §13.
+23. **A new component is four things, not one.** A stream, an entry in
+    `TSP.PackageMetadata.components`, a declaration from whoever points into it,
+    and fresh `object_uuid_map_entries` — because two components claiming the
+    same object UUID is the way this corrupts a document that still opens.
+    Everything else about the entry is copied from the component being copied,
+    down to its `save_token`. §13.
