@@ -465,9 +465,21 @@ fn resizing_a_masked_image_scales_the_whole_assembly() {
     assert!((frame.x - 60.0).abs() < 0.01, "frame x {}", frame.x);
     assert!((frame.y - 123.0).abs() < 0.01, "frame y {}", frame.y);
 
-    // `originalSize` travels with the picture, as the app keeps it.
-    let original = after.media.as_ref().unwrap().original_size.unwrap();
-    assert!((original.0 - after.geometry.width).abs() < 0.01);
+    // `originalSize` is left exactly as it was on a masked image: the app does
+    // not fill it with the picture's own size there and the corpus does not
+    // agree on what it does fill it with, so there is nothing to rewrite it to.
+    let before = Document::open(&path).unwrap();
+    let before_original = before
+        .drawable(image.identifier)
+        .unwrap()
+        .media
+        .unwrap()
+        .original_size;
+    let after_original = after.media.as_ref().unwrap().original_size;
+    assert_eq!(
+        after_original, before_original,
+        "a masked image's originalSize must be untouched"
+    );
 }
 
 /// Everything a geometry write does not concern comes back byte for byte.
@@ -587,6 +599,68 @@ fn replacing_media_refuses_an_image_that_is_cropped() {
         .map(|(_, object)| object.payload().to_vec())
         .collect();
     assert_eq!(before, after, "a refused replacement changes nothing");
+}
+
+/// The identity rule made exact. A mask crops unless its window is the whole
+/// drawn picture at the origin — measured against the image's own **geometry**,
+/// not `originalSize` (field 4), which for a masked image the app fills with the
+/// mask window and so makes any size comparison a tautology. Slide a real crop's
+/// window to (0, 0), leaving its size below the picture's, and it must still
+/// classify as a crop and still be refused.
+#[test]
+fn a_crop_slid_to_the_origin_is_still_a_crop() {
+    let path = fixture!("keynote-shapes.key");
+    let mut doc = Document::open(&path).unwrap();
+    let image = doc
+        .drawables()
+        .into_iter()
+        .find(|d| d.kind == Kind::Image && d.mask().is_some())
+        .expect("the fixture has a masked image");
+    let mask = image.mask().unwrap();
+
+    // The window is 160 × 120 on a 160 × 160 picture. Move it to the origin,
+    // keeping its size — it still shows less than the whole picture.
+    doc.set_geometry(mask, Some((0.0, 0.0)), None).unwrap();
+    let after = doc.drawable(image.identifier).unwrap();
+    let state = after.edit_state.as_ref().unwrap();
+    assert!(
+        state.crops,
+        "a 160 × 120 window on a 160 × 160 picture crops even at (0, 0)"
+    );
+
+    // And so replace_media refuses it, as it would any crop.
+    let error = doc
+        .replace_media(image.identifier, &tiny_png(4, 4), "tiny.png", None)
+        .unwrap_err();
+    assert!(
+        matches!(error, iwork::Error::NonDestructiveEdit { .. }),
+        "a crop at the origin must still be refused, got {error}"
+    );
+}
+
+/// The other direction of the same rule: a window that really is the whole
+/// picture at the origin is an identity mask and does not crop. Grow the crop's
+/// window to the picture's own 160 × 160 at the origin and the classifier must
+/// stop calling it a crop — which the old code could not, since it compared to
+/// `originalSize` (160 × 120) rather than the image geometry.
+#[test]
+fn a_window_that_is_the_whole_picture_does_not_crop() {
+    let path = fixture!("keynote-shapes.key");
+    let mut doc = Document::open(&path).unwrap();
+    let image = doc
+        .drawables()
+        .into_iter()
+        .find(|d| d.kind == Kind::Image && d.mask().is_some())
+        .expect("the fixture has a masked image");
+    let mask = image.mask().unwrap();
+
+    doc.set_geometry(mask, Some((0.0, 0.0)), Some((160.0, 160.0)))
+        .unwrap();
+    let after = doc.drawable(image.identifier).unwrap();
+    assert!(
+        !after.edit_state.as_ref().unwrap().crops,
+        "a 160 × 160 window at the origin on a 160 × 160 picture is an identity"
+    );
 }
 
 /// Media that lives in the app's theme bundle has no bytes in the document, so

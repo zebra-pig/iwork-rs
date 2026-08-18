@@ -1797,8 +1797,15 @@ left exactly as they were.
 
 Three things travel with a resize, all of them because the app moves them too:
 
-1. **A media drawable's `originalSize`.** Keynote and Pages both rewrote field 4
-   of an image to the new size when a script resized it.
+1. **An *unmasked* media drawable's `originalSize`.** Keynote and Pages both
+   rewrote field 4 of an unmasked image to the new size when a script resized
+   it. For a **masked** image `originalSize` is *not* the picture's own size and
+   the corpus does not agree on what it is: Pages wrote the full picture there
+   for the report photo (511.86 × 466.13 behind a 475 × 383 mask) yet the mask
+   window for the book cover (324 × 216, mask 324 × 216), and Keynote wrote the
+   mask window too (160 × 120, image 160 × 160). No single rule fits, so a masked
+   image's `originalSize` is **left untouched** on a resize. Since the crop test
+   no longer reads this field (§7), leaving it stale is harmless.
 2. **A shape's path source.** *A shape's size lives in two places.* Told to make
    a 200 × 200 shape 444 × 128, Keynote rewrote the geometry **and** the bezier
    path source — its natural size and all six corners. A document with only the
@@ -1880,11 +1887,29 @@ same geometry through AppleScript, passes every structural check — and renders
 the wrong thing. `Document::replace_media` therefore **refuses by name**,
 listing what it found.
 
-What is *not* an objection: an **identity mask**, whose window is the whole
-picture at 0, 0. That is what the app installs when it replaces an image itself,
-and it hides nothing. Nor is a `traced_path` that is the plain rectangle of the
-picture's natural size — every one in the corpus is — which is rewritten with
-the new size, as the app rewrites it.
+What is *not* an objection: an **identity mask**. The identity rule made exact:
+a mask is identity when its window is the whole **drawn image rectangle** at the
+origin — the mask's geometry is `(0, 0)` and its size equals the image's own
+`TSD.GeometryArchive` size. That is what the app installs when it replaces an
+image itself, and it hides nothing.
+
+**The comparison is against the image's geometry, never `originalSize`
+(field 4).** For a masked image the app fills `originalSize` with the mask
+window itself — keynote-shapes carries a 160 × 160 image with a 160 × 120 mask
+and a 160 × 120 `originalSize`; pages-book a 324 × 486 image with a 324 × 216
+mask and a 324 × 216 `originalSize` — so measuring the mask size against
+`originalSize` is a tautology. Under that reading only the mask's *position*
+distinguishes a crop from an identity, and a real crop slid to `(0, 0)` passes
+as an identity: the bytes are swapped under it and the new picture renders
+cropped while every check passes. The window must be measured against the
+picture's drawn rectangle instead, and anything smaller crops.
+
+Nor is a `traced_path` that is the plain rectangle of the picture's natural
+size — every one in the corpus is — which is rewritten with the new size, as the
+app rewrites it. And a mask **shaped like something other than a rectangle** —
+"Mask with Shape" — is an objection, told from a plain crop not by element count
+(a triangle is five elements, a diamond six, iWork's rectangle six too) but by
+whether the mask bezier *is* the natural rectangle of its own size.
 
 ### What the app does when it replaces an image
 

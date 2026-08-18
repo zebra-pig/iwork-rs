@@ -1781,8 +1781,11 @@ impl Document {
     /// What travels with it, because the app maintains it and a document that
     /// does not is inconsistent with every other document:
     ///
-    /// * a media drawable's `originalSize`, which Keynote and Pages both
-    ///   rewrote to the new size when a script resized an image;
+    /// * an **unmasked** media drawable's `originalSize`, which Keynote and
+    ///   Pages both rewrote to the new size when a script resized an image. A
+    ///   masked image's `originalSize` is left alone: the app fills it with the
+    ///   mask window rather than the picture there, and not even consistently
+    ///   (see the body of this method), so there is no size to rewrite it to;
     /// * a mask's geometry and its path source's natural size. Resizing a
     ///   masked image scales the whole assembly by one factor: Pages, asked to
     ///   make a 475-point-wide masked photo 300 wide, multiplied the picture's
@@ -1895,8 +1898,15 @@ impl Document {
         rewritten.push(identifier);
 
         // Media keeps its placed size beside its geometry, and the app moves
-        // the two together.
-        if resizing && drawable.kind.is_media() {
+        // the two together — but only for an *unmasked* picture. For a masked
+        // one `originalSize` is not the picture's own size and the corpus does
+        // not agree on what it is: Pages wrote the full picture there for the
+        // report photo (511.86 × 466.13, mask 475 × 383) yet the mask window
+        // for the book cover (324 × 216, mask 324 × 216), and Keynote wrote the
+        // mask window too (160 × 120, image 160 × 160). No single rule fits, so
+        // — finding 1 having moved the crop test off this field — the safe
+        // choice is to leave a masked image's `originalSize` exactly as it was.
+        if resizing && drawable.kind.is_media() && mask.is_none() {
             let mut archive = self.archive_of(identifier)?;
             let field = match drawable.kind {
                 crate::drawable::Kind::Image => crate::drawable::image_field::ORIGINAL_SIZE,

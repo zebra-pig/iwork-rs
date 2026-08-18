@@ -703,8 +703,13 @@ pub struct Media {
     /// Intrinsic size of the stored picture, in points (which is its pixel size
     /// at 72 dpi).
     pub natural_size: Option<(f32, f32)>,
-    /// The size the object had when it was placed. The app keeps it equal to
-    /// the drawable's own size as the object is resized.
+    /// `originalSize` (field 4). For an **unmasked** image this is the
+    /// drawable's own size, which the app rewrites as the object is resized.
+    /// For a **masked** image it is not the picture's own size at all — the app
+    /// fills it with the mask window (the visible size), and the corpus is not
+    /// even self-consistent about that. It is therefore never the basis for the
+    /// crop test (see [`EditState`]) and is left untouched when a masked image
+    /// is resized.
     pub original_size: Option<(f32, f32)>,
     /// `flags` — see [`media_flag`].
     pub flags: u32,
@@ -1313,41 +1318,64 @@ fn edit_state(document: &crate::Document, image: &Message) -> EditState {
         state.traced_shape = !is_natural_rectangle(&path, width, height);
     }
 
-    // The mask crops when its window is not the whole picture. An identity
-    // mask — position 0, 0 and the image's own size — is what the app installs
-    // when it replaces an image, and it hides nothing.
+    // The mask crops unless its window is the whole drawn picture at the
+    // origin — the identity mask the app installs when it replaces an image,
+    // which hides nothing. The picture's drawn rectangle is the image's own
+    // geometry. It is emphatically **not** `originalSize` (field 4): for a
+    // masked image the app fills that field with the mask window itself
+    // (keynote-shapes 160×160 image / 160×120 originalSize / 160×120 mask;
+    // pages-book 324×486 / 324×216 / 324×216), so comparing the mask size to
+    // originalSize is a tautology that lets a real crop slid to (0, 0) pass as
+    // an identity.
     if let Some(mask) = state.mask {
         if let Some(archive) = document
             .object(mask)
             .and_then(|(_, object)| Message::decode(object.payload()).ok())
         {
             let drawable = archive.bytes(1).and_then(decode_nested).unwrap_or_default();
-            let geometry = drawable
+            let mask_geometry = drawable
                 .bytes(field::GEOMETRY)
                 .and_then(decode_nested)
                 .map(|g| Geometry::decode(&g));
-            let image_size = size(image, image_field::ORIGINAL_SIZE);
-            if let Some(geometry) = geometry {
+            let image_rect = image
+                .bytes(1)
+                .and_then(decode_nested)
+                .and_then(|d| d.bytes(field::GEOMETRY).and_then(decode_nested))
+                .map(|g| Geometry::decode(&g));
+            if let Some(mask_geometry) = mask_geometry {
                 state.mask_frame = Some(Frame {
-                    x: geometry.x,
-                    y: geometry.y,
-                    width: geometry.width,
-                    height: geometry.height,
+                    x: mask_geometry.x,
+                    y: mask_geometry.y,
+                    width: mask_geometry.width,
+                    height: mask_geometry.height,
                 });
                 let same = |a: f32, b: f32| (a - b).abs() < 0.01;
-                state.crops = !(same(geometry.x, 0.0)
-                    && same(geometry.y, 0.0)
-                    && image_size
-                        .is_some_and(|(w, h)| same(geometry.width, w) && same(geometry.height, h)));
+                state.crops = !(same(mask_geometry.x, 0.0)
+                    && same(mask_geometry.y, 0.0)
+                    && image_rect.is_some_and(|r| {
+                        same(mask_geometry.width, r.width) && same(mask_geometry.height, r.height)
+                    }));
             }
-            if let Some(source) = archive
-                .bytes(2)
-                .and_then(decode_nested)
-                .as_ref()
-                .and_then(PathSource::decode)
-            {
-                state.mask_is_a_shape =
-                    source.kind != PathSourceKind::Bezier || source.elements > 6;
+            // A "Mask with Shape" — a triangle, a diamond — is not a crop, and
+            // the element count cannot tell one from a plain rectangle: a
+            // triangle is five elements, a diamond six, and iWork's rectangle is
+            // six too. The exact test is whether the bezier *is* the natural
+            // rectangle of its own size; [`is_natural_rectangle`] is that test.
+            if let Some(source_msg) = archive.bytes(2).and_then(decode_nested) {
+                if let Some(source) = PathSource::decode(&source_msg) {
+                    state.mask_is_a_shape = match source.kind {
+                        PathSourceKind::Bezier => !source_msg
+                            .bytes(5)
+                            .and_then(decode_nested)
+                            .and_then(|bezier| {
+                                let path = bezier.bytes(3).and_then(decode_nested)?;
+                                let (w, h) = source.natural_size?;
+                                Some(is_natural_rectangle(&path, w, h))
+                            })
+                            .unwrap_or(false),
+                        _ => true,
+                    };
+                }
             }
         }
     }

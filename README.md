@@ -393,13 +393,16 @@ resolution walks the chain.
 
 **A drawable can be moved and resized, app-verified.** `iwork set-geometry`
 takes the rectangle the app reports and converts it back. Three things travel
-with a resize because the app moves them too: a media object's `originalSize`;
-a shape's **path source**, whose natural size and every baked point Keynote
+with a resize because the app moves them too: an *unmasked* media object's
+`originalSize` (a masked image's is left alone — the app does not put the
+picture's size there and the corpus does not agree on what it does put); a
+shape's **path source**, whose natural size and every baked point Keynote
 rewrites — a document with only the geometry changed opens with the app still
-reporting the old size; and a masked image's whole assembly, scaled by one
-factor so the frame lands where it was asked to. Against the document Pages
-itself wrote for the same resize, the mask comes out byte-identical and the
-image differs in the last two ulps of one float.
+reporting the old size, and a curve's three control points all move, not just
+the first; and a masked image's whole assembly, scaled by one factor so the
+frame lands where it was asked to. Against the document Pages itself wrote for
+the same resize, the mask comes out byte-identical and the image differs in the
+last two ulps of one float.
 
 **Media is refcounted, digested and easy to falsify.** A drawable never carries
 pixels: it carries a reference into `TSP.PackageMetadata.datas`, whose entries
@@ -411,13 +414,15 @@ both gone — nothing points at them any more.
 pixel size and every drawable's `naturalSize` and traced outline, and marks the
 image as replaced — which is what Keynote does when it replaces one itself.
 **And it refuses when it would be lying.** An image can carry a crop, a shaped
-mask, an Instant Alpha path, tone adjustments, cached renderings of the old
-pixels or a traced outline of them; none of that is in the new file and none of
-it can be recomputed. Swapping bytes underneath produces a document that opens,
-reports the same geometry, passes every structural check and draws the wrong
-thing — so the replacement is refused by name instead. An *identity* mask is not
-an objection: that is what the app installs when it replaces an image, and it
-hides nothing.
+mask, an Instant Alpha path, tone adjustments, a stored thumbnail or other
+cached renderings of the old pixels, or a traced outline of them; none of that
+is in the new file and none of it can be recomputed. Swapping bytes underneath
+produces a document that opens, reports the same geometry, passes every
+structural check and draws the wrong thing — so the replacement is refused by
+name instead. An *identity* mask is not an objection: its window is the whole
+drawn picture at the origin — measured against the image's own geometry, not the
+`originalSize` field the app fills with the mask window — which is what the app
+installs when it replaces an image, and it hides nothing.
 
 An honest limit, worth stating plainly: an app round trip proves the document
 opens and that the picture is still where it was. It cannot prove the pixels
