@@ -848,7 +848,17 @@ impl Document {
             return Ok(key);
         }
 
-        let key = archive.varint(2).unwrap_or(1).max(1) as u32;
+        // Above the mark *and* above every key present, because the mark is
+        // only trustworthy while the app is the one maintaining it.
+        let highest = archive
+            .all(3)
+            .filter_map(|value| match value {
+                Value::Bytes(raw) => crate::pb::decode_nested(raw)?.varint(1),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
+        let key = archive.varint(2).unwrap_or(0).max(highest + 1).max(1) as u32;
         let mut entry = Message::default();
         entry.set_in_order(1, Value::Varint(u64::from(key)));
         entry.set_in_order(2, Value::Varint(1));
