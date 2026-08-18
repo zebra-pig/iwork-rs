@@ -4360,6 +4360,12 @@ fn float_field(message: &Message, number: u32) -> f32 {
 
 /// Scale every point of a baked path, when the path is drawn in the space the
 /// natural size describes.
+///
+/// **Every point of every element, not the first of each.** A path element's
+/// control points all live in field 2, and a `curveTo` (kind 4) carries three
+/// of them — two control points and the endpoint. Reading only the first
+/// occurrence measured the extent from partial data and, worse, left a scaled
+/// curve with two of its three points at the old scale, deforming the outline.
 fn scale_path_points(body: &mut Message, field: u32, was: (f32, f32), scale: (f32, f32)) {
     let Some(mut path) = body.bytes(field).and_then(crate::pb::decode_nested) else {
         return;
@@ -4371,7 +4377,10 @@ fn scale_path_points(body: &mut Message, field: u32, was: (f32, f32), scale: (f3
         let Some(element) = crate::pb::decode_nested(raw) else {
             return;
         };
-        if let Some(point) = element.bytes(2).and_then(crate::pb::decode_nested) {
+        for point in element.all(2).filter_map(|v| match v {
+            Value::Bytes(raw) => crate::pb::decode_nested(raw),
+            _ => None,
+        }) {
             extent.0 = extent.0.max(float_field(&point, 1));
             extent.1 = extent.1.max(float_field(&point, 2));
         }
@@ -4383,18 +4392,28 @@ fn scale_path_points(body: &mut Message, field: u32, was: (f32, f32), scale: (f3
         return;
     }
     for element in &mut points {
-        let Some(mut point) = element.bytes(2).and_then(crate::pb::decode_nested) else {
-            continue;
-        };
-        point.set_in_order(
-            1,
-            Value::Fixed32((float_field(&point, 1) * scale.0).to_le_bytes()),
-        );
-        point.set_in_order(
-            2,
-            Value::Fixed32((float_field(&point, 2) * scale.1).to_le_bytes()),
-        );
-        element.set_in_order(2, Value::Bytes(point.encode()));
+        let scaled: Vec<Value> = element
+            .all(2)
+            .filter_map(|v| match v {
+                Value::Bytes(raw) => crate::pb::decode_nested(raw),
+                _ => None,
+            })
+            .map(|mut point| {
+                point.set_in_order(
+                    1,
+                    Value::Fixed32((float_field(&point, 1) * scale.0).to_le_bytes()),
+                );
+                point.set_in_order(
+                    2,
+                    Value::Fixed32((float_field(&point, 2) * scale.1).to_le_bytes()),
+                );
+                Value::Bytes(point.encode())
+            })
+            .collect();
+        element.clear(2);
+        for point in scaled {
+            element.append_in_order(2, point);
+        }
     }
     path.clear(1);
     for element in points {
@@ -4490,5 +4509,98 @@ fn detect_kind(package: &Package, streams: &BTreeMap<String, Vec<ArchiveObject>>
         // already been caught above.
         Some(1) => Kind::Numbers,
         _ => Kind::Unknown,
+    }
+}
+
+#[cfg(test)]
+mod path_scaling_tests {
+    use super::{float_field, scale_path_points};
+    use crate::pb::{decode_nested, Message, Value};
+
+    fn point(x: f32, y: f32) -> Message {
+        let mut p = Message::default();
+        p.set_in_order(1, Value::Fixed32(x.to_le_bytes()));
+        p.set_in_order(2, Value::Fixed32(y.to_le_bytes()));
+        p
+    }
+
+    fn element(kind: u64, points: &[(f32, f32)]) -> Value {
+        let mut e = Message::default();
+        e.set_in_order(1, Value::Varint(kind));
+        for (x, y) in points {
+            e.append_in_order(2, Value::Bytes(point(*x, *y).encode()));
+        }
+        Value::Bytes(e.encode())
+    }
+
+    fn curve_points(element: &Message) -> Vec<(f32, f32)> {
+        element
+            .all(2)
+            .filter_map(|v| match v {
+                Value::Bytes(raw) => decode_nested(raw),
+                _ => None,
+            })
+            .map(|p| (float_field(&p, 1), float_field(&p, 2)))
+            .collect()
+    }
+
+    /// A `curveTo` carries three control points in field 2. The old reader took
+    /// only the first, so a scaled curve kept two points at the old scale and
+    /// the outline deformed. Every point must move.
+    #[test]
+    fn a_curve_scales_all_three_of_its_control_points() {
+        let mut path = Message::default();
+        path.append_in_order(1, element(1, &[(0.0, 0.0)]));
+        path.append_in_order(1, element(4, &[(50.0, 80.0), (100.0, 40.0), (100.0, 80.0)]));
+        let mut body = Message::default();
+        body.set_in_order(3, Value::Bytes(path.encode()));
+
+        scale_path_points(&mut body, 3, (100.0, 80.0), (2.0, 0.5));
+
+        let scaled = body.bytes(3).and_then(decode_nested).unwrap();
+        let elements: Vec<Message> = scaled
+            .all(1)
+            .filter_map(|v| match v {
+                Value::Bytes(raw) => decode_nested(raw),
+                _ => None,
+            })
+            .collect();
+        // The moveTo is untouched — (0, 0) scales to (0, 0).
+        assert_eq!(curve_points(&elements[0]), vec![(0.0, 0.0)]);
+        // The curveTo keeps all three points, and every one is scaled.
+        assert_eq!(
+            curve_points(&elements[1]),
+            vec![(100.0, 40.0), (200.0, 20.0), (200.0, 40.0)]
+        );
+    }
+
+    /// The extent is measured from every point too, so a curve whose control
+    /// points fall outside the natural box does not fool the "is this drawn in
+    /// the frame's coordinates" guard into leaving a real path unscaled.
+    #[test]
+    fn the_extent_sees_every_control_point() {
+        let mut path = Message::default();
+        // The endpoint is at 60, but a control point reaches 100 — the natural
+        // width. Reading only the first point would have measured 60 and, since
+        // 60 != 100, refused to scale.
+        path.append_in_order(1, element(4, &[(100.0, 40.0), (80.0, 80.0), (60.0, 80.0)]));
+        let mut body = Message::default();
+        body.set_in_order(3, Value::Bytes(path.encode()));
+
+        scale_path_points(&mut body, 3, (100.0, 80.0), (2.0, 1.0));
+
+        let scaled = body.bytes(3).and_then(decode_nested).unwrap();
+        let element = scaled
+            .all(1)
+            .filter_map(|v| match v {
+                Value::Bytes(raw) => decode_nested(raw),
+                _ => None,
+            })
+            .next()
+            .unwrap();
+        assert_eq!(
+            curve_points(&element),
+            vec![(200.0, 40.0), (160.0, 80.0), (120.0, 80.0)]
+        );
     }
 }
