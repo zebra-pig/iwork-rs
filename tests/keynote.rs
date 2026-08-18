@@ -509,27 +509,45 @@ fn recordings_and_live_video_are_identified_not_authored() {
 /// 15.3.1 schema and has never been measured. The day a fixture grows one, this
 /// fails — which is the signal to go and measure it rather than to trust it.
 #[test]
-fn no_fixture_has_a_build_yet() {
+fn builds_exist_exactly_where_they_were_added() {
     for path in keynote_fixtures() {
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
         let doc = Document::open(&path).unwrap();
         let show = doc.show().unwrap();
-        assert_eq!(
-            show.build_count(),
-            0,
-            "{} has builds — KN.BuildArchive is decoded from the schema and \
-             UNVERIFIED; go and measure it against the app, then delete this test",
-            path.display()
-        );
-        for slide in &show.slides {
-            assert!(slide.build_chunks.is_empty(), "{}", path.display());
+        if name != "keynote-builds.key" {
+            assert_eq!(show.build_count(), 0, "{name} grew a build");
+            continue;
+        }
+        // The tripwire fired: builds measured at last, from the Animate
+        // inspector on an unlocked screen. Four Dissolve build-ins and four
+        // Disappear build-outs — and Disappear's stored identifier is
+        // `apple:bc-appear`, the direction living in `animation_type`.
+        let builds: Vec<_> = show.slides.iter().flat_map(|s| &s.builds).collect();
+        assert_eq!(builds.len(), 8, "{name}");
+        let ins: Vec<_> = builds
+            .iter()
+            .filter(|b| b.animation.animation_type == "In")
+            .collect();
+        let outs: Vec<_> = builds
+            .iter()
+            .filter(|b| b.animation.animation_type == "Out")
+            .collect();
+        assert_eq!(ins.len(), 4, "{name}");
+        assert_eq!(outs.len(), 4, "{name}");
+        for b in &ins {
+            assert_eq!(b.animation.effect, "apple:dissolve character", "{name}");
+            assert!(
+                b.drawable.is_some(),
+                "{name}: a build with nothing to build"
+            );
+        }
+        for b in &outs {
+            assert_eq!(b.animation.effect, "apple:bc-appear", "{name}");
         }
         assert_eq!(
-            doc.objects()
-                .filter(|(_, o)| matches!(o.message_type(), 8 | 153))
-                .count(),
-            0,
-            "{}: a build archive exists without a slide listing it",
-            path.display()
+            doc.objects().filter(|(_, o)| o.message_type() == 8).count(),
+            8,
+            "{name}: every build archive is listed by a slide"
         );
     }
 }

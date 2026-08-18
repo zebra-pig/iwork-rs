@@ -134,13 +134,14 @@ const ENTRIES: &[Entry] = &[
     },
     // -- annotations ---------------------------------------------------------
     // The author of a comment or of a tracked change: a name, a colour and the
-    // collaboration identity it belongs to. **Nothing in the corpus has one** —
-    // 924 documents were swept — so the fields are read off the 15.3.1 schema
-    // and the decoder has never met a filled-in author.
+    // collaboration identity it belongs to. For a long time nothing in the
+    // corpus had one; `pages-comments.pages` (made through the UI on an
+    // unlocked screen) finally carries a real author, name and colour exactly
+    // where the schema said.
     Entry {
         message_type: 212,
         name: "TSK.AnnotationAuthorArchive",
-        confidence: Unverified,
+        confidence: Confirmed,
         app: App::Any,
     },
     // Every document carries exactly one, in `Index/AnnotationAuthorStorage*`,
@@ -159,7 +160,7 @@ const ENTRIES: &[Entry] = &[
     Entry {
         message_type: 3056,
         name: "TSD.CommentStorageArchive",
-        confidence: Unverified,
+        confidence: Confirmed,
         app: App::Any,
     },
     // The floating shape a text comment is drawn as — a `TSWP.ShapeInfoArchive`
@@ -175,7 +176,7 @@ const ENTRIES: &[Entry] = &[
     Entry {
         message_type: 2013,
         name: "TSWP.HighlightArchive",
-        confidence: Unverified,
+        confidence: Confirmed,
         app: App::Any,
     },
     // -- change tracking -----------------------------------------------------
@@ -186,7 +187,7 @@ const ENTRIES: &[Entry] = &[
     Entry {
         message_type: 2060,
         name: "TSWP.ChangeArchive",
-        confidence: Unverified,
+        confidence: Confirmed,
         app: App::Any,
     },
     // The author-and-time an editing session belongs to;
@@ -194,7 +195,7 @@ const ENTRIES: &[Entry] = &[
     Entry {
         message_type: 2062,
         name: "TSWP.ChangeSessionArchive",
-        confidence: Unverified,
+        confidence: Confirmed,
         app: App::Any,
     },
     // A pre-collaboration change author, kept for documents old enough to have
@@ -321,13 +322,13 @@ const ENTRIES: &[Entry] = &[
     Entry {
         message_type: 2008,
         name: "TSWP.FootnoteReferenceAttachmentArchive",
-        confidence: Unverified,
+        confidence: Confirmed,
         app: App::Any,
     },
     Entry {
         message_type: 2035,
         name: "TSWP.BookmarkFieldArchive",
-        confidence: Unverified,
+        confidence: Confirmed,
         app: App::Any,
     },
     // The smart fields, all of which are anchored from `StorageArchive` field
@@ -1137,7 +1138,7 @@ const ENTRIES: &[Entry] = &[
     Entry {
         message_type: 8,
         name: "KN.BuildArchive",
-        confidence: Inferred,
+        confidence: Confirmed,
         app: InKeynote,
     },
     // What a slide's field 1 points at, one per layout and shared by every
@@ -1355,7 +1356,9 @@ mod tests {
     #[test]
     fn confidence_shows_in_the_label() {
         assert_eq!(describe_in(Kind::Keynote, 5), "KN.SlideArchive");
-        assert_eq!(describe_in(Kind::Keynote, 8), "KN.BuildArchive?");
+        // 8 was the example here until keynote-builds.key confirmed it.
+        assert_eq!(describe_in(Kind::Keynote, 8), "KN.BuildArchive");
+        assert_eq!(describe(2024), "TSWP.ColumnStyleArchive?");
         assert_eq!(describe_in(Kind::Numbers, 2), "TN.SheetArchive??");
         assert_eq!(describe(999999), "? #999999");
     }

@@ -583,19 +583,21 @@ pub struct Contents {
     pub entries: Vec<(String, u64)>,
 }
 
-/// A footnote as this crate would read one.
+/// A footnote as this crate reads one.
 ///
-/// **There is no source for this anywhere.** No storage of kind 2 exists in
-/// this corpus or in any of the 901 templates the three apps ship, no
-/// `table_footnote` entry exists either, and neither AppleScript nor a
-/// template can author one — so every field below is read from the 15.3.1
-/// schema and is **Unverified**. The reader reports what it finds and never
-/// fails; that is the whole promise.
+/// Observed at last: `pages-footnotes.pages`, made through Insert > Footnote
+/// on an unlocked screen, carries two — `table_footnote` entries at
+/// characters 26 and 77, each referencing a
+/// `TSWP.FootnoteReferenceAttachmentArchive` whose contained storage is the
+/// note's own text, a storage of kind 2. The schema guess held; what no
+/// fixture shows yet is an endnote mode, a custom mark, or a restarting
+/// numbering — those fields stay Inferred.
 #[derive(Debug, Clone)]
 pub struct Footnote {
     /// Storage the mark is in.
     pub storage: u64,
-    /// Character index of the mark — a `U+FFFC` in the text.
+    /// Character index of the mark — a `U+000E` in the text, not the
+    /// `U+FFFC` an ordinary attachment sits on.
     pub index: u64,
     /// The `TSWP.FootnoteReferenceAttachmentArchive`.
     pub attachment: Option<u64>,
@@ -623,12 +625,13 @@ pub struct Structure {
     /// Object identifier of the body storage, when the document has one.
     pub body_storage: Option<u64>,
     /// Bookmark anchors — `table_bookmark` (field 15) entries, as
-    /// `(storage, index, TSWP.BookmarkFieldArchive)`.
+    /// `(storage, index, TSWP.BookmarkFieldArchive)`. Terminator entries (no
+    /// reference — where a bookmark's run ends) are not listed.
     ///
-    /// Empty in this corpus and in all 901 templates the three apps ship: not
-    /// one carries a `TSWP.BookmarkFieldArchive`. Bookmarks are the anchor half of
-    /// "link to a bookmark", they are created by naming a range in the app's
-    /// UI, and nothing reachable here can name a range.
+    /// Observed at last: `pages-bookmarks.pages`, made through Insert >
+    /// Bookmark on an unlocked screen, carries two archives of shape
+    /// `{1.1: UUID string, 3: varint, 4: varint}` — a bookmark stores no
+    /// name of its own.
     pub bookmarks: Vec<(u64, u64, Option<u64>)>,
 }
 
@@ -998,7 +1001,13 @@ pub fn structure(document: &crate::Document) -> Option<Structure> {
             .and_then(decode_nested)
         {
             for (index, object) in crate::text::entry_indices(&table, crate::text::Anchoring::Run) {
-                bookmarks.push((*identifier, index, object));
+                // An entry with no reference ends the run before it — it is
+                // where a bookmark *stops*, not a bookmark. `pages-bookmarks`
+                // has two `TSWP.BookmarkFieldArchive`s and a terminator, and
+                // counting the terminator reported three.
+                if object.is_some() {
+                    bookmarks.push((*identifier, index, object));
+                }
             }
         }
     }

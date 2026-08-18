@@ -333,17 +333,50 @@ fn column_widths_are_fractions_that_add_up() {
     assert_eq!(layouts[0].end, layouts[1].start);
 }
 
-/// Neither a footnote nor a bookmark exists anywhere this crate can reach —
-/// not in the corpus and not in any bundled template. The reader has to say so
-/// rather than fail, and the settings it *can* read are the defaults.
+/// The tripwire fired: `pages-footnotes.pages` and `pages-bookmarks.pages`
+/// exist now, made through the Insert menu on an unlocked screen. Footnotes
+/// and bookmarks live exactly where the schema said they would, and every
+/// document that was not given one still has none.
 #[test]
-fn there_is_no_footnote_and_no_bookmark_anywhere() {
+fn footnotes_and_bookmarks_exist_exactly_where_they_were_made() {
     let mut checked = 0usize;
     for path in pages_fixtures() {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
         let structure = Document::open(&path).unwrap().structure().unwrap();
-        assert!(structure.footnotes.is_empty(), "{name} grew a footnote");
-        assert!(structure.bookmarks.is_empty(), "{name} grew a bookmark");
+        match name.as_str() {
+            "pages-footnotes.pages" => {
+                assert_eq!(structure.footnotes.len(), 2, "{name}");
+                for note in &structure.footnotes {
+                    assert!(
+                        note.attachment.is_some(),
+                        "{name}: a mark with no attachment"
+                    );
+                    assert!(note.body.is_some(), "{name}: a mark with no note body");
+                    assert!(
+                        note.text.contains("Fussnote"),
+                        "{name}: the note text did not come back: {:?}",
+                        note.text
+                    );
+                }
+                let mut indexes: Vec<u64> = structure.footnotes.iter().map(|n| n.index).collect();
+                indexes.sort_unstable();
+                assert_eq!(indexes, vec![26, 77], "{name}: marks moved");
+            }
+            "pages-bookmarks.pages" => {
+                // Two were made through Insert > Bookmark; the table also
+                // carries a terminator entry, which is not a bookmark.
+                assert_eq!(structure.bookmarks.len(), 2, "{name}");
+                assert!(
+                    structure.bookmarks.iter().all(|(_, _, b)| b.is_some()),
+                    "{name}: a bookmark with no archive"
+                );
+                assert!(structure.footnotes.is_empty(), "{name}");
+            }
+            _ => {
+                assert!(structure.footnotes.is_empty(), "{name} grew a footnote");
+                assert!(structure.bookmarks.is_empty(), "{name} grew a bookmark");
+            }
+        }
         assert_eq!(structure.footnote_settings.kind, 0, "{name}");
         assert_eq!(structure.footnote_settings.format, 0, "{name}");
         assert_eq!(structure.footnote_settings.numbering, 0, "{name}");
@@ -353,24 +386,22 @@ fn there_is_no_footnote_and_no_bookmark_anywhere() {
     assert!(checked >= 5);
 }
 
-/// A storage of kind 2 is a footnote body, and there is not one. Stated as its
-/// own test because it is the boundary the phase reports, and a fixture that
-/// ever grows one should make this fail loudly rather than pass quietly.
+/// A storage of kind 2 is a footnote body. `pages-footnotes.pages` has
+/// exactly its two, and no other document has any — the boundary the phase
+/// once reported, now measured from the observed side.
 #[test]
-fn no_storage_in_the_corpus_is_a_footnote_body() {
+fn footnote_bodies_are_kind_2_storages_and_only_where_footnotes_are() {
     let mut storages = 0usize;
     for path in pages_fixtures() {
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
         let doc = Document::open(&path).unwrap();
-        for storage in doc.storages() {
-            assert_ne!(
-                storage.kind,
-                2,
-                "{}: storage {} is a footnote body — the phase's boundary has moved",
-                path.display(),
-                storage.identifier
-            );
-            storages += 1;
+        let bodies = doc.storages().iter().filter(|s| s.kind == 2).count();
+        if name == "pages-footnotes.pages" {
+            assert_eq!(bodies, 2, "{name}: two footnotes, two note bodies");
+        } else {
+            assert_eq!(bodies, 0, "{name}: a footnote body with no footnote");
         }
+        storages += doc.storages().len();
     }
     assert!(storages >= 100, "only {storages} storages were seen");
 }
@@ -759,14 +790,23 @@ fn a_page_number_carries_its_own_format() {
 /// The day this fails, `src/pages.rs`'s `ChangeTracking` and
 /// `src/annotations.rs`'s change decoders have their first real example.
 #[test]
-fn change_tracking_is_off_and_at_its_defaults_everywhere() {
+fn change_tracking_is_on_exactly_where_it_was_turned_on() {
     for path in pages_fixtures() {
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
         let doc = Document::open(&path).unwrap();
         let tracking = doc.structure().unwrap().change_tracking;
-        assert!(
-            tracking.is_default(),
-            "{}: change tracking is no longer at its defaults — {tracking:?}",
-            path.display()
-        );
+        if name == "pages-tracked.pages" {
+            assert!(
+                tracking.enabled,
+                "{name}: Track Changes was on when it was saved"
+            );
+            assert_eq!(tracking.sessions, 1, "{name}");
+            assert!(tracking.has_recent_session, "{name}");
+        } else {
+            assert!(
+                tracking.is_default(),
+                "{name}: change tracking is no longer at its defaults — {tracking:?}"
+            );
+        }
     }
 }

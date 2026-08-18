@@ -92,7 +92,9 @@ fn an_edit_anywhere_leaves_a_document_that_checks_out() {
                 match outcome {
                     // A range covering an anchor is refused by name and the
                     // document is left exactly as it was.
-                    Err(Error::AnchoredObject { .. }) | Err(Error::SplitSurrogate { .. }) => {
+                    Err(Error::AnchoredObject { .. })
+                    | Err(Error::SplitSurrogate { .. })
+                    | Err(Error::TrackedChanges { .. }) => {
                         assert!(
                             copy.changed_streams().is_empty(),
                             "{}: a refused edit changed a stream",
@@ -307,10 +309,12 @@ fn no_storage_in_the_corpus_carries_an_unknown_table() {
             seen.extend(storage.tables.iter().map(|t| t.field));
         }
     }
-    // What the corpus actually exercises, so a change to it is visible.
+    // What the corpus actually exercises, so a change to it is visible. The
+    // UI-made fixtures added bookmarks (15), footnotes (16), tracked changes
+    // (21, 22) and comment highlights (23).
     assert_eq!(
         seen.into_iter().collect::<Vec<u32>>(),
-        vec![5, 6, 7, 8, 9, 11, 12, 14, 17, 19, 24, 28]
+        vec![5, 6, 7, 8, 9, 11, 12, 14, 15, 16, 17, 19, 21, 22, 23, 24, 28]
     );
 }
 
@@ -508,8 +512,17 @@ fn a_character_anchored_entry_sits_on_a_placeholder() {
                     iwork::pb::decode_nested(archive.bytes(table.field).unwrap()).unwrap();
                 for (index, _) in iwork::text::entry_indices(&decoded, Anchoring::Character) {
                     let unit = text.get(index as usize).copied();
+                    // An attachment sits on U+FFFC; a footnote MARK sits on
+                    // U+000E — pages-footnotes.pages is what settled that a
+                    // footnote's placeholder is its own character, not the
+                    // object-replacement one.
+                    let expected: &[u16] = if table.field == iwork::text::FOOTNOTE_TABLE {
+                        &[0x000E]
+                    } else {
+                        &[0xFFFC]
+                    };
                     assert!(
-                        matches!(unit, Some(0xFFFC) | None),
+                        unit.is_none() || expected.contains(&unit.unwrap()),
                         "{}: storage {} {} entry at {index} sits on U+{:04X}",
                         path.display(),
                         storage.identifier,
@@ -711,9 +724,18 @@ fn an_edit_through_a_tracked_change_is_refused_by_name() {
     let mut storage = iwork::pb::Message::default();
     storage.set(1, iwork::pb::Value::Varint(0));
     storage.set(3, iwork::pb::Value::Bytes(b"The quick brown fox".to_vec()));
+    // The table wraps its entries in repeated field 1, as
+    // pages-tracked.pages showed — an entry set directly on the storage is
+    // the shape the schema misled everyone into.
+    let table = iwork::pb::Message {
+        fields: vec![iwork::pb::Field {
+            number: 1,
+            value: iwork::pb::Value::Bytes(entry(4, CHANGE).encode()),
+        }],
+    };
     storage.set(
         iwork::text::DELETION_TABLE,
-        iwork::pb::Value::Bytes(entry(4, CHANGE).encode()),
+        iwork::pb::Value::Bytes(table.encode()),
     );
 
     // `TSWP.ChangeArchive`: kind 2 is a deletion, and there is no kind 0.

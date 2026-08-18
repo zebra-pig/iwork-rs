@@ -66,6 +66,19 @@ fn collect(dir: &Path, found: &mut Vec<PathBuf>) {
     }
 }
 
+/// One fixture by file name, or `None` (and a note) when the corpus lacks it.
+fn fixture_named(name: &str) -> Option<PathBuf> {
+    let found = fixtures().into_iter().find(|p| {
+        p.file_name()
+            .map(|n| n.to_string_lossy() == name)
+            .unwrap_or(false)
+    });
+    if found.is_none() {
+        eprintln!("no {name} in tests/fixtures — skipping (scripts/make-fixtures.sh --ui)");
+    }
+    found
+}
+
 /// Print once per test run rather than failing, so a fresh clone is green.
 fn require_fixtures() -> Vec<PathBuf> {
     let found = fixtures();
@@ -784,13 +797,13 @@ fn every_document_names_its_locale_and_its_custom_format_list() {
     }
 }
 
-/// **The tripwire.** Every document carries exactly one annotation author
-/// storage and not one of them has an author in it, so nothing in the corpus
-/// has a comment, a reply or a tracked change. The day a fixture does, this
-/// fails and the Unverified decoders in `src/annotations.rs` get their first
-/// real example.
+/// The tripwire fired: `pages-comments.pages` and `pages-tracked.pages`
+/// exist now, made by driving the Pages UI on an unlocked screen. What used
+/// to assert universal emptiness now asserts the two shapes actually
+/// observed — and that every comment and change is anchored, since an
+/// annotation nothing points at is a lost annotation.
 #[test]
-fn no_fixture_has_a_comment_or_a_tracked_change() {
+fn every_comment_and_change_is_anchored() {
     for path in require_fixtures() {
         let doc = Document::open(&path).unwrap();
         let annotations = doc.annotations();
@@ -799,12 +812,23 @@ fn no_fixture_has_a_comment_or_a_tracked_change() {
             "{}: no TSK.AnnotationAuthorStorageArchive",
             path.display()
         );
-        assert!(
-            annotations.is_empty(),
-            "{}: something in the review layer is no longer empty — {}",
-            path.display(),
-            annotations.summary()
-        );
+        for comment in &annotations.comments {
+            assert!(
+                !matches!(comment.anchor, iwork::annotations::Anchor::Unattached),
+                "{}: comment {} is unattached — either a real leak or an anchor \
+                 route this crate does not walk",
+                path.display(),
+                comment.identifier
+            );
+        }
+        for change in &annotations.changes {
+            assert!(
+                change.anchor.is_some(),
+                "{}: tracked change {} is anchored nowhere this crate walks",
+                path.display(),
+                change.identifier
+            );
+        }
         assert!(
             annotations.unreached.is_empty(),
             "{}: annotation objects nothing points at: {:?}",
@@ -814,25 +838,54 @@ fn no_fixture_has_a_comment_or_a_tracked_change() {
     }
 }
 
-/// The storage's own view of the same thing: no `table_insertion`,
-/// `table_deletion`, `table_highlight` or `table_overlapping_highlight`
-/// anywhere.
+/// The comment fixture, pinned: two comments through the highlight table at
+/// the character indices the UI recipe selected, and one real author.
 #[test]
-fn no_storage_carries_a_change_or_a_comment_anchor() {
-    for path in require_fixtures() {
-        let doc = Document::open(&path).unwrap();
-        for storage in doc.storages() {
-            for table in &storage.tables {
-                assert!(
-                    !matches!(table.field, 21 | 22 | 23 | 25),
-                    "{}: storage {} carries {} — the first one this crate has seen",
-                    path.display(),
-                    storage.identifier,
-                    table.name
-                );
-            }
-        }
-    }
+fn the_comment_fixture_reads_as_it_was_made() {
+    let Some(path) = fixture_named("pages-comments.pages") else {
+        return;
+    };
+    let doc = Document::open(&path).unwrap();
+    let annotations = doc.annotations();
+    assert_eq!(annotations.authors.len(), 1, "one comment author");
+    assert_eq!(annotations.comments.len(), 2);
+    let starts: Vec<u64> = annotations
+        .comments
+        .iter()
+        .filter_map(|c| match c.anchor {
+            iwork::annotations::Anchor::Text { start, .. } => Some(start),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        starts,
+        vec![0, 63],
+        "the first word and the last word carry the comments"
+    );
+}
+
+/// The tracked-changes fixture, pinned: two insertions and a deletion in one
+/// storage, one change session, and the remapper refuses that storage.
+#[test]
+fn the_tracked_fixture_reads_as_it_was_made() {
+    let Some(path) = fixture_named("pages-tracked.pages") else {
+        return;
+    };
+    let doc = Document::open(&path).unwrap();
+    let annotations = doc.annotations();
+    let kinds: Vec<&str> = annotations
+        .changes
+        .iter()
+        .map(|c| c.kind.as_str())
+        .collect();
+    assert_eq!(kinds.iter().filter(|k| k.contains("insertion")).count(), 2);
+    assert_eq!(kinds.iter().filter(|k| k.contains("deletion")).count(), 1);
+    assert_eq!(annotations.sessions.len(), 1, "one change session");
+    assert_eq!(
+        annotations.tracked_storages.len(),
+        1,
+        "one storage carries the changes"
+    );
 }
 
 /// A copy saved with `save_as_new` is a *different document*: four UUIDs

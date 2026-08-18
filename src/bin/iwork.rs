@@ -1095,15 +1095,19 @@ fn slides(path: &str) -> Result<(), Error> {
         }
         if !slide.builds.is_empty() || !slide.build_chunks.is_empty() {
             println!(
-                "  builds             {} build(s), {} chunk(s) \
-                 — decoded from the 15.3.1 schema, never measured",
+                "  builds             {} build(s), {} chunk(s)",
                 slide.builds.len(),
                 slide.build_chunks.len()
             );
             for build in &slide.builds {
                 println!(
-                    "    build {} {} on drawable {}{}",
+                    "    build {} {}{} on drawable {}{}",
                     build.identifier,
+                    match build.animation.animation_type.as_str() {
+                        "In" => "in ",
+                        "Out" => "out ",
+                        _ => "",
+                    },
                     if build.animation.effect.is_empty() {
                         "(no effect)"
                     } else {
@@ -1503,13 +1507,17 @@ fn tables(path: &str) -> Result<(), Error> {
         );
         let hidden_rows = hidden_list(&table.row_extents);
         let hidden_columns = hidden_list(&table.column_extents);
+        // The counts come from the hidden-state extents, not from the model's
+        // count fields (14/15/40/41/42): Numbers no longer maintains those,
+        // and `numbers-hidden.numbers` — three rows and a column hidden by
+        // hand — has every one of them at zero.
         println!(
             "  hidden: {} row(s) ({} by the user, {} by a filter), {} column(s) ({} by the user)",
-            table.hidden_rows,
-            table.user_hidden_rows,
-            table.filtered_rows,
-            table.hidden_columns,
-            table.user_hidden_columns
+            table.row_states.user_hidden.len() + table.row_states.filtered.len(),
+            table.row_states.user_hidden.len(),
+            table.row_states.filtered.len(),
+            table.column_states.user_hidden.len() + table.column_states.filtered.len(),
+            table.column_states.user_hidden.len()
         );
         if !hidden_rows.is_empty() {
             println!("  hidden rows: {}", hidden_rows.join(", "));

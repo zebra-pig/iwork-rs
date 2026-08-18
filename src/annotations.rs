@@ -29,30 +29,36 @@
 //!    └── reached from table_insertion (21) / table_deletion (22)
 //! ```
 //!
-//! ## What of this has ever been seen
+//! ## What of this has been seen
 //!
-//! **The storage, and nothing else.** All 23 fixtures and all 901 template
-//! bundles the three apps ship carry exactly one type-213 object, and in every
-//! one of the 924 its payload is **zero bytes long**: no authors, therefore no
-//! comments and no tracked changes. Not one document anywhere on this machine
-//! has a 212, a 2013, a 2014, a 2060, a 2061, a 2062 or a 3056 in it, and no
-//! storage carries field 21, 22, 23 or 25.
+//! For a long time: the storage and nothing else — no scripting dictionary
+//! has a comment command or a change-tracking property, and templates ship
+//! without review state, so every payload was a zero-byte type-213 and the
+//! decoders below were schema-only. Then the screen was unlocked, the Insert
+//! and Edit menus became drivable, and `pages-comments.pages` and
+//! `pages-tracked.pages` gave the decoders their first live examples
+//! (`scripts/applescript/*-ui.applescript` holds the recipes).
 //!
-//! Nor can one be made. None of the three scripting dictionaries has a comment
-//! command, a comment class or a change-tracking property — `sdef` over all
-//! three finds "annotation" only as Pages' `include annotations` *export*
-//! option, and "change" not at all. Template mining, the substitute this
-//! repository uses when AppleScript runs out (PLAN.md ground rule 7), finds
-//! nothing either, because a template ships without review state.
+//! What the fixtures settled, against the schema guesses:
 //!
-//! So everything below the author storage is decoded **from the 15.3.1 schema
-//! and has never met a live example**. It is written down because a document
-//! that arrives from somebody else's Mac will have all of it, and a reader that
-//! silently ignores a comment anchor is a reader that loses one; it is marked
-//! `Unverified` in the registry and in FORMAT.md, and
-//! [`crate::Document::annotations`] reports what it finds rather than pretending
-//! to understand it. The tripwire tests in this module fail the day a fixture
-//! finally has one — which is the point of them.
+//! - **The anchor tables are one level deeper than the schema reads.** A
+//!   storage's field 21/22/23/25 is the *table* — a wrapper whose repeated
+//!   field 1 holds the `{character_index, reference}` entries, exactly like
+//!   every other attribute table. Decoding the field as though it were an
+//!   entry finds nothing, and every comment reports unattached; that is the
+//!   bug the first fixture exposed here.
+//! - A comment (3056) is `{1 text, 2.1 f64 creation date, 3 → author,
+//!   5 {1,2} a two-u64 UUID}`; its text anchor is a `TSWP.HighlightArchive`
+//!   (2013) of `{1 → comment, 2 UUID string}`, pointed at by the run table.
+//! - A tracked change (2060) is reached from `table_insertion` /
+//!   `table_deletion` the same way, and the author storage finally holds a
+//!   real `TSK.AnnotationAuthorArchive` — name and colour, as documented.
+//!
+//! Still never seen, and still schema-only: replies, a resolved state (no
+//! descriptor anywhere spells `resolv`), cell comments, the overlapping
+//! highlight table (25), deprecated change authors (2061), and what an
+//! accepted or rejected change leaves behind. The reader keeps reporting
+//! rather than pretending, and the remaining tripwires still guard those.
 //!
 //! ## Tracked deletions keep their characters
 //!
@@ -361,13 +367,22 @@ pub fn annotations(document: &crate::Document) -> Annotations {
     // Where a comment is anchored, gathered before the comments themselves so
     // each one can be told what points at it.
     let mut anchors: BTreeMap<u64, Anchor> = BTreeMap::new();
+    // Highlights the anchor walk passes through: pointed at by a table entry,
+    // pointing at a comment — reached, not orphaned.
+    let mut reached_highlights: std::collections::BTreeSet<u64> = Default::default();
     for (identifier, (message_type, _, archive)) in &archives {
         if *message_type == crate::TYPE_STORAGE {
             for field in [
                 crate::text::HIGHLIGHT_TABLE,
                 crate::text::OVERLAPPING_HIGHLIGHT_TABLE,
             ] {
-                let found = highlight_anchors(archive, field, *identifier, &archives);
+                let found = highlight_anchors(
+                    archive,
+                    field,
+                    *identifier,
+                    &archives,
+                    &mut reached_highlights,
+                );
                 if !found.is_empty() {
                     out.commented_storages.push(*identifier);
                     for (comment, anchor) in found {
@@ -447,6 +462,7 @@ pub fn annotations(document: &crate::Document) -> Annotations {
                 anchor: None,
             }),
             TYPE_CHANGE_SESSION => out.sessions.push(*identifier),
+            TYPE_HIGHLIGHT if reached_highlights.contains(identifier) => {}
             TYPE_HIGHLIGHT | TYPE_COMMENT_INFO | TYPE_DEPRECATED_CHANGE_AUTHOR => {
                 out.unreached.push((*identifier, *message_type))
             }
@@ -488,15 +504,35 @@ fn highlight_anchors(
     field: u32,
     identifier: u64,
     archives: &BTreeMap<u64, (u32, String, Message)>,
+    reached_highlights: &mut std::collections::BTreeSet<u64>,
 ) -> Vec<(u64, Anchor)> {
     let mut out = Vec::new();
-    for entry in storage.fields.iter().filter(|f| f.number == field) {
-        let Value::Bytes(raw) = &entry.value else {
-            continue;
-        };
-        let Some(entry) = crate::pb::decode_nested(raw) else {
-            continue;
-        };
+    // The storage's field is the table itself — one wrapper message whose
+    // repeated field 1 holds the `{character_index, reference}` entries, the
+    // same shape as every other attribute table. `pages-comments.pages` is
+    // what settled this: the schema alone read as though the entry sat
+    // directly on the storage, one level too shallow, and every comment
+    // reported as unattached.
+    let entries = storage
+        .fields
+        .iter()
+        .filter(|f| f.number == field)
+        .filter_map(|f| match &f.value {
+            Value::Bytes(raw) => crate::pb::decode_nested(raw),
+            _ => None,
+        })
+        .flat_map(|table| {
+            table
+                .fields
+                .iter()
+                .filter(|f| f.number == 1)
+                .filter_map(|f| match &f.value {
+                    Value::Bytes(raw) => crate::pb::decode_nested(raw),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        });
+    for entry in entries {
         let start = entry.varint(1).unwrap_or(0);
         // The overlapping table's entry carries `{location, length}` rather
         // than a bare index; the run table's does not.
@@ -511,7 +547,10 @@ fn highlight_anchors(
         // A document that points straight at the comment is also accepted:
         // nothing here has ever been seen, so neither shape is assumed.
         let comment = match archives.get(&target) {
-            Some((TYPE_HIGHLIGHT, _, highlight)) => reference(highlight, 1).unwrap_or(target),
+            Some((TYPE_HIGHLIGHT, _, highlight)) => {
+                reached_highlights.insert(target);
+                reference(highlight, 1).unwrap_or(target)
+            }
             _ => target,
         };
         out.push((
@@ -537,13 +576,29 @@ fn change_anchors(
             continue;
         }
         for field in [crate::text::INSERTION_TABLE, crate::text::DELETION_TABLE] {
-            for entry in archive.fields.iter().filter(|f| f.number == field) {
-                let Value::Bytes(raw) = &entry.value else {
-                    continue;
-                };
-                let Some(entry) = crate::pb::decode_nested(raw) else {
-                    continue;
-                };
+            // The same wrapper as every attribute table: the storage's field
+            // is the table, and repeated field 1 holds the entries. Settled
+            // by pages-tracked.pages, alongside the highlight tables.
+            let entries = archive
+                .fields
+                .iter()
+                .filter(|f| f.number == field)
+                .filter_map(|f| match &f.value {
+                    Value::Bytes(raw) => crate::pb::decode_nested(raw),
+                    _ => None,
+                })
+                .flat_map(|table| {
+                    table
+                        .fields
+                        .iter()
+                        .filter(|f| f.number == 1)
+                        .filter_map(|f| match &f.value {
+                            Value::Bytes(raw) => crate::pb::decode_nested(raw),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                });
+            for entry in entries {
                 if let Some(target) = reference(&entry, 2) {
                     out.insert(target, (*identifier, field, entry.varint(1).unwrap_or(0)));
                 }
@@ -689,12 +744,29 @@ mod tests {
             ),
         );
         let entry = message(vec![(1, Value::Varint(12)), (2, reference_bytes(700))]);
+        // The table wraps its entries in repeated field 1 — the shape
+        // pages-comments.pages exhibits, not the flat one first guessed.
+        let table = message(vec![
+            (1, Value::Bytes(entry.encode())),
+            (
+                1,
+                Value::Bytes(message(vec![(1, Value::Varint(20))]).encode()),
+            ),
+        ]);
         let storage = message(vec![(
             crate::text::HIGHLIGHT_TABLE,
-            Value::Bytes(entry.encode()),
+            Value::Bytes(table.encode()),
         )]);
 
-        let found = highlight_anchors(&storage, crate::text::HIGHLIGHT_TABLE, 5, &archives);
+        let mut reached = Default::default();
+        let found = highlight_anchors(
+            &storage,
+            crate::text::HIGHLIGHT_TABLE,
+            5,
+            &archives,
+            &mut reached,
+        );
+        assert!(reached.contains(&700), "the highlight was walked through");
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].0, 900, "the comment, not the highlight");
         assert_eq!(
@@ -719,9 +791,10 @@ mod tests {
             (2, reference_bytes(900)),
             (3, Value::Bytes(range.encode())),
         ]);
+        let table = message(vec![(1, Value::Bytes(entry.encode()))]);
         let storage = message(vec![(
             crate::text::OVERLAPPING_HIGHLIGHT_TABLE,
-            Value::Bytes(entry.encode()),
+            Value::Bytes(table.encode()),
         )]);
 
         let found = highlight_anchors(
@@ -729,6 +802,7 @@ mod tests {
             crate::text::OVERLAPPING_HIGHLIGHT_TABLE,
             5,
             &archives,
+            &mut Default::default(),
         );
         assert_eq!(
             found[0].1,

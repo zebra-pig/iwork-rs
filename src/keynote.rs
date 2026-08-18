@@ -664,7 +664,10 @@ pub struct Transition {
     /// app's dictionary lists: `"apple:dissolve"`, `"apple:magic-move…"`,
     /// `"com.apple.iWork.Keynote.BLTFadeThruColor"`.
     pub effect: String,
-    /// `animation_type`, `"Transition"` on every one seen.
+    /// `animation_type` — `"Transition"` on every slide transition seen, and
+    /// `"In"` / `"Out"` on a build, which is what tells a build-in from a
+    /// build-out (`keynote-builds.key`: four dissolves say `"In"`, four
+    /// disappears say `"Out"`).
     pub animation_type: String,
     pub duration: f64,
     pub delay: f64,
