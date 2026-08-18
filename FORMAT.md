@@ -1375,6 +1375,12 @@ Field 1's wire type is the discriminator.
 crate has four values from one document: 7 and 9 against a number, 36 against a
 string, 37 in a filter. Naming the rest would be a guess.
 
+The `1 double` immediate (and the same field on a category group's value) is an
+IEEE `double`, and its **fraction is kept**: a threshold of `2.5` reads back as
+`2.5`, through the number's shortest decimal text, not cast to `2`. The corpus
+has no fractional threshold — every one is `0` or text — so this is exercised by
+splicing a `2.5` into a highlighting rule and reading it back.
+
 #### Categories — `TST.GroupByArchive` (6373)
 
 Written **twice** in the same document: inline at `TableModelArchive` field 81,
@@ -1553,7 +1559,25 @@ moved entry 1 down by one and entry 2 up by one.
 field 4 is that count, and the app keeps it exact: filling one empty cell moved
 both, and **created the column's entry** where an all-empty column had none.
 An emptied cell has no record at all — the app deletes it, exactly as a
-merged-away cell has none.
+merged-away cell has none. **A deleted record gives up every reference it held**,
+not just its value's: a key in each of the six format slots it carried (the
+header of a currency column is a *text* cell holding both a text and a currency
+format key), and its control-spec key. Releasing only the one the format kind
+names leaves the others' refcounts too high, which `Table::audit` — now watching
+the control list as well as strings and formats — rejects in a document this
+crate wrote itself.
+
+**The write is planned in full before a byte moves.** Every step that can fail —
+the donor-format lookup, the string-key arithmetic, the record encoding, the
+patched-object check — is done first, and the reference counts and the tile are
+touched only once the whole write is known to succeed. So a *refused* write is
+byte-identical: it leaves no interned string with no cell behind it, and no list
+entry whose refcount no longer matches. (The old order released the header's
+string entry and *then* discovered it could not find a number format to copy,
+leaving a record that named a string the list no longer had.) A
+`TableDataList` key is 32 bits and key 0 means "absent", so a list whose
+`nextListID` has reached the 32-bit ceiling is refused rather than wrapped to a
+colliding — or absent — key.
 
 **A stale cached value is a limitation, not a corruption.** A formula cell
 carries the value the app last computed, and nothing here can recompute one:
@@ -1565,7 +1589,14 @@ means editing `TSCE`, which nothing here does.
 
 What `set_cell` refuses, by name rather than by writing something plausible: a
 formula cell, a rich-text cell (its words are a `TSWP` storage), a cell covered
-by a merge, a row with no stored cells, and any object carrying version patches.
+by a merge, a row with no stored cells, an **ambiguous table name** (Apple's
+`numbers-pivot.numbers` has two tables called `Sales` on different sheets, so a
+write by name that matched more than one is refused with the identifiers to pick
+between — a read may still settle for the first match), and any object it would
+rewrite that carries version patches. That last check covers **every** object
+the write touches — the tile, the string, format and control lists, and the
+header buckets — not the tile alone, because a stale patch left on any of them
+would describe it as it used to be.
 
 ### What a Numbers document does not have
 

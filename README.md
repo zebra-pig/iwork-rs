@@ -323,20 +323,24 @@ anything.
 
 **A cell can be written, one at a time.** `iwork set-cell` puts text, a number,
 a boolean, a date or a duration into a cell that already exists, and Numbers
-opens the result and reports the new value. Two things make that safe rather
+opens the result and reports the new value. Three things make that safe rather
 than merely possible. The record is **edited, never rebuilt** — the encoder is
 the decoder's exact inverse on all 2515 records in the corpus, so a cell keeps
 its style keys, its control definition, its conditional-highlighting keys and
-the bytes nobody has decoded. And the interned string and format lists are
+the bytes nobody has decoded. The interned string and format lists are
 **refcounted both ways**: a string another cell already holds is shared, and one
-nobody points at any more is removed, which is what the app itself does.
+nobody points at any more is removed, which is what the app itself does — and
+emptying a cell gives back **every** key the deleted record held. And the whole
+write is **planned before a byte moves**, so a write that turns out to be refused
+leaves the document byte for byte as it was, rather than half-applied.
 
 Editing a number rewrites **one** of a Numbers document's 97 package entries.
 Writing a cell the value it already holds rewrites none.
 
 What it refuses, rather than writing something plausible: a formula cell (taking
 a formula out means editing `TSCE`), a rich-text cell, a cell covered by a
-merge, a row with no stored cells, and any object carrying version patches.
+merge, a row with no stored cells, an ambiguous table name (write by identifier
+to say which), and any object it would rewrite that carries version patches.
 A formula that *reads* an edited cell keeps its stale cached value — Numbers
 recalculates it on open, so the app is right and a reader trusting the cache is
 not.
@@ -742,6 +746,14 @@ how the plist length arithmetic was caught; a release build is an order of
 magnitude faster and reaches further into the readers. Everything the fuzzer has
 found is fixed, and each fix has a named test beside the harness describing the
 shape of the input that caused it.
+
+The table reader carries the same rule down to its arithmetic: a tile id that
+overflows `tile_id × tile_size`, a merge extent that reaches the top of `usize`,
+a category tree whose child list references itself, a `nextListID` at the 32-bit
+ceiling, and hostile `set-cell` values (`n:1e-2147483648`, `d:25…-01-01`) each
+yield a bounded error or a truncated read rather than a panic or an abort. The
+regression tests for these splice the hostile shape into a real fixture's `.iwa`
+stream and assert the call **returns** (`tests/tables.rs`, `tests/cells.rs`).
 
 `cargo fuzz` is not used: it needs a nightly toolchain for `-Z sanitizer` and
 this machine has only stable, so the committed harness is the whole of the
