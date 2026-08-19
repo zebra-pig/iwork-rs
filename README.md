@@ -660,6 +660,30 @@ build-out are told apart by `animation_type` (`"In"`/`"Out"`), and the menu's
 paths and by-bullet delivery remain schema-only — see
 [§13](FORMAT.md#13-keynote-structure--kn).
 
+### Authoring a deck
+
+`examples/european-correspondent.rs` writes a thirteen-slide deck about *The
+European Correspondent* — the pan-European newsroom — and is what the Keynote
+writes above add up to:
+
+```
+cargo run --example european-correspondent -- --print          # the deck, as text
+cargo run --example european-correspondent -- Base.key Talk.key
+scripts/european-correspondent.sh                               # both steps, with Keynote
+```
+
+**It authors a deck; it does not invent one.** The base deck supplies the theme,
+the layouts and the stylesheet, and the example supplies the words: it grows the
+deck with `duplicate-slide`, writes each title and body with `set-text` — the
+bullets joined by `\r`, which is what a paragraph break is in a storage — and
+the notes with `set-notes`, then saves under a new identity. Two consequences
+follow from the limits above rather than from the example: every copied slide
+wears its prototype's layout, because a slide's layout is read-only, and a base
+slide the content does not need is *skipped*, because there is no
+`delete-slide`. `scripts/european-correspondent.sh` makes the base deck with
+Keynote from its default theme and finishes with `scripts/app-check.sh` — which
+is the only step that can say the deck opens.
+
 ## Testing
 
 No iWork documents are committed — they are other people's files. Supply your
