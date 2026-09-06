@@ -15,10 +15,11 @@
 //! knowing every message definition, and it means an unrecognised object is
 //! carried through untouched rather than lost.
 //!
-//! A document is *created* by copying one that works — a template bundle, which
-//! is a package like any other ([`Document::from_template`]). Nothing here
-//! synthesises a document from nothing: inventing a message crashed Pages every
-//! time it was tried.
+//! A document is *created* two ways. [`Document::from_template`] copies one
+//! that works — a template bundle is a package like any other — and needs
+//! Apple's software installed to have something to copy. [`Document::new`]
+//! writes one from nothing, which is allowed here only because it was measured:
+//! see [`create`].
 //!
 //! ```no_run
 //! # fn main() -> Result<(), iwork::Error> {

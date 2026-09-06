@@ -46,6 +46,7 @@ XML `index.xml.gz`. None of this applies to those.
 | [11](#11-metadata-and-document-identity) | Metadata and identity — the five UUIDs, encryption |
 | [12](#12-annotations--comments-authors-and-change-tracking) | Annotations — comments, authors, change tracking |
 | [13](#13-keynote-structure--kn) | Keynote structure — `KN`: the show, builds, transitions |
+| [14](#14-the-least-document-each-app-will-open) | The least document each app will open — measured by deletion |
 | [Writing](#writing-documents) | Writing documents — the rules a writer must respect |
 
 ---
@@ -3809,13 +3810,96 @@ same file.
 
 ---
 
+## 14. The least document each app will open
+
+Everything above describes documents the apps wrote. This section describes the
+opposite experiment: how little of one can be taken away before the app stops
+accepting it — which is the only way to know what a *writer* has to produce.
+
+**The method.** Take a document the app made. Delete one field — or one whole
+repeated field, or one package entry — collect whatever objects that orphans,
+write the result, and ask the app to open it and read its text back. Keep the
+deletion if the app still does both; put it back if it does not. Repeat until
+nothing more can go. The app is the whole of the oracle: nothing in the file
+says which fields matter, and every previous attempt in this repository to
+reason it out from the schemas was wrong.
+
+Two things about the method, both learned by getting them wrong:
+
+- **A refusal proves nothing on its own.** An app killed after a refusal is
+  offered its windows back the next time it starts, by a modal dialog that
+  answers no Apple event and hides every document opened after it; a run under
+  that dialog reports every document as refused, including ones it accepted an
+  hour earlier. `scripts/app-check.sh` now turns the offer off and clicks away
+  any dialog already up. Even so, only an **acceptance** is evidence. The
+  reduction below reports `preview-web.jpg` as required; the document this
+  crate writes has no preview at all and Pages opens it.
+- **The minimum is not the target.** A document reduced to what the app will
+  accept is not a document anyone wants — a nameless paragraph style in an empty
+  stylesheet is legal and useless. What the reduction is for is knowing which
+  objects a writer *must* produce; what it puts in them is a separate question,
+  answered by taste.
+
+### Pages
+
+569 objects in a document made from Pages' own Blank template. **Five** of them
+carry anything, and this is all of it:
+
+```text
+1        TP.DocumentArchive     {2: stylesheet, 4: body, 15: {1: {}}}
+<body>   TSWP.StorageArchive    {1: kind 0, 3: the text,
+                                 5: [{1: 0, 2: paragraph style}]}
+<sheet>  TSS.StylesheetArchive  {}
+<style>  TSWP.ParagraphStyleArchive  {}
+71       TSP.DocumentMetadata   {}
+2        TSP.PackageMetadata    the component index
+```
+
+Two of those are empty messages that still have to *exist*: a stylesheet with no
+styles in it and a paragraph style with no name, no parent and no properties.
+The body's paragraph table is the one attribute table that cannot go — it is
+what says the first paragraph is in a style at all.
+
+Everything else in a Pages document is optional, in the strict sense that the
+app opens a document without it: the theme, the section and its three section
+templates, the eighteen header and footer storages, the floating-drawables list,
+the z-order, the guide map, the settings archive, the view state, the
+calculation engine, the annotation-author storage, the custom-format list, the
+page size, the margins, the paper name, the printer, the template identifier,
+the locale, `Metadata/Properties.plist`, `Metadata/DocumentIdentifier` and
+`Metadata/BuildVersionHistory.plist`.
+
+**The component index is where the requirements are.** `TSP.PackageMetadata`
+keeps its own `save_token` (field 5) and generation (field 8) — the *per
+component* pair, fields 4 and 5 of each `ComponentInfo`, is deletable and these
+two are not — and every `ComponentInfo` keeps its identifier, its name, field 10
+and field 12. What it does not keep is the `object_uuid_map_entries`: 2,450 of
+them in this document, one per object, all deletable at once.
+
+And one rule that no amount of reading the file could have given: **a reference
+to a component's root is declared `{component}` and everything else
+`{component, object}`**. Rule 22 of §Writing documents says a root must be
+declared; this says the *form* differs, and a package that declares a root the
+long way is refused with no diagnostic anywhere.
+
+What the app does with such a document is worth recording too. Pages does not
+merely open it: told to save it, it writes back a whole word-processing document
+— a section, three section templates, headers and footers, a view state, a
+calculation engine, previews — around the object identifiers it was given. The
+minimum is a seed, and the app grows it.
+
 ## Writing documents
 
-Generate **from a template**, not from nothing. The container, the framing and
-the text model are all straightforward. The style graph is not: the Pages sample
-spends 313 objects and 240 KB uncompressed on its stylesheet alone, and iWork is
-unforgiving about dangling references. Opening a blank document, saving it, and
-using that as a skeleton is far less work than synthesizing a valid stylesheet.
+Generating **from a template** is still the easy way, and `Document::from_
+template` is still what to reach for when Apple's software is installed: a
+template is a document package, so nothing has to be synthesised at all.
+
+But it can be done from nothing, and §14 is the measurement that says how
+little. `Document::new` writes eleven objects for Pages — the five above, plus
+a list style, two column styles and the paragraph style given a name, a font
+and an alignment, because a document nobody would want is not worth writing.
+The style graph is the reason this was thought impossible; the answer is that
+almost none of it is required, and what is required is two empty messages.
 
 Rules a writer must respect:
 

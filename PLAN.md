@@ -462,10 +462,73 @@ confidently. Read-first, then the safest writes.
 - [x] Final pass over README/FORMAT.md; verification table updated to match
       reality.
 
+## Phase 10 — Documents from nothing
+
+Phase 9 answered "create a document" with `from_template`, which needs Apple's
+software installed to have something to copy. The README promises documents
+"with no Apple software involved" and that half of the promise is still owed:
+a caller with the crate and nothing else cannot make a document at all. This
+phase owes them `Document::new(Kind::Numbers)` — an exceljs-shaped API where
+the library, not a bundled template, is the source of the bytes.
+
+Ground rule 3 says copy, don't synthesise. This phase does not repeal it; it
+buys the right to synthesise by measurement. The rule exists because inventing
+a message from a schema crashed Pages. What is invented here is instead
+*derived from a document the app made*, reduced field by field until the app
+stops accepting it — so every field written is one the app was watched
+demanding, and every field left out is one it was watched not needing.
+
+- [ ] **A reducer, with the app as the oracle.** Take a document the app made,
+      delete one field (or one object, or one stream) at a time, garbage-collect
+      what that orphans, and ask the app whether it still opens *and still reads
+      the text back*. What survives is the minimum, measured rather than
+      reasoned. Not committed as a tool unless it earns it; its output — the
+      minimal graph — is the specification the rest of the phase implements.
+- [ ] **`Document::new(kind)`**: synthesise that graph from code, for Pages
+      first, then Numbers, then Keynote. Parameterised where the reduction
+      showed a value is free (page size, locale, names), fixed where it showed
+      it is not.
+- [ ] **A test that does not need the app**: the synthesised document and the
+      reduced one agree object for object, modulo identity. The app round-trip
+      stays as the acceptance test, but the suite has to be able to fail
+      without a Mac in the room.
+- [ ] **Content, the exceljs part**: build a document up through the API that
+      already exists where it can (`set_text`, `set_cell`, `insert_row`), and
+      through new calls where it cannot — a sheet, a table of a given size, a
+      paragraph, a slide.
+- [ ] **CLI**: `iwork create <kind> <out>`, and an example that writes a
+      spreadsheet from a slice of Rust data.
+- [ ] FORMAT.md: what the minimum actually is, per app, as a §. README and
+      lib.rs both currently promise that nothing here synthesises a document;
+      both say what is true when this lands.
+
 ## Verification log
 
 Filled in as phases complete: what was proven, by which test, against which
 fixture, and what the app accepted.
+
+- 2026-09-06 — **Phase 10, Pages: a document out of nothing.** `Document::new(
+  Kind::Pages)` writes eleven objects and Pages opens them, reads the text back
+  and — told to save — writes a whole word-processing document around them
+  (`tests/create.rs`, `scripts/resave.sh`). Three things were learned that no
+  amount of reading a file could have given:
+  - **A component's root is declared `{component}`, not `{component, object}`.**
+    The long form is refused with no diagnostic. This was the whole of the first
+    failure and cost the afternoon.
+  - **`TSP.PackageMetadata` keeps its own fields 5 and 8** — the package's save
+    token and generation. The per-component pair (`ComponentInfo` 4 and 5) is
+    deletable; these are not.
+  - **A refusal is not evidence.** An app killed after a refusal is offered its
+    windows back by a modal dialog that answers no Apple event, and a run under
+    it reports every document as refused. Found by watching a fixture that had
+    passed a thousand times be reported as refused; fixed in `osa.sh` and
+    `dismiss-restore-dialog.applescript`. The reduction still says
+    `preview-web.jpg` cannot be deleted; the document this crate writes has no
+    preview and opens, so that entry is a false refusal and the rule is that
+    only an acceptance counts.
+  The reduction itself: 569 objects → 19 by deleting reference-bearing fields,
+  → 11 by deleting every field, 117 probes, 81 accepted. What survives carrying
+  anything is five objects and 155 bytes; FORMAT.md §14 writes it down.
 
 - 2026-08-17 — Phase 0 baseline: crate builds clean, 34 unit + 2 doc tests
   pass; AppleScript → Pages 15.3.1 → `.pages` → `iwork inspect|text` loop
