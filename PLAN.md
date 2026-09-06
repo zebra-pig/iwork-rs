@@ -478,29 +478,41 @@ a message from a schema crashed Pages. What is invented here is instead
 stops accepting it — so every field written is one the app was watched
 demanding, and every field left out is one it was watched not needing.
 
-- [ ] **A reducer, with the app as the oracle.** Take a document the app made,
+- [x] **A reducer, with the app as the oracle.** Take a document the app made,
       delete one field (or one object, or one stream) at a time, garbage-collect
       what that orphans, and ask the app whether it still opens *and still reads
       the text back*. What survives is the minimum, measured rather than
       reasoned. Not committed as a tool unless it earns it; its output — the
       minimal graph — is the specification the rest of the phase implements.
-- [ ] **`Document::new(kind)`**: synthesise that graph from code, for Pages
+      *(Built in the scratchpad: 569 Pages objects → 11 in 117 probes. It also
+      found the "reopen its windows" dialog that had been turning good documents
+      into refusals — that fix is committed, the reducer is not.)*
+- [~] **`Document::new(kind)`**: synthesise that graph from code, for Pages
       first, then Numbers, then Keynote. Parameterised where the reduction
       showed a value is free (page size, locale, names), fixed where it showed
-      it is not.
-- [ ] **A test that does not need the app**: the synthesised document and the
-      reduced one agree object for object, modulo identity. The app round-trip
+      it is not. *(Pages done and app-verified, with `Paper::A4` and
+      `Paper::Letter` read out of the two Blank templates. Numbers and Keynote
+      are refused by name while their reductions run.)*
+- [x] **A test that does not need the app**: ~~the synthesised document and the
+      reduced one agree object for object, modulo identity~~. The app round-trip
       stays as the acceptance test, but the suite has to be able to fail
-      without a Mac in the room.
-- [ ] **Content, the exceljs part**: build a document up through the API that
+      without a Mac in the room. *(`tests/create.rs`, eight tests, seven needing
+      no app. The comparison against the reduced document was dropped rather
+      than written: what the crate writes is deliberately **not** what the
+      reduction left — the minimum has a nameless style in an empty stylesheet —
+      so that test would have asserted the wrong thing. What is asserted instead
+      is what the format fixes: the objects, the declarations, the high-water
+      mark, the byte-identical no-op save, a fresh identity per call.)*
+- [~] **Content, the exceljs part**: build a document up through the API that
       already exists where it can (`set_text`, `set_cell`, `insert_row`), and
       through new calls where it cannot — a sheet, a table of a given size, a
-      paragraph, a slide.
-- [ ] **CLI**: `iwork create <kind> <out>`, and an example that writes a
-      spreadsheet from a slice of Rust data.
-- [ ] FORMAT.md: what the minimum actually is, per app, as a §. README and
-      lib.rs both currently promise that nothing here synthesises a document;
-      both say what is true when this lands.
+      paragraph, a slide. *(`append_paragraph` done, and it works on any Pages
+      document rather than only a new one.)*
+- [~] **CLI**: `iwork create <kind> [paper] <out>` done; the example waits on
+      Numbers.
+- [~] FORMAT.md §14 written for Pages, with the method and the two warnings it
+      cost; README and lib.rs no longer promise that nothing here synthesises a
+      document. Numbers and Keynote still to add.
 
 ## Verification log
 
