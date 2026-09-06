@@ -80,6 +80,7 @@ check() {
 	# run's `osa_warm` closes another run's document — and "REFUSED" is
 	# entirely the wrong thing to say about that.
 	osa_acquire
+	osa_no_window_restore
 
 	# Start the app and clear anything it is holding first. An app that is
 	# still opening, or still showing the document from the last check, takes

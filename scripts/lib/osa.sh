@@ -25,6 +25,11 @@
 #   app would not open this fixture" on a document that is fine. osa_acquire is
 #   the turnstile; every entry point takes it before osa_warm.
 
+# Where this file is, resolved once while it is being sourced. The scripts it
+# calls out to live beside it, and a function cannot work that out for itself:
+# by the time one runs, the caller's working directory is anyone's guess.
+OSA_HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
 # Wait for exclusive use of the apps, and give it back on the way out.
 #
 # `mkdir` is the atomic primitive that exists on every system, and the pid
@@ -187,6 +192,11 @@ osa_warm() {
 		sleep 1
 		waited=$((waited + 1))
 	done
+	# Before anything is asked of it: an app that was killed with a window open
+	# starts by asking whether to reopen its windows, and that dialog answers
+	# nothing and hides every document opened after it. See the script.
+	osascript "$OSA_HERE/../applescript/dismiss-restore-dialog.applescript" \
+		"$process" >/dev/null 2>&1 || true
 	osa_close "$extension" 60 || osa_reset "$extension"
 }
 
@@ -210,6 +220,20 @@ osa_close() {
 			close document 1 saving no
 		end repeat
 	end tell"
+}
+
+# Stop the apps from offering their windows back after a kill.
+#
+# `osa_kill` is used often enough that the offer is a certainty, and it is a
+# modal dialog: see applescript/dismiss-restore-dialog.applescript for what it
+# costs. This is the half that stops it being made; that script is the half that
+# clears one already on screen. Both are needed, and this is cheap enough to do
+# on every entry rather than remember whether it has been done.
+osa_no_window_restore() {
+	local id
+	for id in com.apple.Pages com.apple.Numbers com.apple.iWork.Keynote com.apple.Keynote; do
+		defaults write "$id" NSQuitAlwaysKeepsWindows -bool false 2>/dev/null || true
+	done
 }
 
 # Stop an app, whatever it thinks it is doing.
