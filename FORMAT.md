@@ -3888,6 +3888,49 @@ merely open it: told to save it, it writes back a whole word-processing document
 calculation engine, previews — around the object identifiers it was given. The
 minimum is a seed, and the app grows it.
 
+### Numbers, and Keynote
+
+Neither has been reduced to the end, and neither can be written from nothing
+yet. What the same method has established so far:
+
+**A Numbers root needs four things a Pages root does not.** `TN.DocumentArchive`
+keeps its sheet list, a stylesheet (field 4), a `TSK` 205 (field 5, an object
+whose archive is *empty* and which is required all the same), a theme (field 6)
+and a calculation engine (field 8.4). Deleting any one of the five is refused,
+where the equivalent Pages fields — theme, section, settings, calculation
+engine, annotation authors — all go.
+
+**The component index is per app, and Numbers' is untouchable.** `ComponentInfo`
+field 12 and `PackageMetadata` field 8 hold a format version that differs by
+app: Pages writes 834/835, Numbers 535/536/537, Keynote 2385/2386, the highest
+of each being what the package claims. And where a Pages index gives up all
+2,450 `object_uuid_map_entries` in one deletion, twenty-five probes against a
+Numbers index — every top-level field and every group, by descending size —
+were refused without exception.
+
+**Numbers keeps each table's parts in components of their own**: one per tile,
+one per interning list, one per header-storage bucket, named `Tables/Tile-1007`
+and the like, plus `CalculationEngine`. Pages puts everything in `Document`.
+
+**A table Numbers made has no `TileRowInfo` for an empty row**, which makes
+every cell of an empty table unwritable by anything that finds a cell through
+its row's entry. A table written from nothing can afford an entry per row — 522
+bytes each — and then every cell of it can be written.
+
+What is *not* known is why Numbers refuses a document this crate writes. The
+app's whole object graph, grafted into a package written here, is refused too,
+which points at the package rather than the objects; the theme's default-style
+map (field 110) and the stylesheet's 467 styles are the parts no probe has
+reached. The machine's Numbers then stopped opening documents at all — any
+document, including ones it had opened an hour earlier, answering AppleScript
+happily and hanging on every `open` — so the next session starts by restarting
+it.
+
+Keynote's root is `KN.DocumentArchive` → `KN.ShowArchive` → theme → stylesheet,
+with the slides hanging off `ShowArchive` field 3 as a tree of
+`KN.SlideNodeArchive`. Its calculation-engine reference *is* deletable, unlike
+Numbers'.
+
 ## Writing documents
 
 Generating **from a template** is still the easy way, and `Document::from_
