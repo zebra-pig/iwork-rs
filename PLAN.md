@@ -519,6 +519,31 @@ demanding, and every field left out is one it was watched not needing.
 Filled in as phases complete: what was proven, by which test, against which
 fixture, and what the app accepted.
 
+- 2026-09-06 — **Phase 10, Numbers and Keynote: measured, not landed.** The
+  same reduction was run against both and neither can be written from nothing
+  yet. `Document::new` refuses both by name; what is committed is the measuring
+  (FORMAT.md §14) and, for Numbers, a blueprint that produces a document this
+  crate reads back correctly and can write cells into — and that Numbers will
+  not open. Three things came out of it that were not Numbers' own business:
+  - **The format version in a component index is per app** — Pages 835, Numbers
+    537, Keynote 2386 — and this crate had been writing Pages' number into
+    everything.
+  - **Numbers needs the object-UUID map; Pages does not.** Pages gives up all
+    2,450 entries in one deletion; twenty-five probes against a Numbers index
+    were refused without exception. Written for every document now.
+  - **`set_cell` could not write the first cell of an empty table**, because it
+    borrows a format from a cell and there was none. It may now borrow the
+    automatic format from the format list, and only that, and only where the
+    table has no non-automatic format anywhere — so a currency column's header
+    is still refused, which `tests/cells.rs` has always insisted on.
+  The blocker is not understood: the app's own object graph, grafted whole into
+  a package written here, is refused too, which points at the package rather
+  than the objects. Then the machine's Numbers stopped opening *any* document —
+  it answers `version` and `make new document` and hangs on every `open`,
+  including fixtures it had opened an hour earlier — so the last hypotheses
+  (the theme's default-style map, the stylesheet's 467 styles) went untested.
+  **Next session: restart Numbers first, then `REDUCE_OBJECTS=<theme>`.**
+
 - 2026-09-06 — **Phase 10, Pages: a document out of nothing.** `Document::new(
   Kind::Pages)` writes eleven objects and Pages opens them, reads the text back
   and — told to save — writes a whole word-processing document around them
