@@ -195,9 +195,43 @@ osa_warm() {
 	# Before anything is asked of it: an app that was killed with a window open
 	# starts by asking whether to reopen its windows, and that dialog answers
 	# nothing and hides every document opened after it. See the script.
-	osascript "$OSA_HERE/../applescript/dismiss-restore-dialog.applescript" \
-		"$process" >/dev/null 2>&1 || true
-	osa_close "$extension" 60 || osa_reset "$extension"
+	#
+	# Twice, and the second time is the one that works. The dialog is put up a
+	# second or two *after* the process appears, so the first attempt usually
+	# finds nothing; what finds it is the attempt made after `osa_close` has
+	# timed out, which is exactly what a modal dialog makes `osa_close` do.
+	osa_dismiss "$process"
+	if osa_close "$extension" 60; then
+		return 0
+	fi
+	osa_dismiss "$process"
+	osa_close "$extension" 30 || osa_reset "$extension"
+}
+
+# Click away the modal dialog an app puts up about its last session, if it is
+# there.
+#
+# The dialog is put up a second or two *after* the process appears, so looking
+# once, immediately, usually finds nothing — and waiting for it on every start
+# would put those seconds on every check this repository makes. So the wait
+# happens only when it is going to be needed: `osa_kill` leaves a marker, and an
+# app started after a kill is watched for a few seconds. Every other start looks
+# once and moves on.
+osa_dismiss() {
+	local process=$1 marker=${TMPDIR:-/tmp}/iwork-osa-killed-$1 tries=1
+	if [ -e "$marker" ]; then
+		tries=8
+		rm -f "$marker"
+	fi
+	local attempt
+	for attempt in $(seq "$tries"); do
+		if [ "$(osascript "$OSA_HERE/../applescript/dismiss-restore-dialog.applescript" \
+			"$process" 2>/dev/null)" = "dismissed" ]; then
+			return 0
+		fi
+		[ "$attempt" -lt "$tries" ] && sleep 1
+	done
+	return 0
 }
 
 # Close whatever the app has open, one document at a time.
@@ -245,6 +279,10 @@ osa_kill() {
 	local process
 	process=$(osa_process "$1") || return 2
 	pkill -x "$process" 2>/dev/null || true
+	# What `osa_dismiss` reads: an app killed with a window open will ask about
+	# its windows the next time it starts, and that is the only time waiting for
+	# the question is worth the seconds it costs.
+	: >"${TMPDIR:-/tmp}/iwork-osa-killed-$process"
 	sleep 3
 }
 
