@@ -315,6 +315,23 @@ fn mint_row_uuid(
     }
 }
 
+/// Every slot a cell record can carry a format key in.
+const ALL_SLOTS: [crate::table::FormatSlot; 6] = [
+    crate::table::FormatSlot::Number,
+    crate::table::FormatSlot::Currency,
+    crate::table::FormatSlot::Date,
+    crate::table::FormatSlot::Duration,
+    crate::table::FormatSlot::Text,
+    crate::table::FormatSlot::Boolean,
+];
+
+/// `TSK.FormatStructArchive.format_type` for the automatic format.
+///
+/// The one format that suits every slot: a text cell points at it and Numbers
+/// calls the cell text, a number cell points at it and Numbers calls the cell
+/// automatic. See [`crate::table::CellFormat::of`].
+const AUTOMATIC_FORMAT: u64 = 260;
+
 /// `TSWP.HyperlinkFieldArchive` — `{1: {1: uuid}, 2: url}`.
 pub const TYPE_HYPERLINK_FIELD: u32 = 2032;
 
@@ -484,6 +501,10 @@ impl Document {
     pub fn new_on(kind: Kind, paper: crate::create::Paper) -> Result<Document, Error> {
         let blueprint = match kind {
             Kind::Pages => crate::create::pages(paper),
+            // The Numbers blueprint is written and measured — see
+            // [`crate::create::numbers`] — and Numbers does not open what it
+            // writes, so it is not offered. A document the app refuses is worse
+            // than no document at all.
             Kind::Numbers | Kind::Keynote => {
                 return Err(Error::Format(format!(
                     "{} documents cannot be created from nothing yet — \
@@ -1510,15 +1531,6 @@ impl Document {
     ) -> Result<CellWrite, Error> {
         use crate::table::FormatSlot;
 
-        const ALL_SLOTS: [FormatSlot; 6] = [
-            FormatSlot::Number,
-            FormatSlot::Currency,
-            FormatSlot::Date,
-            FormatSlot::Duration,
-            FormatSlot::Text,
-            FormatSlot::Boolean,
-        ];
-
         let mut record = old.clone();
         record.version = 5;
         record.decimal = None;
@@ -1621,6 +1633,17 @@ impl Document {
                 // percentage a neighbour was given.
                 .min()
                 .map(|(_, key)| key)
+                // No cell of this table carries a format for the slot being
+                // written. That is every cell of a table `Document::new` just
+                // made, and it is also the header of a currency column being
+                // turned into a number — and those two want opposite answers.
+                // What separates them is whether the table shows any sign of
+                // formatting at all: a table whose every format is *automatic*
+                // has nothing to contradict, so the automatic entry is borrowed;
+                // a table holding a currency format somewhere has been formatted
+                // by someone, and guessing which of their formats this value
+                // wants is not this crate's to do.
+                .or_else(|| self.automatic_format(list, table))
                 .ok_or_else(|| {
                     Error::Format(format!(
                         "{where_}: no cell in this table carries a {slot:?} format to copy, \
@@ -1649,6 +1672,46 @@ impl Document {
             record: Some(record),
             mutations,
         })
+    }
+
+    /// The key of the automatic format in a format list, if it holds one.
+    ///
+    /// `format_type` 260 is the one format that reads sensibly whatever the
+    /// value is — it is what Numbers itself gives a cell nobody has formatted,
+    /// text cells included. Nothing else in the list will do: a currency format
+    /// borrowed for a number is a format the caller did not ask for, and one
+    /// this crate would then have written into a document silently.
+    fn automatic_format(&self, list: u64, table: &crate::table::Table) -> Option<u32> {
+        let entries = crate::table::DataList::decode(&self.archive_of(list).ok()?).entries;
+        let format_type = |key: u32| {
+            entries
+                .get(&key)
+                .and_then(|entry| entry.format.as_ref())
+                .and_then(|format| format.varint(1))
+        };
+        // Any format a cell actually uses that is not automatic is a decision
+        // someone made about this table, and the end of this.
+        let formatted = table.cells().iter().any(|cell| {
+            ALL_SLOTS.iter().any(|slot| {
+                cell.record
+                    .format_id_in(*slot)
+                    .and_then(format_type)
+                    .is_some_and(|kind| kind != AUTOMATIC_FORMAT)
+            })
+        });
+        if formatted {
+            return None;
+        }
+        entries
+            .iter()
+            .find(|(_, entry)| {
+                entry
+                    .format
+                    .as_ref()
+                    .and_then(|format| format.varint(1))
+                    .is_some_and(|kind| kind == AUTOMATIC_FORMAT)
+            })
+            .map(|(key, _)| *key)
     }
 
     /// Apply one planned reference-count change.
