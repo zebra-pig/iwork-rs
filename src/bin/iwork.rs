@@ -37,6 +37,8 @@ metadata, identity and the review layer
                                            identity, so the two do not collide
   iwork new       <template> <out>         make a document from a template
                                            bundle (.template/.nmbtemplate/.kth)
+  iwork create    <kind> [paper] <out>     make an empty document from nothing:
+                                           pages/numbers/keynote, a4 or letter
   iwork strip-previews <file> <out>        drop the preview images
 
 `iwork duplicate` gives the copy fresh documentUUID, shareUUID, privateUUID and
@@ -262,6 +264,8 @@ fn main() -> ExitCode {
         ["annotations", file] => annotations(file),
         ["duplicate", file, out] => duplicate(file, out),
         ["new", template, out] => new_document(template, out),
+        ["create", kind, out] => create_document(kind, out, None),
+        ["create", kind, paper, out] => create_document(kind, out, Some(paper)),
         ["strip-previews", file, out] => strip_previews(file, out),
         ["sections", file] => sections(file),
         ["structure", file] => structure(file),
@@ -631,6 +635,33 @@ fn new_document(template: &str, out: &str) -> Result<(), Error> {
         Some(identifier) => println!("  template           {identifier}"),
         None => println!("  template           — (not one of the app's own, so nothing claimed)"),
     }
+    Ok(())
+}
+
+fn create_document(kind: &str, out: &str, paper: Option<&str>) -> Result<(), Error> {
+    let kind = match kind.to_ascii_lowercase().as_str() {
+        "pages" => iwork::Kind::Pages,
+        "numbers" => iwork::Kind::Numbers,
+        "keynote" | "key" => iwork::Kind::Keynote,
+        other => {
+            return Err(Error::Format(format!(
+                "{other}: create takes pages, numbers or keynote"
+            )))
+        }
+    };
+    let paper = match paper.map(str::to_ascii_lowercase).as_deref() {
+        None => iwork::create::Paper::default(),
+        Some("a4" | "iso" | "iso-a4") => iwork::create::Paper::A4,
+        Some("letter" | "us" | "na-letter") => iwork::create::Paper::Letter,
+        Some(other) => return Err(Error::Format(format!("{other}: paper is a4 or letter"))),
+    };
+    let doc = Document::new_on(kind, paper)?;
+    doc.save(out)?;
+    println!(
+        "wrote {out} — a {} document made from nothing, {} object(s)",
+        doc.kind().as_str(),
+        doc.objects().count()
+    );
     Ok(())
 }
 

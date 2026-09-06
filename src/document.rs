@@ -454,6 +454,58 @@ impl Document {
         Ok(document)
     }
 
+    /// A new, empty document — the one call here that needs no file at all.
+    ///
+    /// [`Document::from_template`] answers "create a document" by copying one
+    /// that works, and needs Apple's software installed to have something to
+    /// copy. This is the other half of the promise: the bytes come from
+    /// [`crate::create`], which writes the least document the app was measured
+    /// accepting — eleven objects for Pages, where the app's own Blank template
+    /// has 569.
+    ///
+    /// The document is in memory; [`Document::save`] puts it somewhere, and its
+    /// identity is minted here, so two calls make two documents.
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), iwork::Error> {
+    /// let mut doc = iwork::Document::new(iwork::Kind::Pages)?;
+    /// doc.append_paragraph("Hello")?;
+    /// doc.save("Hello.pages")?;
+    /// # Ok(()) }
+    /// ```
+    pub fn new(kind: Kind) -> Result<Document, Error> {
+        Document::new_on(kind, crate::create::Paper::default())
+    }
+
+    /// [`Document::new`], choosing the paper a Pages document starts on.
+    ///
+    /// The other two apps have no paper — a Numbers sheet and a Keynote slide
+    /// are sized in their own archives — so this is [`Document::new`] for them.
+    pub fn new_on(kind: Kind, paper: crate::create::Paper) -> Result<Document, Error> {
+        let blueprint = match kind {
+            Kind::Pages => crate::create::pages(paper),
+            Kind::Numbers | Kind::Keynote => {
+                return Err(Error::Format(format!(
+                    "{} documents cannot be created from nothing yet — \
+                     Document::from_template can still copy one",
+                    kind.as_str()
+                )))
+            }
+            Kind::Unknown => {
+                return Err(Error::Format(
+                    "a document has to be a Pages, Numbers or Keynote one".into(),
+                ))
+            }
+        };
+        let mut document = Document::from_package(blueprint.finish())?;
+        document.kind = kind;
+        // Every reference that leaves the component it is written in has to be
+        // declared, and working it out from the objects beats maintaining a list
+        // while building them — the same call an edit makes.
+        document.declare_external_references();
+        Ok(document)
+    }
+
     /// Make a new document out of a template bundle — `.template`,
     /// `.nmbtemplate` or `.kth`.
     ///
@@ -681,6 +733,43 @@ impl Document {
     pub fn set_text(&mut self, identifier: u64, new_text: &str) -> Result<TextEdit, Error> {
         let length = text::length(&self.storage_text(identifier)?);
         self.replace_text(identifier, 0..length, new_text)
+    }
+
+    /// The body of a Pages document — the storage its text goes in.
+    ///
+    /// A word-processing document has exactly one: `StorageArchive.kind` 0, the
+    /// storage `TP.DocumentArchive` field 4 points at. Headers, footers, text
+    /// boxes, table cells and footnotes are storages too, and none of them is
+    /// this one.
+    pub fn body_storage(&self) -> Option<u64> {
+        self.structure()?.body_storage
+    }
+
+    /// Add a paragraph to the end of a Pages document's body.
+    ///
+    /// The exceljs-shaped call: a document from [`Document::new`] has an empty
+    /// body and this is how text gets into it. A paragraph is a run of text
+    /// ending at a newline, so this appends one — with the newline in front of
+    /// it when there is already text to separate from, and without when the
+    /// body is empty and the new text *is* the first paragraph.
+    ///
+    /// Everything anchored into the body moves with the insert, exactly as it
+    /// does for [`Document::insert_text`]: this is that call with the index
+    /// worked out.
+    pub fn append_paragraph(&mut self, text: &str) -> Result<TextEdit, Error> {
+        let Some(storage) = self.body_storage() else {
+            return Err(Error::Format(format!(
+                "a {} document has no body to append a paragraph to",
+                self.kind.as_str()
+            )));
+        };
+        let existing = self.storage_text(storage)?;
+        let at = text::length(&existing);
+        let addition = match existing.is_empty() {
+            true => text.to_string(),
+            false => format!("\n{text}"),
+        };
+        self.insert_text(storage, at, &addition)
     }
 
     /// Insert text at a character index, moving everything anchored past it.

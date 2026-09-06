@@ -492,6 +492,67 @@ pub fn assign_identity(
     Ok(identity)
 }
 
+/// Give a package that has no identity its first one.
+///
+/// [`assign_identity`] rewrites an identity a document already has; this writes
+/// the one a document made from nothing was never given. Both end in the same
+/// place — `documentUUID` == `shareUUID` == `stableDocumentUUID`, a `revision`
+/// ending in the `versionUUID` — which is the state [`crate::Document::problems`]
+/// checks for and what every document in the corpus that has never been copied
+/// looks like.
+///
+/// `isMultiPage` is the one value that depends on the app, and it is the Finder's
+/// question rather than the format's: a Pages document that fits on one page has
+/// it false and one that does not has it true, over all fourteen Pages fixtures;
+/// every Numbers and Keynote document in the corpus has it true, one sheet or
+/// twelve. A new document is one page of Pages and is born false.
+pub fn write_identity(package: &mut crate::Package, kind: Kind) -> NewIdentity {
+    let document_uuid = uuid();
+    let version_uuid = uuid();
+    let identity = NewIdentity {
+        document_uuid: document_uuid.clone(),
+        share_uuid: document_uuid.clone(),
+        stable_document_uuid: Some(document_uuid.clone()),
+        private_uuid: uuid(),
+        revision: format!("0::{version_uuid}"),
+        version_uuid: version_uuid.clone(),
+    };
+
+    let mut raw = Plist::Dictionary(Vec::new());
+    raw.set(key::DOCUMENT_UUID, Plist::String(document_uuid.clone()));
+    raw.set(key::SHARE_UUID, Plist::String(document_uuid.clone()));
+    raw.set(
+        key::STABLE_DOCUMENT_UUID,
+        Plist::String(document_uuid.clone()),
+    );
+    raw.set(
+        key::PRIVATE_UUID,
+        Plist::String(identity.private_uuid.clone()),
+    );
+    raw.set(key::VERSION_UUID, Plist::String(version_uuid));
+    raw.set(key::REVISION, Plist::String(identity.revision.clone()));
+    raw.set(
+        key::FILE_FORMAT_VERSION,
+        Plist::String(FILE_FORMAT_VERSION.to_string()),
+    );
+    raw.set(key::IS_MULTI_PAGE, Plist::Bool(kind != Kind::Pages));
+    raw.set(key::HAS_EXTERNAL_REFERENCE, Plist::Bool(false));
+    raw.set(key::HAS_UNMATERIALIZED_REMOTE_DATA, Plist::Bool(false));
+
+    package.set(PROPERTIES, crate::plist::write(&raw));
+    package.set(DOCUMENT_IDENTIFIER, document_uuid.into_bytes());
+    identity
+}
+
+/// `fileFormatVersion`, as 15.3.1 writes it.
+///
+/// Not the app's version and not the format's age: 26.3.1 is what every one of
+/// the 26 fixtures carries, written by Pages, Numbers and Keynote 15.3.1 alike.
+/// It is recorded rather than derived, and a document without the key opens
+/// anyway — the reduction deleted `Properties.plist` outright and all three apps
+/// still opened the result.
+pub const FILE_FORMAT_VERSION: &str = "26.3.1";
+
 /// The generation in front of a `revision`, or 0.
 fn generation(properties: &Properties) -> u64 {
     properties
