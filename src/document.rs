@@ -326,6 +326,22 @@ const DEFAULT_COLUMNS: usize = 7;
 /// offers first.
 const DEFAULT_SLIDE_SIZE: (f32, f32) = (1920.0, 1080.0);
 
+/// The sizes a table this crate makes may have.
+fn check_table_size(rows: usize, columns: usize) -> Result<(), Error> {
+    if rows == 0 || columns == 0 {
+        return Err(Error::Format(
+            "a table needs at least one row and one column".into(),
+        ));
+    }
+    if columns > MAX_COLUMNS {
+        return Err(Error::Format(format!(
+            "{columns} columns: a new table is capped at {MAX_COLUMNS}, the number of cell \
+             offsets Numbers writes into a row"
+        )));
+    }
+    Ok(())
+}
+
 /// How wide a table [`Document::new_spreadsheet`] will make.
 ///
 /// A row carries 255 cell offsets whatever the table's width — see
@@ -3706,6 +3722,61 @@ impl Document {
     /// how that was measured.
     pub fn duplicate_slide(&mut self, slide: u64) -> Result<crate::keynote::SlideCopy, Error> {
         crate::keynote::duplicate_slide(self, slide)
+    }
+
+    /// Add a table to a sheet a Numbers document already has.
+    ///
+    /// The sheet is named by its object identifier or by its name. The table
+    /// borrows the styles a table already in the document uses, so it looks
+    /// like its neighbours rather than like something invented here — and a
+    /// document with no table at all is refused for exactly that reason.
+    ///
+    /// Every cell of it can be written from the start.
+    pub fn add_table(
+        &mut self,
+        sheet: &str,
+        name: &str,
+        rows: usize,
+        columns: usize,
+    ) -> Result<u64, Error> {
+        check_table_size(rows, columns)?;
+        crate::table::add_table(self, sheet, name, rows, columns)
+    }
+
+    /// Add a sheet, with one table on it, to a Numbers document.
+    ///
+    /// The new sheet is modelled on one the document already has — its style,
+    /// its margins, its zoom — with its own name and nothing on it but the
+    /// table.
+    pub fn add_sheet(
+        &mut self,
+        name: &str,
+        table: &str,
+        rows: usize,
+        columns: usize,
+    ) -> Result<u64, Error> {
+        check_table_size(rows, columns)?;
+        crate::table::add_sheet(self, name, table, rows, columns)
+    }
+
+    /// Add a slide to the end of a Keynote deck.
+    ///
+    /// Drawn from one of the deck's own layouts — `None` takes the first, which
+    /// is what Keynote's New Slide does — so the slide looks like the theme
+    /// rather than like something this crate invented. It is empty: the
+    /// layout's placeholders are what a new slide shows, and putting text in
+    /// one is a separate job.
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), iwork::Error> {
+    /// let mut deck = iwork::Document::open("Deck.key")?;
+    /// let slide = deck.add_slide(None)?;
+    /// println!("slide {} is number {:?}", slide.identifier, slide.number);
+    /// deck.save("Deck-with-one-more.key")?;
+    /// # Ok(()) }
+    /// ```
+    pub fn add_slide(&mut self, layout: Option<u64>) -> Result<crate::keynote::Slide, Error> {
+        crate::keynote::add_slide(self, layout)
     }
 
     /// Replace a slide's presenter notes.

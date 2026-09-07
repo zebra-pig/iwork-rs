@@ -170,6 +170,121 @@ fn a_new_deck_has_a_slide_and_the_master_it_is_drawn_from() {
     assert_eq!(doc.slide_layouts().len(), 1);
 }
 
+/// A document built up rather than merely made: two sheets, three tables, and
+/// a cell written into the last of them.
+#[test]
+fn a_spreadsheet_can_be_built_up_sheet_by_sheet() {
+    use iwork::table::CellValue;
+
+    let mut doc = Document::new_spreadsheet("First", "T1", 4, 3).unwrap();
+    let sheet = doc.add_sheet("Second", "T2", 5, 2).unwrap();
+    let table = doc.add_table("Second", "T3", 3, 2).unwrap();
+    assert!(sheet > 0 && table > 0);
+
+    let names: Vec<String> = doc.tables().iter().map(|t| t.name.clone()).collect();
+    assert_eq!(names, ["T1", "T2", "T3"]);
+    let sheets: Vec<String> = doc
+        .tables()
+        .iter()
+        .filter_map(|t| t.sheet.clone())
+        .collect();
+    assert_eq!(sheets, ["First", "Second", "Second"]);
+
+    // A table added to a document is a table like any other.
+    doc.set_cell("T3", 2, 1, CellValue::Text("corner".into()))
+        .unwrap();
+    assert_eq!(doc.table("T3").unwrap().value(2, 1).to_text(), "corner");
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+    assert!(doc.undeclared_references().is_empty());
+}
+
+/// Two tables of one name is something the app's formulas cannot tell apart, so
+/// it is refused; so is a sheet that is not there.
+#[test]
+fn adding_a_table_refuses_a_name_or_a_sheet_that_would_not_work() {
+    let mut doc = Document::new_spreadsheet("First", "T1", 4, 3).unwrap();
+    assert!(
+        doc.add_table("First", "T1", 2, 2).is_err(),
+        "duplicate name"
+    );
+    assert!(
+        doc.add_table("Nowhere", "T2", 2, 2).is_err(),
+        "no such sheet"
+    );
+    assert!(
+        doc.add_sheet("First", "T2", 2, 2).is_err(),
+        "duplicate sheet"
+    );
+    assert!(doc.add_table("First", "T2", 0, 2).is_err(), "no rows");
+}
+
+/// A deck grows the same way, and the new slide is drawn from the deck's own
+/// layout rather than one invented for it.
+#[test]
+fn a_deck_can_be_built_up_slide_by_slide() {
+    let mut doc = Document::new(Kind::Keynote).unwrap();
+    assert_eq!(doc.slides().len(), 1);
+
+    let added = doc.add_slide(None).unwrap();
+    assert_eq!(doc.slides().len(), 2);
+    assert_eq!(added.index, 1);
+    // It hangs off a layout the deck already had.
+    let layouts = doc.slide_layouts();
+    assert_eq!(layouts.len(), 1);
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+    assert!(doc.undeclared_references().is_empty());
+
+    // …and again, so the second one does not collide with the first.
+    doc.add_slide(None).unwrap();
+    assert_eq!(doc.slides().len(), 3);
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+}
+
+/// The apps read back what was added. Off unless `IWORK_APP_CHECK=1`.
+#[test]
+fn the_apps_read_back_an_added_sheet_table_and_slide() {
+    if std::env::var("IWORK_APP_CHECK").as_deref() != Ok("1") {
+        eprintln!("IWORK_APP_CHECK is not 1 — skipping the app round trip");
+        return;
+    }
+    let check = |path: &std::path::Path, expected: &str| {
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/app-check.sh");
+        let output = std::process::Command::new(&script)
+            .arg(path)
+            .arg(expected)
+            .output()
+            .unwrap_or_else(|e| panic!("{}: {e}", script.display()));
+        assert!(
+            output.status.success(),
+            "the app would not open {}:\n{}\n{}",
+            path.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+
+    let mut doc = Document::new_spreadsheet("First", "T1", 4, 3).unwrap();
+    doc.add_sheet("Second", "T2", 5, 2).unwrap();
+    doc.set_cell(
+        "T2",
+        0,
+        0,
+        iwork::table::CellValue::Text("Auf dem zweiten Blatt".into()),
+    )
+    .unwrap();
+    let out = scratch("iwork-grown.numbers");
+    doc.save(&out).unwrap();
+    check(&out, "Auf dem zweiten Blatt");
+    let _ = std::fs::remove_file(&out);
+
+    let mut deck = Document::new(Kind::Keynote).unwrap();
+    deck.add_slide(None).unwrap();
+    let out = scratch("iwork-grown.key");
+    deck.save(&out).unwrap();
+    check(&out, "");
+    let _ = std::fs::remove_file(&out);
+}
+
 /// The measure that counts, for the deck. Off unless `IWORK_APP_CHECK=1`.
 #[test]
 fn keynote_opens_a_deck_this_crate_made_from_nothing() {

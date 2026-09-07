@@ -2114,6 +2114,69 @@ fn derived_uuid(entry: &Message, identifier: u64) -> (u64, u64) {
     (lower, upper)
 }
 
+/// Add a slide to the end of a deck, drawn from one of its layouts.
+///
+/// The pieces are the ones `Document::new(Kind::Keynote)` writes for its first
+/// slide, and the difference is that everything they point at already exists:
+/// the master is the deck's own layout rather than a new one, and the style is
+/// that layout's. So a slide added to a deck made from *any* theme looks like
+/// the theme, which a slide carrying styles invented here would not.
+///
+/// `layout` is the layout to draw it from — `None` takes the deck's first,
+/// which is what Keynote's own New Slide does.
+pub fn add_slide(
+    document: &mut crate::Document,
+    layout: Option<u64>,
+) -> Result<crate::keynote::Slide, Error> {
+    let deck = show(document).ok_or_else(|| Error::Format("not a Keynote document".into()))?;
+    let master = match layout {
+        Some(wanted) => deck
+            .layouts
+            .iter()
+            .find(|l| l.identifier == wanted || l.node == wanted)
+            .ok_or_else(|| Error::Format(format!("no layout {wanted} in this deck")))?,
+        None => deck
+            .layouts
+            .first()
+            .ok_or_else(|| Error::Format("this deck has no layout to draw a slide from".into()))?,
+    };
+    // The layout's own style, which is what a slide drawn from it uses.
+    let master_archive = document.archive(master.identifier)?;
+    let style = reference(&master_archive, slide_field::STYLE)
+        .ok_or_else(|| Error::Format(format!("layout {} names no style", master.identifier)))?;
+
+    let last_node = deck.slides.last().map(|slide| slide.node);
+    let master_id = master.identifier;
+
+    let mut grow = crate::create::Grow::new(document);
+    let slide = grow.allocate();
+    let node = grow.allocate();
+    grow.component(
+        "Slide",
+        true,
+        vec![(
+            slide,
+            TYPE_SLIDE,
+            crate::create::keynote_slide(style, Some(master_id)),
+        )],
+    )?;
+    // The node goes beside the last slide's node, which is in `Document`.
+    let neighbour = last_node
+        .ok_or_else(|| Error::Format("this deck has no slide to put a new one after".into()))?;
+    let node_archive = crate::create::keynote_slide_node(slide, node);
+    grow.beside(neighbour, node, TYPE_SLIDE_NODE, &node_archive)?;
+    grow.finish()?;
+
+    insert_into_slide_tree(document, neighbour, node)?;
+
+    show(document)
+        .map(|deck| deck.slides)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|s| s.identifier == slide)
+        .ok_or_else(|| Error::Format("the new slide is not in the deck".into()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

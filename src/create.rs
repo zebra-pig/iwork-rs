@@ -1916,13 +1916,17 @@ pub(crate) fn keynote(slide_size: (f32, f32)) -> Blueprint {
         TYPE_SLIDE,
         master_archive(slide_style, &placeholders),
     );
-    let template_node = blueprint.add(document, TYPE_SLIDE_NODE, slide_node(template, seed));
+    let template_node = blueprint.add(
+        document,
+        TYPE_SLIDE_NODE,
+        keynote_slide_node(template, seed),
+    );
     let slide = blueprint.in_own_component(
         "Slide",
         TYPE_SLIDE,
-        slide_archive(slide_style, Some(template)),
+        keynote_slide(slide_style, Some(template)),
     );
-    let node = blueprint.add(document, TYPE_SLIDE_NODE, slide_node(slide, seed));
+    let node = blueprint.add(document, TYPE_SLIDE_NODE, keynote_slide_node(slide, seed));
     blueprint.put(
         document,
         theme,
@@ -1974,7 +1978,7 @@ fn show_archive(theme: u64, stylesheet: u64, node: u64, size: (f32, f32)) -> Mes
 /// on slide node" and "Slide background alpha expected in document saved at or
 /// after version …" for a node that leaves out 18 and 28. An optional field
 /// with a default is not always a field you may omit.
-fn slide_node(slide: u64, seed: u64) -> Message {
+pub(crate) fn keynote_slide_node(slide: u64, seed: u64) -> Message {
     message(vec![
         reference(2, slide),
         // `isSkipped`, `hasBuilds`, `hasTransition`, `hasNote`.
@@ -2058,7 +2062,7 @@ const TYPE_PLACEHOLDER: u32 = 7;
 ///
 /// `template_slide` is what makes it a slide rather than a master: a slide in
 /// the show names the master it is drawn from, and the master names none.
-fn slide_archive(style: u64, template: Option<u64>) -> Message {
+pub(crate) fn keynote_slide(style: u64, template: Option<u64>) -> Message {
     let mut fields = vec![
         reference(1, style),
         // A transition, which every slide has whether or not it does anything.
@@ -2072,6 +2076,363 @@ fn slide_archive(style: u64, template: Option<u64>) -> Message {
         fields.push(reference(17, template));
     }
     message(fields)
+}
+
+/// Somewhere objects can be put: a package being assembled, or a document being
+/// grown.
+///
+/// The archives are the same either way — a tile is a tile — and the only thing
+/// that differs is where the objects land and how the component index hears
+/// about them. Everything that builds more than one object goes through this,
+/// so a table added to a spreadsheet is the table `Document::new` makes.
+pub(crate) trait Site {
+    fn allocate(&mut self) -> u64;
+    /// A component holding the objects given, the first of which is its root.
+    fn component(
+        &mut self,
+        name: &str,
+        numbered: bool,
+        objects: Vec<(u64, u32, Message)>,
+    ) -> Result<u64, crate::Error>;
+}
+
+// -- growing a document that already exists -----------------------------------
+
+/// Adding objects and components to a document that is already there.
+///
+/// [`Blueprint`] assembles a package from nothing, where every identifier is
+/// free and the component index is written once at the end. Adding a sheet to a
+/// spreadsheet somebody else made is the same job under three constraints: the
+/// identifiers have to be ones the document has not used, each new component
+/// needs its `TSP.ComponentInfo` written into an index that already exists, and
+/// the high-water mark has to move so the app does not hand out an identifier
+/// this crate has just taken.
+///
+/// What it does not do is decide *what* to add — that is the caller's, and the
+/// archives come from the same functions [`Blueprint`] uses.
+pub(crate) struct Grow<'a> {
+    document: &'a mut crate::Document,
+    next: u64,
+    /// Components made here, so `finish` can register them in one pass.
+    added: Vec<NewComponent>,
+    /// Objects added to components that already existed, as
+    /// `(component root, object)` — they need object-UUID entries too.
+    joined: Vec<(u64, u64)>,
+}
+
+struct NewComponent {
+    identifier: u64,
+    name: String,
+    locator: String,
+    objects: Vec<u64>,
+}
+
+impl Site for Grow<'_> {
+    fn allocate(&mut self) -> u64 {
+        Grow::allocate(self)
+    }
+
+    fn component(
+        &mut self,
+        name: &str,
+        numbered: bool,
+        objects: Vec<(u64, u32, Message)>,
+    ) -> Result<u64, crate::Error> {
+        Grow::component(self, name, numbered, objects)
+    }
+}
+
+impl Site for Blueprint {
+    fn allocate(&mut self) -> u64 {
+        Blueprint::allocate(self)
+    }
+
+    fn component(
+        &mut self,
+        name: &str,
+        numbered: bool,
+        objects: Vec<(u64, u32, Message)>,
+    ) -> Result<u64, crate::Error> {
+        let root = objects
+            .first()
+            .map(|(identifier, _, _)| *identifier)
+            .ok_or_else(|| crate::Error::Format("a component needs a root object".into()))?;
+        let component = self.push_component(
+            name,
+            root,
+            numbered.then(|| format!("{name}-{root}")),
+            false,
+        );
+        for (identifier, message_type, archive) in objects {
+            self.put(component, identifier, message_type, archive);
+        }
+        Ok(root)
+    }
+}
+
+impl<'a> Grow<'a> {
+    pub(crate) fn new(document: &'a mut crate::Document) -> Grow<'a> {
+        let next = document.next_object_identifier();
+        Grow {
+            document,
+            next,
+            added: Vec::new(),
+            joined: Vec::new(),
+        }
+    }
+
+    pub(crate) fn allocate(&mut self) -> u64 {
+        let identifier = self.next;
+        self.next += 1;
+        identifier
+    }
+
+    /// Put an object into the stream a neighbour is already in.
+    pub(crate) fn beside(
+        &mut self,
+        neighbour: u64,
+        identifier: u64,
+        message_type: u32,
+        archive: &Message,
+    ) -> Result<(), crate::Error> {
+        self.document
+            .add_object_after(neighbour, identifier, message_type, archive)?;
+        if let Some(root) = self.component_of(neighbour) {
+            self.joined.push((root, identifier));
+        }
+        Ok(())
+    }
+
+    /// A new component holding the objects given, the first of which is its
+    /// root — and whose identifier is therefore the component's.
+    ///
+    /// `numbered` names the stream `Tables/Tile-1007` rather than `Tables/Tile`,
+    /// which is what the apps do for everything they may have more than one of.
+    pub(crate) fn component(
+        &mut self,
+        name: &str,
+        numbered: bool,
+        objects: Vec<(u64, u32, Message)>,
+    ) -> Result<u64, crate::Error> {
+        let root = objects
+            .first()
+            .map(|(identifier, _, _)| *identifier)
+            .ok_or_else(|| crate::Error::Format("a component needs a root object".into()))?;
+        let locator = match numbered {
+            true => format!("{name}-{root}"),
+            false => name.to_string(),
+        };
+        let stream = format!("Index/{locator}.iwa");
+        let identifiers: Vec<u64> = objects.iter().map(|(id, _, _)| *id).collect();
+        let objects: Vec<ArchiveObject> = objects
+            .into_iter()
+            .map(|(identifier, message_type, archive)| ArchiveObject {
+                identifier,
+                messages: vec![ArchiveMessage {
+                    message_type,
+                    version: VERSION.to_vec(),
+                    extra: Vec::new(),
+                    payload: archive.encode(),
+                }],
+                extra: Vec::new(),
+            })
+            .collect();
+        self.document.add_stream(&stream, objects)?;
+        self.added.push(NewComponent {
+            identifier: root,
+            name: name.to_string(),
+            locator,
+            objects: identifiers,
+        });
+        Ok(root)
+    }
+
+    /// Which component an object lives in, by its stream.
+    fn component_of(&self, object: u64) -> Option<u64> {
+        let (stream, _) = self.document.object(object)?;
+        self.document
+            .components()
+            .into_iter()
+            .find(|component| component.stream_name() == stream)
+            .map(|component| component.identifier)
+    }
+
+    /// Register the new components, give every new object a UUID, raise the
+    /// high-water mark and declare what the new objects point at.
+    ///
+    /// Returns the number of declarations added, which is what a caller reports.
+    pub(crate) fn finish(self) -> Result<usize, crate::Error> {
+        let Grow {
+            document,
+            next,
+            added,
+            joined,
+        } = self;
+        document.set_last_object_identifier(next.saturating_sub(1))?;
+
+        let kind = document.kind();
+        document.update_package_metadata(|metadata| {
+            for component in &added {
+                let mut info = vec![varint(1, component.identifier), string(2, &component.name)];
+                if component.locator != component.name {
+                    info.push(string(3, &component.locator));
+                }
+                info.push(Field {
+                    number: 4,
+                    value: Value::Bytes(COMPONENT_VERSION.to_vec()),
+                });
+                info.push(Field {
+                    number: 5,
+                    value: Value::Bytes(COMPONENT_VERSION.to_vec()),
+                });
+                for object in &component.objects {
+                    info.push(object_uuid_entry(*object));
+                }
+                info.push(varint(10, 0));
+                info.push(varint(12, component_generation(kind)));
+                metadata.append_in_order(3, Value::Bytes(message(info).encode()));
+            }
+
+            // Objects that joined a component that was already there: the
+            // component keeps its entry, and gains a UUID for each of them.
+            for (root, object) in &joined {
+                let mut rewritten = Vec::new();
+                for value in metadata.all(3) {
+                    let Value::Bytes(raw) = value else { continue };
+                    let Ok(mut info) = Message::decode(raw) else {
+                        continue;
+                    };
+                    if info.varint(1) != Some(*root) {
+                        continue;
+                    }
+                    info.fields.push(object_uuid_entry(*object));
+                    rewritten.push((raw.clone(), info.encode()));
+                }
+                for (before, after) in rewritten {
+                    for field in metadata.fields.iter_mut() {
+                        if field.number == 3 && field.value == Value::Bytes(before.clone()) {
+                            field.value = Value::Bytes(after.clone());
+                            break;
+                        }
+                    }
+                }
+            }
+        })?;
+        Ok(document.declare_external_references())
+    }
+}
+
+/// The styles a table model names, however they were come by.
+pub(crate) struct TableStyles {
+    pub(crate) table: u64,
+    /// Seventeen, in the order [`CELL_AREAS`] names them.
+    pub(crate) cells: Vec<u64>,
+    /// Eight, in the order [`TEXT_AREAS`] names them.
+    pub(crate) text: Vec<u64>,
+}
+
+/// Build a table: its tiles, its interning lists, its header buckets, its model
+/// and the drawable the sheet holds it by.
+///
+/// Returns `(table info, table model)`. Everything that can be its own
+/// component is one, because Numbers refuses a document whose tile is not — see
+/// FORMAT.md §14 — and the model and the info are handed back for the caller to
+/// place, since where *they* go differs: a new document puts them in the
+/// calculation engine's component, and a document being grown puts them beside
+/// the table that is already there.
+pub(crate) fn build_table(
+    site: &mut impl Site,
+    sheet: u64,
+    name: &str,
+    rows: usize,
+    columns: usize,
+    styles: &TableStyles,
+    seed: u64,
+) -> Result<(u64, u64, Message, Message), crate::Error> {
+    let data_list_component =
+        |site: &mut dyn Site, archive: Message| -> Result<u64, crate::Error> {
+            let identifier = site.allocate();
+            site.component(
+                "Tables/DataList",
+                true,
+                vec![(identifier, TYPE_DATA_LIST, archive)],
+            )
+        };
+    let strings = data_list_component(site, data_list(1))?;
+    let formats = data_list_component(site, automatic_format_list())?;
+    let styles_list = data_list_component(site, data_list(4))?;
+    let formulas = data_list_component(site, data_list(3))?;
+    let conditional = data_list_component(site, data_list(2))?;
+    let list_10 = data_list_component(site, data_list(10))?;
+    let list_11 = data_list_component(site, data_list(11))?;
+    let controls = data_list_component(site, data_list(12))?;
+
+    let bucket = |site: &mut dyn Site, count: usize| -> Result<u64, crate::Error> {
+        let identifier = site.allocate();
+        site.component(
+            "Tables/HeaderStorageBucket",
+            true,
+            vec![(identifier, TYPE_HEADER_BUCKET, header_bucket(count))],
+        )
+    };
+    let row_bucket = bucket(site, rows)?;
+    let column_bucket = bucket(site, columns)?;
+
+    let mut tiles: Vec<(u64, u64)> = Vec::new();
+    for index in 0..rows.div_ceil(TILE_SIZE as usize) {
+        let first = index * TILE_SIZE as usize;
+        let count = (rows - first).min(TILE_SIZE as usize);
+        let identifier = site.allocate();
+        let tile = site.component(
+            "Tables/Tile",
+            true,
+            vec![(identifier, TYPE_TILE, tile(count, columns))],
+        )?;
+        tiles.push((index as u64, tile));
+    }
+
+    let model = site.allocate();
+    let info = site.allocate();
+    let model_archive = table_model(TableParts {
+        name,
+        rows,
+        columns,
+        tiles: &tiles,
+        row_bucket,
+        column_bucket,
+        strings,
+        formats,
+        styles: styles_list,
+        formulas,
+        conditional,
+        list_10,
+        list_11,
+        controls,
+        table_style: styles.table,
+        cell_styles: &styles.cells,
+        text_styles: &styles.text,
+        seed,
+    });
+    let info_archive = table_info(sheet, model, rows, columns, seed);
+    Ok((info, model, info_archive, model_archive))
+}
+
+/// A `TSP.Reference` to one object, encoded — for a caller appending one to a
+/// repeated field.
+pub(crate) fn reference_bytes(target: u64) -> Vec<u8> {
+    message(vec![varint(1, target)]).encode()
+}
+
+/// One `object_uuid_map_entries` entry: an object and a UUID of its own.
+fn object_uuid_entry(object: u64) -> Field {
+    let (lower, upper) = object_uuid();
+    nested(
+        11,
+        vec![
+            varint(1, object),
+            nested(2, vec![varint(1, lower), varint(2, upper)]),
+        ],
+    )
 }
 
 #[cfg(test)]

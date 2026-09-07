@@ -102,6 +102,10 @@ tables
   iwork insert-row <file> <table> <at> <out>
                                            insert an empty row before index
                                            <at> (<at> == row count appends)
+  iwork add-table <file> <sheet> <name> <rows> <cols> <out>
+                                           add a table to a sheet that exists
+  iwork add-sheet <file> <name> <table> <rows> <cols> <out>
+                                           add a sheet with one table on it
 
 charts
 
@@ -157,6 +161,8 @@ Keynote decks
                                            move a slide to position <to>, from 0
   iwork duplicate-slide <file> <slide> <out>
                                            copy a slide, straight after it
+  iwork add-slide <file> [layout] <out>    add an empty slide at the end, drawn
+                                           from one of the deck's layouts
 
 All Keynote-only; a Pages or Numbers document has no `KN.ShowArchive` and they
 say so. A <slide> is the object id `iwork slides` prints, either the slide's or
@@ -264,6 +270,14 @@ fn main() -> ExitCode {
         ["annotations", file] => annotations(file),
         ["duplicate", file, out] => duplicate(file, out),
         ["new", template, out] => new_document(template, out),
+        ["add-sheet", file, name, table, rows, columns, out] => index(rows)
+            .and_then(|rows| Ok((rows, index(columns)?)))
+            .and_then(|(rows, columns)| add_sheet(file, name, table, rows, columns, out)),
+        ["add-table", file, sheet, name, rows, columns, out] => index(rows)
+            .and_then(|rows| Ok((rows, index(columns)?)))
+            .and_then(|(rows, columns)| add_table(file, sheet, name, rows, columns, out)),
+        ["add-slide", file, out] => add_slide(file, None, out),
+        ["add-slide", file, layout, out] => add_slide(file, Some(layout), out),
         ["create", kind, out] => create_document(kind, out, None),
         ["create", kind, paper, out] => create_document(kind, out, Some(paper)),
         ["strip-previews", file, out] => strip_previews(file, out),
@@ -663,6 +677,72 @@ fn create_document(kind: &str, out: &str, paper: Option<&str>) -> Result<(), Err
         doc.objects().count()
     );
     Ok(())
+}
+
+fn add_sheet(
+    path: &str,
+    name: &str,
+    table: &str,
+    rows: usize,
+    columns: usize,
+    out: &str,
+) -> Result<(), Error> {
+    let mut doc = Document::open(path)?;
+    let sheet = doc.add_sheet(name, table, rows, columns)?;
+    doc.save(out)?;
+    println!("added sheet {name:?} (object {sheet}) with table {table:?}, {rows}×{columns}");
+    report_streams(&doc, out);
+    Ok(())
+}
+
+fn add_table(
+    path: &str,
+    sheet: &str,
+    name: &str,
+    rows: usize,
+    columns: usize,
+    out: &str,
+) -> Result<(), Error> {
+    let mut doc = Document::open(path)?;
+    let table = doc.add_table(sheet, name, rows, columns)?;
+    doc.save(out)?;
+    println!("added table {name:?} (object {table}) to sheet {sheet}, {rows}×{columns}");
+    report_streams(&doc, out);
+    Ok(())
+}
+
+fn add_slide(path: &str, layout: Option<&str>, out: &str) -> Result<(), Error> {
+    let mut doc = Document::open(path)?;
+    let layout = match layout {
+        Some(text) => Some(
+            text.parse::<u64>()
+                .map_err(|_| Error::Format(format!("{text}: a layout is an object id")))?,
+        ),
+        None => None,
+    };
+    let slide = doc.add_slide(layout)?;
+    let slides = doc.slides().len();
+    doc.save(out)?;
+    println!(
+        "added slide {} at position {} of {}",
+        slide.identifier, slide.index, slides
+    );
+    report_streams(&doc, out);
+    Ok(())
+}
+
+/// What a write touched, in the shape the other write commands report it.
+fn report_streams(doc: &Document, out: &str) {
+    let changed = doc.changed_streams();
+    println!(
+        "wrote {out} ({} of {} streams rewritten{})",
+        changed.len(),
+        doc.stream_names().count(),
+        match changed.is_empty() {
+            true => String::new(),
+            false => format!(": {}", changed.join(", ")),
+        }
+    );
 }
 
 fn strip_previews(path: &str, out: &str) -> Result<(), Error> {

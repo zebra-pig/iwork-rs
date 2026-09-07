@@ -3636,3 +3636,187 @@ mod tests {
         assert_eq!(&format_date(seconds)[..4], "2024");
     }
 }
+
+// -- adding a table, and a sheet to put one on --------------------------------
+
+/// Field numbers of `TN.SheetArchive` this module writes.
+pub mod sheet_field {
+    /// The sheet's name, as the tab shows it.
+    pub const NAME: u32 = 1;
+    /// `drawable_infos` — every table, chart and shape on the sheet.
+    pub const DRAWABLES: u32 = 2;
+    /// The sheet's style.
+    pub const STYLE: u32 = 22;
+}
+
+/// `TN.DocumentArchive.sheets`.
+const DOCUMENT_SHEETS: u32 = 1;
+
+/// `TN.SheetArchive`.
+pub const TYPE_SHEET: u32 = 2;
+
+/// The style references a `TST.TableModelArchive` carries, in the order
+/// [`crate::create::build_table`] wants them.
+///
+/// A table added to a document uses the styles a table already there uses, so
+/// it looks like its neighbours; only a document with no table at all needs new
+/// ones. The fields are the twenty-six a model names — see FORMAT.md §14.
+fn borrow_table_styles(document: &crate::Document) -> Option<crate::create::TableStyles> {
+    let model = document
+        .objects()
+        .find(|(_, object)| object.message_type() == TYPE_TABLE_MODEL)
+        .map(|(_, object)| object.identifier)?;
+    let archive = document.archive(model).ok()?;
+    let at = |number: u32| {
+        archive
+            .bytes(number)
+            .and_then(reference)
+            .filter(|target| *target != 0)
+    };
+    Some(crate::create::TableStyles {
+        table: at(3)?,
+        cells: [
+            18, 19, 20, 21, 60, 61, 62, 63, 64, 71, 72, 73, 74, 75, 87, 88, 89,
+        ]
+        .iter()
+        .map(|number| at(*number))
+        .collect::<Option<Vec<u64>>>()?,
+        text: [24, 25, 26, 27, 30, 65, 66, 67]
+            .iter()
+            .map(|number| at(*number))
+            .collect::<Option<Vec<u64>>>()?,
+    })
+}
+
+/// Add a table to a sheet that already exists.
+///
+/// The sheet may be named by its object identifier or by its name. Every cell
+/// of the new table can be written from the start, which is the whole reason it
+/// carries a `TileRowInfo` per row.
+pub fn add_table(
+    document: &mut crate::Document,
+    sheet: &str,
+    name: &str,
+    rows: usize,
+    columns: usize,
+) -> Result<u64, crate::Error> {
+    let sheet = find_sheet(document, sheet)?;
+    if document.table(name).is_some() {
+        return Err(crate::Error::Format(format!(
+            "this document already has a table called {name:?}, and two tables of one name is \
+             something the app's own formulas cannot tell apart"
+        )));
+    }
+    let styles = borrow_table_styles(document).ok_or_else(|| {
+        crate::Error::Format(
+            "this document has no table to borrow styles from, and inventing a table style here \
+             would be a style the document never defined"
+                .into(),
+        )
+    })?;
+    // Where the model and the info go: beside the table that lent its styles,
+    // which is the component Numbers keeps them in.
+    let neighbour = document
+        .objects()
+        .find(|(_, object)| object.message_type() == TYPE_TABLE_MODEL)
+        .map(|(_, object)| object.identifier)
+        .expect("borrow_table_styles found one");
+    let seed = seed_from_uuid();
+
+    let mut grow = crate::create::Grow::new(document);
+    let (info, model, info_archive, model_archive) =
+        crate::create::build_table(&mut grow, sheet, name, rows, columns, &styles, seed)?;
+    grow.beside(neighbour, model, TYPE_TABLE_MODEL, &model_archive)?;
+    grow.beside(neighbour, info, TYPE_TABLE_INFO, &info_archive)?;
+    grow.finish()?;
+
+    // The sheet holds the table by its drawable.
+    let mut archive = document.archive(sheet)?;
+    archive.append_in_order(
+        sheet_field::DRAWABLES,
+        crate::pb::Value::Bytes(crate::create::reference_bytes(info)),
+    );
+    document.set_archive_of(sheet, &archive)?;
+    document.declare_external_references();
+    Ok(info)
+}
+
+/// Add a sheet, with one table on it, to a Numbers document.
+pub fn add_sheet(
+    document: &mut crate::Document,
+    name: &str,
+    table: &str,
+    rows: usize,
+    columns: usize,
+) -> Result<u64, crate::Error> {
+    if document.kind() != crate::Kind::Numbers {
+        return Err(crate::Error::Format(
+            "only a Numbers document has sheets".into(),
+        ));
+    }
+    if find_sheet(document, name).is_ok() {
+        return Err(crate::Error::Format(format!(
+            "this document already has a sheet called {name:?}"
+        )));
+    }
+    // The sheet a new one is modelled on: its style, its margins, its zoom.
+    let template = document
+        .objects()
+        .find(|(_, object)| object.message_type() == TYPE_SHEET)
+        .map(|(_, object)| object.identifier)
+        .ok_or_else(|| {
+            crate::Error::Format("this document has no sheet to model a new one on".into())
+        })?;
+    let mut archive = document.archive(template)?;
+    archive.clear(sheet_field::DRAWABLES);
+    archive.set_in_order(
+        sheet_field::NAME,
+        crate::pb::Value::Bytes(name.as_bytes().to_vec()),
+    );
+
+    let mut grow = crate::create::Grow::new(document);
+    let sheet = grow.allocate();
+    grow.beside(template, sheet, TYPE_SHEET, &archive)?;
+    grow.finish()?;
+
+    let root = document.archive(crate::create::ROOT)?;
+    let mut root = root;
+    root.append_in_order(
+        DOCUMENT_SHEETS,
+        crate::pb::Value::Bytes(crate::create::reference_bytes(sheet)),
+    );
+    document.set_archive_of(crate::create::ROOT, &root)?;
+
+    add_table(document, &sheet.to_string(), table, rows, columns)?;
+    Ok(sheet)
+}
+
+/// A sheet by identifier or by name.
+fn find_sheet(document: &crate::Document, wanted: &str) -> Result<u64, crate::Error> {
+    let by_id: Option<u64> = wanted.parse().ok();
+    for (_, object) in document.objects() {
+        if object.message_type() != TYPE_SHEET {
+            continue;
+        }
+        if by_id == Some(object.identifier) {
+            return Ok(object.identifier);
+        }
+        let Ok(archive) = crate::pb::Message::decode(object.payload()) else {
+            continue;
+        };
+        if archive
+            .bytes(sheet_field::NAME)
+            .is_some_and(|raw| String::from_utf8_lossy(raw) == wanted)
+        {
+            return Ok(object.identifier);
+        }
+    }
+    Err(crate::Error::Format(format!("no sheet {wanted:?}")))
+}
+
+/// A table's identities come from one number, so two tables made in the same
+/// second are still two tables.
+fn seed_from_uuid() -> u64 {
+    let hex = crate::metadata::uuid().replace('-', "");
+    u64::from_str_radix(&hex[0..16], 16).unwrap_or(0x9E37_79B9_7F4A_7C15)
+}
