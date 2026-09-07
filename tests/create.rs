@@ -147,13 +147,80 @@ fn paper_sets_the_page_and_nothing_else() {
     assert_eq!(a4.objects().count(), letter.objects().count());
 }
 
-/// The other two apps say so by name rather than writing a broken document.
+/// Keynote says so by name rather than writing a document it will not open.
 #[test]
-fn the_apps_that_cannot_be_created_yet_are_refused_by_name() {
-    for kind in [Kind::Numbers, Kind::Keynote, Kind::Unknown] {
+fn the_app_that_cannot_be_created_yet_is_refused_by_name() {
+    for kind in [Kind::Keynote, Kind::Unknown] {
         let refused = Document::new(kind);
         assert!(refused.is_err(), "{kind:?} should not be creatable yet");
     }
+}
+
+/// A new spreadsheet: one sheet, one table, and every cell of it writable.
+#[test]
+fn a_new_spreadsheet_has_a_table_that_can_be_written_into() {
+    use iwork::table::CellValue;
+
+    let mut doc = Document::new_spreadsheet("Sales", "Q1", 4, 3).unwrap();
+    assert_eq!(doc.kind(), Kind::Numbers);
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+
+    let table = doc.table("Q1").expect("no table");
+    assert_eq!((table.rows, table.columns), (4, 3));
+    assert_eq!(table.sheet.as_deref(), Some("Sales"));
+    assert_eq!(table.cells().len(), 0);
+
+    doc.set_cell("Q1", 0, 0, CellValue::Text("Region".into()))
+        .unwrap();
+    doc.set_cell("Q1", 3, 2, CellValue::Text("last".into()))
+        .unwrap();
+    let table = doc.table("Q1").expect("no table");
+    assert_eq!(table.value(0, 0).to_text(), "Region");
+    assert_eq!(table.value(3, 2).to_text(), "last");
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+}
+
+/// The sizes it will not make, by name.
+#[test]
+fn a_table_with_no_rows_or_too_many_columns_is_refused() {
+    assert!(Document::new_spreadsheet("S", "T", 0, 3).is_err());
+    assert!(Document::new_spreadsheet("S", "T", 3, 0).is_err());
+    assert!(Document::new_spreadsheet("S", "T", 3, 256).is_err());
+    assert!(Document::new_spreadsheet("S", "T", 3, 255).is_ok());
+}
+
+/// The measure that counts, for the spreadsheet. Off unless
+/// `IWORK_APP_CHECK=1`.
+#[test]
+fn numbers_opens_a_spreadsheet_this_crate_made_from_nothing() {
+    if std::env::var("IWORK_APP_CHECK").as_deref() != Ok("1") {
+        eprintln!("IWORK_APP_CHECK is not 1 — skipping the app round trip");
+        return;
+    }
+    let mut doc = Document::new_spreadsheet("Sales", "Q1", 6, 3).unwrap();
+    doc.set_cell(
+        "Q1",
+        0,
+        0,
+        iwork::table::CellValue::Text("Aus dem Nichts".into()),
+    )
+    .unwrap();
+    let out = scratch("iwork-created.numbers");
+    doc.save(&out).unwrap();
+
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/app-check.sh");
+    let output = std::process::Command::new(&script)
+        .arg(&out)
+        .arg("Aus dem Nichts")
+        .output()
+        .unwrap_or_else(|e| panic!("{}: {e}", script.display()));
+    assert!(
+        output.status.success(),
+        "Numbers would not open a spreadsheet made from nothing:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = std::fs::remove_file(&out);
 }
 
 /// The measure that counts. Off unless `IWORK_APP_CHECK=1`.

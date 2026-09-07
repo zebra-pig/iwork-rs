@@ -315,6 +315,20 @@ fn mint_row_uuid(
     }
 }
 
+/// What [`Document::new`] gives a new spreadsheet: the sheet, the table and the
+/// size Numbers' own blank document has.
+const DEFAULT_SHEET: &str = "Sheet 1";
+const DEFAULT_TABLE: &str = "Table 1";
+const DEFAULT_ROWS: usize = 22;
+const DEFAULT_COLUMNS: usize = 7;
+
+/// How wide a table [`Document::new_spreadsheet`] will make.
+///
+/// A row carries 255 cell offsets whatever the table's width — see
+/// [`crate::create`] — and a table wider than that would need an offset array
+/// no document in this corpus has.
+const MAX_COLUMNS: usize = 255;
+
 /// Every slot a cell record can carry a format key in.
 const ALL_SLOTS: [crate::table::FormatSlot; 6] = [
     crate::table::FormatSlot::Number,
@@ -488,6 +502,9 @@ impl Document {
     /// let mut doc = iwork::Document::new(iwork::Kind::Pages)?;
     /// doc.append_paragraph("Hello")?;
     /// doc.save("Hello.pages")?;
+    ///
+    /// let sheet = iwork::Document::new(iwork::Kind::Numbers)?;
+    /// sheet.save("Blank.numbers")?;
     /// # Ok(()) }
     /// ```
     pub fn new(kind: Kind) -> Result<Document, Error> {
@@ -496,8 +513,9 @@ impl Document {
 
     /// [`Document::new`], choosing the paper a Pages document starts on.
     ///
-    /// The other two apps have no paper — a Numbers sheet and a Keynote slide
-    /// are sized in their own archives — so this is [`Document::new`] for them.
+    /// Numbers has no paper — a sheet is sized in its own archive — so this is
+    /// [`Document::new`] for it; [`Document::new_spreadsheet`] is the call that
+    /// takes a spreadsheet's dimensions.
     pub fn new_on(kind: Kind, paper: crate::create::Paper) -> Result<Document, Error> {
         let blueprint = match kind {
             Kind::Pages => crate::create::pages(paper),
@@ -517,7 +535,14 @@ impl Document {
             // [`crate::create::numbers`] and [`crate::create::keynote`] — and
             // neither app opens what they write, so neither is offered. A
             // document the app refuses is worse than no document at all.
-            Kind::Numbers | Kind::Keynote => {
+            Kind::Numbers => {
+                crate::create::numbers(DEFAULT_SHEET, DEFAULT_TABLE, DEFAULT_ROWS, DEFAULT_COLUMNS)
+            }
+            // The Keynote blueprint is written and measured — see
+            // [`crate::create::keynote`] — and Keynote does not open what it
+            // writes, so it is not offered. A document the app refuses is worse
+            // than no document at all.
+            Kind::Keynote => {
                 return Err(Error::Format(format!(
                     "{} documents cannot be created from nothing yet — \
                      Document::from_template can still copy one",
@@ -530,6 +555,11 @@ impl Document {
                 ))
             }
         };
+        Document::assemble(kind, blueprint)
+    }
+
+    /// Turn a finished blueprint into a document.
+    fn assemble(kind: Kind, blueprint: crate::create::Blueprint) -> Result<Document, Error> {
         let mut document = Document::from_package(blueprint.finish())?;
         document.kind = kind;
         // Every reference that leaves the component it is written in has to be
@@ -537,6 +567,48 @@ impl Document {
         // while building them — the same call an edit makes.
         document.declare_external_references();
         Ok(document)
+    }
+
+    /// A new spreadsheet with one sheet and one table of a chosen size.
+    ///
+    /// [`Document::new`] makes the table Numbers itself makes — 22 rows by 7
+    /// columns — and this is for a caller who knows what they are about to put
+    /// in it. Every cell of the table can be written from the start:
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), iwork::Error> {
+    /// use iwork::table::CellValue;
+    /// let mut doc = iwork::Document::new_spreadsheet("Sales", "Q1", 4, 3)?;
+    /// doc.set_cell("Q1", 0, 0, CellValue::Text("Region".into()))?;
+    /// doc.save("Sales.numbers")?;
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// The width is capped at 255 columns, which is the number of cell offsets
+    /// Numbers writes into a row whatever the table's width; a wider table is
+    /// refused rather than written with an offset array this crate has never
+    /// seen the app produce.
+    pub fn new_spreadsheet(
+        sheet: &str,
+        table: &str,
+        rows: usize,
+        columns: usize,
+    ) -> Result<Document, Error> {
+        if rows == 0 || columns == 0 {
+            return Err(Error::Format(
+                "a table needs at least one row and one column".into(),
+            ));
+        }
+        if columns > MAX_COLUMNS {
+            return Err(Error::Format(format!(
+                "{columns} columns: a new table is capped at {MAX_COLUMNS}, the number of cell \
+                 offsets Numbers writes into a row"
+            )));
+        }
+        Document::assemble(
+            Kind::Numbers,
+            crate::create::numbers(sheet, table, rows, columns),
+        )
     }
 
     /// Make a new document out of a template bundle — `.template`,

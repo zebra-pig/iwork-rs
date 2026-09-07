@@ -891,27 +891,28 @@ const DEFAULT_COLUMN_WIDTH: f64 = 98.0;
 
 /// A Numbers document with one sheet and one empty table.
 ///
-/// **Numbers does not open this yet, and [`crate::Document::new`] refuses to
-/// hand it out.** It is kept because most of it is measured rather than
-/// guessed, and the measurements are the expensive part:
+/// Numbers opens it, reports the sheet and the table, and — told to save —
+/// writes the whole thing back with the cells intact. Eighty-two objects, and
+/// every one of them is here because the app was watched insisting on it:
 ///
 /// * A Numbers root needs four things a Pages root does not — a stylesheet, a
 ///   theme, a `TSK` 205 (empty, and required all the same) and a calculation
 ///   engine. Deleting any one of them from a document Numbers wrote makes
 ///   Numbers refuse it.
 /// * `ComponentInfo` field 12 and `PackageMetadata` field 8 are **per app**:
-///   Pages writes 835, Numbers 537, Keynote 2386.
+///   Pages writes 835, Numbers 537, Keynote 2386. Field 7 is `[26, 3, 1]` in
+///   all three, and a document without it opens *empty*.
 /// * Nothing in a Numbers component index is deletable — twenty-five probes,
 ///   not one accepted — where a Pages one gives up 2,450 object-UUID entries at
 ///   once. So the UUID map is written for every document now.
-/// * Every tile, interning list and header bucket is a component of its own.
-///
-/// What is still missing is not known. The app's own object graph, grafted
-/// wholesale into a package this crate wrote, is refused too, which says the
-/// remaining difference is in the package rather than the objects — and the
-/// machine's Numbers stopped opening *any* document before that could be run
-/// down. The reduction to continue from is `REDUCE_OBJECTS=<theme>` against a
-/// document Numbers wrote.
+/// * Every tile, interning list and header bucket is a component of its own,
+///   and the table's info and model live in the `CalculationEngine` component.
+/// * The stylesheet must say `is_locked = false`, and the theme must carry the
+///   style presets the app reaches for when it finds a style missing.
+/// * A `TST.TableModelArchive` names a table style, seventeen cell styles and
+///   eight paragraph styles, one per area of the table; its `DataStore` names
+///   eight interning lists; and its `category_owner_deprecated.owner_uid` has
+///   `lower` and `upper` that are `required` even when they are zero.
 #[allow(dead_code)]
 pub(crate) fn numbers(
     sheet_name: &str,
