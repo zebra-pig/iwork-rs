@@ -43,6 +43,13 @@ use crate::{Kind, Package};
 /// document in the corpus — the apps write one number for the whole file.
 pub(crate) const VERSION: [u32; 3] = [1, 0, 5];
 
+/// `TSP.PackageMetadata` field 7 — `[26, 3, 1]`, packed, and the same in every
+/// document of all three apps.
+///
+/// See [`Blueprint::component_index`] for what leaving it out does, which is not
+/// what leaving out a version usually does.
+const PACKAGE_VERSION: [u8; 3] = [26, 3, 1];
+
 /// `TSP.ComponentInfo.save_token` / `read_version` — `[2, 0, 0]`, packed.
 const COMPONENT_VERSION: [u8; 3] = [2, 0, 0];
 
@@ -435,12 +442,27 @@ impl Blueprint {
             }
             fields.push(nested(3, info));
         }
-        // The package's own version and generation, as every document carries
-        // them. The per-component pair above is deletable and these are not:
-        // a package written without field 5 is refused.
+        // The package's own versions and generation. Three separate numbers,
+        // and each was learned by leaving it out:
+        //
+        // * **Field 5** is the package's save version. Left out, the document is
+        //   refused outright. `[2, 0, 0]`, which is what a Pages package carries
+        //   and what a Numbers one accepts — Numbers' own says `[3, 2, 10]` and
+        //   Keynote's `[2, 4, 0]`, and neither is needed.
+        // * **Field 7** is the one that cost the most. Left out, Numbers opens
+        //   the document, finds the sheet, finds the table — and answers
+        //   `missing value` for every cell in it. Nothing is refused, nothing is
+        //   reported, the document is simply empty. It is `[26, 3, 1]` in Pages,
+        //   Numbers and Keynote alike, so it is written as the constant it is.
+        // * **Field 8** is the format version, and is per app
+        //   ([`component_generation`]).
         fields.push(Field {
             number: 5,
             value: Value::Bytes(COMPONENT_VERSION.to_vec()),
+        });
+        fields.push(Field {
+            number: 7,
+            value: Value::Bytes(PACKAGE_VERSION.to_vec()),
         });
         fields.push(varint(8, component_generation(self.kind)));
 
@@ -919,6 +941,11 @@ pub(crate) fn numbers(
         crate::style::TYPE_LIST_STYLE,
         list_style(stylesheet),
     );
+    // What the stylesheet will list. Numbers, unlike Pages, does not open a
+    // document whose stylesheet is empty: replacing the stylesheet of a
+    // document Numbers wrote with an empty one — and changing nothing else —
+    // is refused.
+    let mut named: Vec<(String, u64)> = vec![("text-0-liststyle-None".to_string(), list)];
 
     // One entry per row and per column: the default size (a literal 0 means
     // "still the table's default"), visible, and no cells yet.
@@ -954,17 +981,18 @@ pub(crate) fn numbers(
     // What the reduction found a Numbers root cannot do without, beyond its
     // sheets: a stylesheet, a theme, a `TSK` 205 (which is *empty* in the
     // document it was measured in), and a calculation engine.
-    blueprint.put(
-        style_component,
-        stylesheet,
-        TYPE_STYLESHEET,
-        message(Vec::new()),
-    );
     let sheet_style = blueprint.add(style_component, TYPE_SHEET_STYLE, sheet_style(stylesheet));
+    named.push(("sheet-0-sheetStyle".to_string(), sheet_style));
     let theme = blueprint.add(document, TYPE_NUMBERS_THEME, numbers_theme(stylesheet));
     let support = blueprint.add(document, TYPE_DOCUMENT_SUPPORT, message(Vec::new()));
-    let engine = blueprint.in_own_component(
-        "CalculationEngine",
+    // The calculation engine's component, which is also where the table lives:
+    // a document Numbers wrote keeps its `TST.TableInfoArchive` and
+    // `TST.TableModelArchive` in `Index/CalculationEngine.iwa`, not in
+    // `Document`. The engine is the component's root.
+    let (engine_component, engine) = blueprint.component("CalculationEngine", false);
+    blueprint.put(
+        engine_component,
+        engine,
         TYPE_CALCULATION_ENGINE,
         message(vec![nested(2, Vec::new())]),
     );
@@ -978,14 +1006,18 @@ pub(crate) fn numbers(
         TYPE_TABLE_STYLE,
         named_style("table-0-tableStyle", stylesheet),
     );
+    named.push(("table-0-tableStyle".to_string(), table_style));
     let cell_styles: Vec<u64> = ["body", "headerRow", "headerColumn", "footerRow"]
         .iter()
         .map(|area| {
-            blueprint.add(
+            let identifier = format!("tableCell-0-{area}Style");
+            let style = blueprint.add(
                 style_component,
                 TYPE_CELL_STYLE,
-                cell_style(&format!("tableCell-0-{area}Style"), stylesheet),
-            )
+                cell_style(&identifier, stylesheet),
+            );
+            named.push((identifier, style));
+            style
         })
         .collect();
     let cell_text = blueprint.add(
@@ -993,21 +1025,44 @@ pub(crate) fn numbers(
         crate::style::TYPE_PARAGRAPH_STYLE,
         paragraph_style(stylesheet, list),
     );
+    named.push((BODY_IDENTIFIER.to_string(), cell_text));
     let shape_style = blueprint.add(
         style_component,
         TYPE_SHAPE_STYLE,
         named_style("shape-0-tableStyle", stylesheet),
     );
+    named.push(("shape-0-tableStyle".to_string(), shape_style));
+    blueprint.put(
+        style_component,
+        stylesheet,
+        TYPE_STYLESHEET,
+        numbers_stylesheet(&named),
+    );
+
+    // A Numbers sheet is a page as well as a container: it carries three header
+    // storages and three footer storages for printing, and a guide storage,
+    // exactly as a Pages section template does. A sheet Numbers wrote has all
+    // seven.
+    let guides = blueprint.add(document, TYPE_GUIDE_STORAGE, message(Vec::new()));
+    let headers: Vec<u64> = (0..6)
+        .map(|_| {
+            blueprint.add(
+                document,
+                TYPE_STORAGE,
+                page_storage(stylesheet, cell_text, list),
+            )
+        })
+        .collect();
 
     let sheet = blueprint.allocate();
     let model = blueprint.allocate();
     let info = blueprint.add(
-        document,
+        engine_component,
         TYPE_TABLE_INFO,
         table_info(sheet, model, rows, columns),
     );
     blueprint.put(
-        document,
+        engine_component,
         model,
         TYPE_TABLE_MODEL,
         table_model(TableParts {
@@ -1030,7 +1085,7 @@ pub(crate) fn numbers(
         document,
         sheet,
         TYPE_SHEET,
-        sheet_archive(sheet_name, info, sheet_style),
+        sheet_archive(sheet_name, info, sheet_style, guides, &headers),
     );
     blueprint.put(
         document,
@@ -1294,8 +1349,8 @@ fn table_id() -> String {
 /// sheet is a *page* as well as a container: field 7 is its zoom, 13 and 14 its
 /// print margins, 22 the style it is drawn with.
 #[allow(dead_code)]
-fn sheet_archive(name: &str, table: u64, style: u64) -> Message {
-    message(vec![
+fn sheet_archive(name: &str, table: u64, style: u64, guides: u64, headers: &[u64]) -> Message {
+    let mut fields = vec![
         string(1, name),
         reference(2, table),
         varint(3, 1),
@@ -1312,8 +1367,46 @@ fn sheet_archive(name: &str, table: u64, style: u64) -> Message {
         reference(22, style),
         varint(23, 1),
         varint(24, 0),
+    ];
+    fields.push(reference(17, guides));
+    for header in headers.iter().take(3) {
+        fields.push(reference(18, *header));
+    }
+    for footer in headers.iter().skip(3) {
+        fields.push(reference(19, *footer));
+    }
+    message(fields)
+}
+
+/// One of a sheet's six header and footer storages: empty, and pointing at the
+/// styles that say what it would look like if it held anything.
+fn page_storage(stylesheet: u64, paragraph: u64, list: u64) -> Message {
+    message(vec![
+        // kind 1: a header.
+        varint(1, 1),
+        reference(2, stylesheet),
+        attribute_table(5, paragraph),
+        nested(
+            6,
+            vec![nested(1, vec![varint(1, 0), varint(2, 0), varint(3, 0)])],
+        ),
+        attribute_table(7, list),
+        varint(10, 1),
+        nested(
+            14,
+            vec![nested(1, vec![varint(1, 0), varint(2, 0), varint(3, 0)])],
+        ),
+        nested(
+            24,
+            vec![nested(1, vec![varint(1, 0), varint(2, 0), varint(3, 0)])],
+        ),
     ])
 }
+
+/// `TSD.GuideStorageArchive` — a sheet's user guides, of which a new sheet has
+/// none.
+#[allow(dead_code)]
+const TYPE_GUIDE_STORAGE: u32 = 3047;
 
 /// `TN.SheetStyleArchive` — a white sheet.
 #[allow(dead_code)]
@@ -1365,14 +1458,83 @@ fn numbers_document(sheet: u64, stylesheet: u64, support: u64, theme: u64, engin
     ])
 }
 
-/// The theme, which for Numbers is little more than a name and a stylesheet.
+/// `TSS.StylesheetArchive` as Numbers writes one: every style twice.
+///
+/// Field 1 lists the styles as plain references; field 2 lists them again as
+/// `{identifier, style}`, which is how the app looks one up by name. Pages
+/// keeps the same pair nested under field 8 and opens a document with neither;
+/// Numbers keeps them at the top level and does not.
+#[allow(dead_code)]
+fn numbers_stylesheet(named: &[(String, u64)]) -> Message {
+    let mut fields: Vec<Field> = named
+        .iter()
+        .map(|(_, style)| reference(1, *style))
+        .collect();
+    for (identifier, style) in named {
+        fields.push(nested(2, vec![string(1, identifier), reference(2, *style)]));
+    }
+    message(fields)
+}
+
+/// The theme: a stylesheet, and the palette every style picks its colours from.
+///
+/// The palette is not decoration. Reducing a theme Numbers wrote gives up its
+/// name, its default-style map and its font map, and stops at **27 colours** —
+/// three of the thirty go and the rest do not. A palette is indexed by
+/// position, which is the obvious reason a shorter one would not do, so this
+/// writes the count the app was watched insisting on.
 #[allow(dead_code)]
 fn numbers_theme(stylesheet: u64) -> Message {
-    message(vec![nested(
-        1,
-        vec![string(3, "Blank"), reference(4, stylesheet)],
-    )])
+    let mut theme = vec![reference(4, stylesheet)];
+    for (red, green, blue) in PALETTE {
+        theme.push(nested(
+            10,
+            vec![
+                varint(1, 1),
+                float(3, *red),
+                float(4, *green),
+                float(5, *blue),
+                float(6, 1.0),
+                varint(12, 1),
+                float(13, 1.0),
+            ],
+        ));
+    }
+    message(vec![nested(1, theme)])
 }
+
+/// Twenty-seven colours: a greyscale ramp and two rows of hues, which is the
+/// shape of the palette the apps ship.
+#[allow(dead_code)]
+const PALETTE: &[(f32, f32, f32)] = &[
+    (1.0, 1.0, 1.0),
+    (0.84, 0.84, 0.84),
+    (0.57, 0.57, 0.57),
+    (0.37, 0.37, 0.37),
+    (0.0, 0.0, 0.0),
+    (0.0, 0.0, 0.0),
+    (0.34, 0.76, 1.0),
+    (0.0, 0.63, 1.0),
+    (0.0, 0.46, 0.73),
+    (0.0, 0.32, 0.51),
+    (0.85, 0.33, 0.31),
+    (0.92, 0.49, 0.19),
+    (0.95, 0.76, 0.20),
+    (0.44, 0.68, 0.28),
+    (0.27, 0.45, 0.77),
+    (0.51, 0.30, 0.63),
+    (0.75, 0.31, 0.51),
+    (0.40, 0.40, 0.40),
+    (0.65, 0.65, 0.65),
+    (0.90, 0.90, 0.90),
+    (0.98, 0.85, 0.85),
+    (0.85, 0.98, 0.85),
+    (0.85, 0.85, 0.98),
+    (0.98, 0.98, 0.85),
+    (0.85, 0.98, 0.98),
+    (0.98, 0.85, 0.98),
+    (0.50, 0.50, 0.50),
+];
 
 /// `TN.ThemeArchive`.
 #[allow(dead_code)]
