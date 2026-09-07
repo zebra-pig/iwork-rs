@@ -519,6 +519,67 @@ demanding, and every field left out is one it was watched not needing.
       cost, and the log-reading that should have come first; README and lib.rs
       no longer promise that nothing here synthesises a document.
 
+## Phase 11 — A second sheet, table or slide
+
+`Document::new` makes a document with one of each and nothing adds another,
+which is the difference between a library that *makes* a document and one that
+*builds* one. Everything needed is already here — `create` knows the archives,
+`duplicate_slide` knows how to add a component to a document that exists — and
+what is missing is the join between them.
+
+- [ ] **`create::Grow`**: allocate identifiers in an existing document, add a
+      component with its `ComponentInfo` (including the object-UUID map Numbers
+      insists on), add objects to a component that already exists, and declare
+      what the new objects point at. Shared with `Blueprint` so a component is
+      written the same way whether the document is new or not.
+- [ ] **`Document::add_slide`** (Keynote): a slide in its own component, a node,
+      and an entry at the end of the show's slide tree. The master is the deck's
+      own, not a new one.
+- [ ] **`Document::add_table`** (Numbers): a table on a sheet that exists,
+      borrowing the styles a table already there uses.
+- [ ] **`Document::add_sheet`** (Numbers): a sheet with a table on it, appended
+      to the document's sheet list.
+- [ ] CLI, tests, and the app round-trip for each: the app opens the document,
+      counts one more sheet/table/slide, and saves it back.
+
+## Phase 12 — Formulas, written
+
+The refusal that has stood since Phase 2, and the reason is not the AST. A
+written formula has to be evaluated before it is saved (the cell caches the
+result), registered in the calculation engine's dependency graph (whose edge
+encoding nobody here has decoded), and — across tables — tracked by UID.
+
+- [ ] Decode the dependency graph: what `TSCE.FormulaOwnerDependenciesArchive`
+      and the cell-record tiles actually hold, and what changes when Numbers is
+      made to add one formula to a document that has none.
+- [ ] Decide what "evaluated" can honestly mean here: a cached value the crate
+      computed, or a cell marked dirty for the app to recalculate. The second is
+      worth trying first — if a formula with no cached value recalculates on
+      open, the evaluator is not needed at all.
+- [ ] Write one formula into one cell, app-verified, and refuse everything the
+      probes do not reach.
+
+## Phase 13 — Drawables from nothing
+
+A shape, a text box, an image, a table on a Pages page. All four are a drawable
+plus its style plus a place in a z-order, and the geometry write path already
+exists.
+
+## Phase 14 — Charts, written
+
+Read thoroughly (§10) and written not at all. The private grid is the easy half;
+the mediator that ties a Numbers chart to its table is the hard one.
+
+## Phase 15 — Columns, and rows in harder tables
+
+`insert_row` handles a plain single-tile table. Columns are unimplemented, and
+so are rows in categorised, filtered, multi-tile, merge-crossing and
+formula-crossing tables — every one a named refusal today.
+
+## Phase 16 — The review layer, authored
+
+Comments, tracked changes, builds and transitions: all read, none written.
+
 ## Verification log
 
 Filled in as phases complete: what was proven, by which test, against which
