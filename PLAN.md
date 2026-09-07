@@ -487,12 +487,13 @@ demanding, and every field left out is one it was watched not needing.
       *(Built in the scratchpad: 569 Pages objects → 11 in 117 probes. It also
       found the "reopen its windows" dialog that had been turning good documents
       into refusals — that fix is committed, the reducer is not.)*
-- [~] **`Document::new(kind)`**: synthesise that graph from code, for Pages
+- [x] **`Document::new(kind)`**: synthesise that graph from code, for Pages
       first, then Numbers, then Keynote. Parameterised where the reduction
       showed a value is free (page size, locale, names), fixed where it showed
-      it is not. *(Pages done and app-verified, with `Paper::A4` and
-      `Paper::Letter` read out of the two Blank templates. Numbers and Keynote
-      are refused by name while their reductions run.)*
+      it is not. *(All three, app-verified: each app opens what it is given and
+      writes the whole document back around it. `Paper::A4`/`Paper::Letter` for
+      Pages, `Document::new_spreadsheet(sheet, table, rows, columns)` for
+      Numbers, 16:9 for Keynote.)*
 - [x] **A test that does not need the app**: ~~the synthesised document and the
       reduced one agree object for object, modulo identity~~. The app round-trip
       stays as the acceptance test, but the suite has to be able to fail
@@ -503,21 +504,46 @@ demanding, and every field left out is one it was watched not needing.
       so that test would have asserted the wrong thing. What is asserted instead
       is what the format fixes: the objects, the declarations, the high-water
       mark, the byte-identical no-op save, a fresh identity per call.)*
-- [~] **Content, the exceljs part**: build a document up through the API that
+- [x] **Content, the exceljs part**: build a document up through the API that
       already exists where it can (`set_text`, `set_cell`, `insert_row`), and
       through new calls where it cannot — a sheet, a table of a given size, a
-      paragraph, a slide. *(`append_paragraph` done, and it works on any Pages
-      document rather than only a new one.)*
-- [~] **CLI**: `iwork create <kind> [paper] <out>` done; the example waits on
-      Numbers.
-- [~] FORMAT.md §14 written for Pages, with the method and the two warnings it
-      cost; README and lib.rs no longer promise that nothing here synthesises a
-      document. Numbers and Keynote still to add.
+      paragraph, a slide. *(`append_paragraph` for Pages, and it works on any
+      Pages document rather than only a new one; `new_spreadsheet` for a table
+      of a chosen size, every cell of which `set_cell` can write — which needed
+      a `TileRowInfo` per row and a format the cell could borrow. What is
+      **not** here: adding a second sheet, a second table or a second slide to
+      a document that already has one.)*
+- [x] **CLI**: `iwork create <kind> [paper] <out>`, `examples/report.rs` and
+      `examples/spreadsheet.rs`.
+- [x] FORMAT.md §14 written for all three, with the method, the two warnings it
+      cost, and the log-reading that should have come first; README and lib.rs
+      no longer promise that nothing here synthesises a document.
 
 ## Verification log
 
 Filled in as phases complete: what was proven, by which test, against which
 fixture, and what the app accepted.
+
+- 2026-09-07 — **Phase 10 closed: all three apps open a document made from
+  nothing.** Numbers and Keynote both fell within an hour of each other, and
+  both to things the app said out loud:
+  - **Numbers** wanted the theme's *style presets*. It had been saying so since
+    the first log capture — "Adding style (TSDMediaStyle*) to locked
+    stylesheet" — and the fix went in for Keynote's sake without noticing it was
+    the same complaint. 82 objects; Numbers opens it, reports the sheet and the
+    table, reads back cells written by `set_cell`, and saves the whole document
+    back around them.
+  - **Keynote** wanted its master slide to have a *name*. Every other candidate
+    was ruled out first: the message type (5 and 6 are the same message),
+    `inDocument` (true on both), the component (`TemplateSlide` against
+    `Slide`), the placeholders. 40 objects.
+  - **A stray untitled document wedges Numbers**, and killing the app then
+    leaves it to be restored, which wedges it again — two hours were lost to
+    that before `close document 1 saving no` in a loop cleared it. Whatever
+    opens a document here should close it.
+  `Document::new_spreadsheet` gives a table of a chosen size whose every cell
+  `set_cell` can write, which needed a `TileRowInfo` per row (Numbers writes
+  none for an empty row) and a format for the first cell to borrow.
 
 - 2026-09-07 — **Phase 10, day two: ask the app.** The oracle had been binary
   for three days — the app opens it or it does not — and it never had to be.
