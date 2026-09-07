@@ -3688,19 +3688,23 @@ fn borrow_table_styles(document: &crate::Document) -> Option<crate::create::Tabl
     })
 }
 
-/// Add a table to a sheet that already exists.
+/// Add a table to a container that already exists — a Numbers sheet, a Keynote
+/// slide or a Pages page.
 ///
-/// The sheet may be named by its object identifier or by its name. Every cell
-/// of the new table can be written from the start, which is the whole reason it
-/// carries a `TileRowInfo` per row.
+/// A table is a drawable, so where it goes and who holds it are
+/// [`crate::drawable::container_of`]'s question, not this one's: a sheet and a
+/// slide own theirs and are named as its parent, a Pages page owns nothing and
+/// names it in a page group. Every cell of the new table can be written from
+/// the start, which is the whole reason it carries a `TileRowInfo` per row.
 pub fn add_table(
     document: &mut crate::Document,
-    sheet: &str,
+    container: &str,
     name: &str,
     rows: usize,
     columns: usize,
+    position: (f32, f32),
 ) -> Result<u64, crate::Error> {
-    let sheet = find_sheet(document, sheet)?;
+    let container = crate::drawable::container_of(document, container)?;
     if document.table(name).is_some() {
         return Err(crate::Error::Format(format!(
             "this document already has a table called {name:?}, and two tables of one name is \
@@ -3715,7 +3719,8 @@ pub fn add_table(
         )
     })?;
     // Where the model and the info go: beside the table that lent its styles,
-    // which is the component Numbers keeps them in.
+    // which is the component the app keeps them in — the calculation engine's,
+    // in both Numbers and Pages.
     let neighbour = document
         .objects()
         .find(|(_, object)| object.message_type() == TYPE_TABLE_MODEL)
@@ -3724,19 +3729,21 @@ pub fn add_table(
     let seed = seed_from_uuid();
 
     let mut grow = crate::create::Grow::new(document);
-    let (info, model, info_archive, model_archive) =
-        crate::create::build_table(&mut grow, sheet, name, rows, columns, &styles, seed)?;
+    let (info, model, info_archive, model_archive) = crate::create::build_table(
+        &mut grow,
+        container.parent(),
+        name,
+        rows,
+        columns,
+        &styles,
+        seed,
+        position,
+    )?;
     grow.beside(neighbour, model, TYPE_TABLE_MODEL, &model_archive)?;
     grow.beside(neighbour, info, TYPE_TABLE_INFO, &info_archive)?;
     grow.finish()?;
 
-    // The sheet holds the table by its drawable.
-    let mut archive = document.archive(sheet)?;
-    archive.append_in_order(
-        sheet_field::DRAWABLES,
-        crate::pb::Value::Bytes(crate::create::reference_bytes(info)),
-    );
-    document.set_archive_of(sheet, &archive)?;
+    crate::drawable::hold(document, &container, info)?;
     document.declare_external_references();
     Ok(info)
 }
@@ -3787,7 +3794,14 @@ pub fn add_sheet(
     );
     document.set_archive_of(crate::create::ROOT, &root)?;
 
-    add_table(document, &sheet.to_string(), table, rows, columns)?;
+    add_table(
+        document,
+        &sheet.to_string(),
+        table,
+        rows,
+        columns,
+        (0.0, 0.0),
+    )?;
     Ok(sheet)
 }
 

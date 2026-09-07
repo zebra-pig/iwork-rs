@@ -508,7 +508,7 @@ const TYPE_DOCUMENT_METADATA: u32 = 11011;
 /// `TSWP.StorageArchive`.
 const TYPE_STORAGE: u32 = 2001;
 /// `TSS.StylesheetArchive`.
-const TYPE_STYLESHEET: u32 = 401;
+pub(crate) const TYPE_STYLESHEET: u32 = 401;
 /// `TSWP.ColumnStyleArchive`.
 const TYPE_COLUMN_STYLE: u32 = 2024;
 /// `TP.DocumentArchive`.
@@ -588,11 +588,35 @@ pub(crate) fn pages(paper: Paper) -> Blueprint {
         TYPE_COLUMN_STYLE,
         column_variation(stylesheet, column),
     );
+    // A text box has to be drawn with something. The app's own themes carry a
+    // whole set of presets; a document with no theme carries the one this
+    // crate can put to use, named the way a theme names it.
+    let text_box_style = blueprint.add(
+        styles,
+        TYPE_SHAPE_STYLE,
+        message(vec![nested(
+            1,
+            vec![nested(
+                1,
+                vec![string(2, TEXT_BOX_IDENTIFIER), reference(5, stylesheet)],
+            )],
+        )]),
+    );
+    // And one for an image, which is drawn with a media style rather than a
+    // shape style — a different archive with different field numbers.
+    let image_style = blueprint.add(
+        styles,
+        TYPE_MEDIA_STYLE,
+        message(vec![nested(
+            1,
+            vec![string(2, IMAGE_IDENTIFIER), reference(5, stylesheet)],
+        )]),
+    );
     blueprint.put(
         styles,
         stylesheet,
         TYPE_STYLESHEET,
-        stylesheet_archive(column, body_column, body_style),
+        stylesheet_archive(column, body_column, body_style, text_box_style, image_style),
     );
 
     // -- the body, and the document that points at it -------------------------
@@ -602,11 +626,26 @@ pub(crate) fn pages(paper: Paper) -> Blueprint {
         TYPE_STORAGE,
         body_storage(stylesheet, body_style, list, body_column),
     );
+    // Nothing floats on a new page, but the archive that would hold it exists
+    // anyway — every Pages document in the corpus has one, empty, and it is
+    // where a text box put on a page has to be named.
+    let floating = blueprint.add(
+        document,
+        crate::pages::TYPE_FLOATING_DRAWABLES,
+        message(vec![]),
+    );
+    // The body flow is itself in the stack, at the bottom: that is what Pages
+    // writes into a document with no drawables at all.
+    let zorder = blueprint.add(
+        document,
+        crate::pages::TYPE_ZORDER,
+        message(vec![reference(1, body)]),
+    );
     blueprint.put(
         document,
         ROOT,
         TYPE_PAGES_DOCUMENT,
-        pages_document(stylesheet, body, paper),
+        pages_document(stylesheet, body, floating, zorder, paper),
     );
     blueprint
 }
@@ -617,7 +656,13 @@ pub(crate) fn pages(paper: Paper) -> Blueprint {
 /// the list of named styles, as references and again as `{identifier, style}`
 /// entries — the keyed form is what the app looks a style up by when it applies
 /// one from the menu.
-fn stylesheet_archive(column: u64, body_column: u64, body_style: u64) -> Message {
+fn stylesheet_archive(
+    column: u64,
+    body_column: u64,
+    body_style: u64,
+    text_box_style: u64,
+    image_style: u64,
+) -> Message {
     message(vec![
         varint(4, 0),
         nested(5, vec![reference(1, column), reference(2, body_column)]),
@@ -626,14 +671,33 @@ fn stylesheet_archive(column: u64, body_column: u64, body_style: u64) -> Message
             8,
             vec![
                 reference(1, body_style),
+                reference(1, text_box_style),
+                reference(1, image_style),
                 nested(
                     2,
                     vec![string(1, BODY_IDENTIFIER), reference(2, body_style)],
+                ),
+                nested(
+                    2,
+                    vec![string(1, TEXT_BOX_IDENTIFIER), reference(2, text_box_style)],
+                ),
+                nested(
+                    2,
+                    vec![string(1, IMAGE_IDENTIFIER), reference(2, image_style)],
                 ),
             ],
         ),
     ])
 }
+
+/// The internal name of the shape style a text box is drawn with, in the shape
+/// a theme names its presets.
+const TEXT_BOX_IDENTIFIER: &str = "textbox-style-preset-0";
+
+/// The same, for the media style an image is drawn with. A
+/// `TSD.MediaStyleArchive` numbers its properties one lower than a shape
+/// style, because it has no fill.
+const IMAGE_IDENTIFIER: &str = "image-style-preset-0";
 
 /// The internal name of the one paragraph style a new document has.
 ///
@@ -811,10 +875,11 @@ fn body_storage(stylesheet: u64, paragraph: u64, list: u64, column: u64) -> Mess
 /// Field 15 is the `TSA.DocumentArchive` every app's document archive is built
 /// on — the locale, the language, and which template this came from. A document
 /// this crate made came from no template, so it says so by leaving field 9 out.
-fn pages_document(stylesheet: u64, body: u64, paper: Paper) -> Message {
+fn pages_document(stylesheet: u64, body: u64, floating: u64, zorder: u64, paper: Paper) -> Message {
     let (width, height, margin, header, footer) = paper.measurements();
     message(vec![
         reference(2, stylesheet),
+        reference(3, floating),
         reference(4, body),
         nested(
             15,
@@ -830,6 +895,7 @@ fn pages_document(stylesheet: u64, body: u64, paper: Paper) -> Message {
                 ],
             )],
         ),
+        reference(20, zorder),
         float(30, width),
         float(31, height),
         float(32, margin),
@@ -1075,7 +1141,7 @@ pub(crate) fn numbers(
     let info = blueprint.add(
         engine_component,
         TYPE_TABLE_INFO,
-        table_info(sheet, model, rows, columns, seed),
+        table_info(Some(sheet), model, rows, columns, (0.0, 0.0), seed),
     );
     blueprint.put(
         engine_component,
@@ -1214,25 +1280,33 @@ const OFFSET_SLOTS: usize = 255;
 ///
 /// Field 1 is the `TSD.DrawableArchive` every placed object begins with: a
 /// geometry and the thing it hangs off, which for a Numbers table is the sheet.
-fn table_info(sheet: u64, model: u64, rows: usize, columns: usize, seed: u64) -> Message {
+fn table_info(
+    parent: Option<u64>,
+    model: u64,
+    rows: usize,
+    columns: usize,
+    position: (f32, f32),
+    seed: u64,
+) -> Message {
     let width = columns as f32 * DEFAULT_COLUMN_WIDTH as f32;
     let height = rows as f32 * DEFAULT_ROW_HEIGHT as f32;
+    let mut drawable = vec![nested(
+        1,
+        vec![
+            nested(1, vec![float(1, position.0), float(2, position.1)]),
+            nested(2, vec![float(1, width), float(2, height)]),
+            varint(3, 3),
+            float(4, 0.0),
+        ],
+    )];
+    // A sheet owns its tables and is named as the parent; a Pages page owns
+    // nothing, and a table floating on one names none — the same rule as
+    // every other drawable.
+    if let Some(parent) = parent {
+        drawable.push(reference(2, parent));
+    }
     message(vec![
-        nested(
-            1,
-            vec![
-                nested(
-                    1,
-                    vec![
-                        nested(1, vec![float(1, 0.0), float(2, 0.0)]),
-                        nested(2, vec![float(1, width), float(2, height)]),
-                        varint(3, 3),
-                        float(4, 0.0),
-                    ],
-                ),
-                reference(2, sheet),
-            ],
-        ),
+        nested(1, drawable),
         reference(2, model),
         // `group_by_uuid` and `hidden_states_uuid`: the identities a category
         // or a filter would hang off. A table that has neither still names
@@ -1531,7 +1605,7 @@ const TYPE_TABLE_STYLE: u32 = 6003;
 /// `TST.CellStyleArchive`.
 const TYPE_CELL_STYLE: u32 = 6004;
 /// `TSWP.ShapeStyleArchive`.
-const TYPE_SHAPE_STYLE: u32 = 2025;
+pub(crate) const TYPE_SHAPE_STYLE: u32 = 2025;
 
 /// `TST.TableModelArchive.table_id` — an uppercase UUID, as Numbers writes it.
 fn table_id() -> String {
@@ -1877,7 +1951,23 @@ pub(crate) fn keynote(slide_size: (f32, f32)) -> Blueprint {
         TYPE_SLIDE_STYLE,
         named_style("slide-style-default", stylesheet),
     );
-    let mut named = vec![("slide-style-default".to_string(), slide_style)];
+    // The two styles any text on a slide needs: what a paragraph looks like,
+    // and the list it is not in.
+    let list = blueprint.add(
+        style_component,
+        crate::style::TYPE_LIST_STYLE,
+        list_style(stylesheet),
+    );
+    let body = blueprint.add(
+        style_component,
+        crate::style::TYPE_PARAGRAPH_STYLE,
+        paragraph_style(stylesheet, list),
+    );
+    let mut named = vec![
+        ("slide-style-default".to_string(), slide_style),
+        ("text-0-liststyle-None".to_string(), list),
+        (BODY_IDENTIFIER.to_string(), body),
+    ];
 
     let presets = theme_presets(&mut blueprint, style_component, stylesheet, &mut named);
     let theme = blueprint.allocate();
@@ -2195,8 +2285,26 @@ impl<'a> Grow<'a> {
         message_type: u32,
         archive: &Message,
     ) -> Result<(), crate::Error> {
-        self.document
-            .add_object_after(neighbour, identifier, message_type, archive)?;
+        self.beside_with(neighbour, identifier, message_type, archive, &[])
+    }
+
+    /// The same, for an object that names media: the identifiers go into the
+    /// object's own `data_references`, which is how the app knows what to load.
+    pub(crate) fn beside_with(
+        &mut self,
+        neighbour: u64,
+        identifier: u64,
+        message_type: u32,
+        archive: &Message,
+        data_references: &[u64],
+    ) -> Result<(), crate::Error> {
+        self.document.add_object_after_with(
+            neighbour,
+            identifier,
+            message_type,
+            archive,
+            data_references,
+        )?;
         if let Some(root) = self.component_of(neighbour) {
             self.joined.push((root, identifier));
         }
@@ -2340,14 +2448,16 @@ pub(crate) struct TableStyles {
 /// place, since where *they* go differs: a new document puts them in the
 /// calculation engine's component, and a document being grown puts them beside
 /// the table that is already there.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_table(
     site: &mut impl Site,
-    sheet: u64,
+    parent: Option<u64>,
     name: &str,
     rows: usize,
     columns: usize,
     styles: &TableStyles,
     seed: u64,
+    position: (f32, f32),
 ) -> Result<(u64, u64, Message, Message), crate::Error> {
     let data_list_component =
         |site: &mut dyn Site, archive: Message| -> Result<u64, crate::Error> {
@@ -2413,7 +2523,7 @@ pub(crate) fn build_table(
         text_styles: &styles.text,
         seed,
     });
-    let info_archive = table_info(sheet, model, rows, columns, seed);
+    let info_archive = table_info(parent, model, rows, columns, position, seed);
     Ok((info, model, info_archive, model_archive))
 }
 
@@ -2441,6 +2551,227 @@ fn object_uuid_entry(object: u64) -> Field {
             nested(2, vec![varint(1, lower), varint(2, upper)]),
         ],
     )
+}
+
+// -- drawables ----------------------------------------------------------------
+
+/// `TSWP.ShapeInfoArchive` — a shape that holds text, which is what a text box
+/// is.
+pub(crate) const TYPE_SHAPE_INFO: u32 = 2011;
+
+/// The elements of the path a shape is drawn along, in its own coordinates.
+///
+/// Element kinds are `TSP.Path.ElementType`: 1 move, 2 line, 4 curve (two
+/// control points and an end point), 5 close. A rectangle is what the app
+/// writes for a text box — move, three lines, close, move — and the curve form
+/// is copied off a freehand drawing Pages wrote, which is where the
+/// three-points-per-curve shape was read.
+fn outline_path(outline: crate::drawable::Outline, width: f32, height: f32) -> Vec<Field> {
+    let point = |x: f32, y: f32| nested(2, vec![float(1, x), float(2, y)]);
+    let element = |kind: u64, x: f32, y: f32| nested(1, vec![varint(1, kind), point(x, y)]);
+    let curve = |c1: (f32, f32), c2: (f32, f32), to: (f32, f32)| {
+        nested(
+            1,
+            vec![
+                varint(1, 4),
+                point(c1.0, c1.1),
+                point(c2.0, c2.1),
+                point(to.0, to.1),
+            ],
+        )
+    };
+    match outline {
+        crate::drawable::Outline::Rectangle => vec![
+            element(1, 0.0, 0.0),
+            element(2, width, 0.0),
+            element(2, width, height),
+            element(2, 0.0, height),
+            nested(1, vec![varint(1, 5)]),
+            element(1, 0.0, 0.0),
+        ],
+        crate::drawable::Outline::Line => vec![element(1, 0.0, 0.0), element(2, width, height)],
+        crate::drawable::Outline::Ellipse => {
+            // The circle-to-Bézier constant: four arcs, each pulled
+            // 0.5522847 of the way along the box, is an ellipse to within a
+            // ten-thousandth of its radius.
+            const K: f32 = 0.552_284_8;
+            let (a, b) = (width / 2.0, height / 2.0);
+            let (kx, ky) = (a * K, b * K);
+            vec![
+                element(1, width, b),
+                curve((width, b + ky), (a + kx, height), (a, height)),
+                curve((a - kx, height), (0.0, b + ky), (0.0, b)),
+                curve((0.0, b - ky), (a - kx, 0.0), (a, 0.0)),
+                curve((a + kx, 0.0), (width, b - ky), (width, b)),
+                nested(1, vec![varint(1, 5)]),
+                element(1, width, b),
+            ]
+        }
+    }
+}
+
+/// A text box: a rectangle, a style, and a storage holding the words.
+///
+/// Four archives deep, like every drawable — `TSWP.ShapeInfo` over `TSD.Shape`
+/// over `TSD.Drawable` — with the rectangle written twice, as the geometry's
+/// size and as the path the shape is drawn along. FORMAT.md §6's rule 14 is
+/// exactly this: a size that appears twice must be written twice.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn text_box(
+    parent: Option<u64>,
+    style: u64,
+    storage: u64,
+    outline: crate::drawable::Outline,
+    position: (f32, f32),
+    size: (f32, f32),
+    wrap: bool,
+) -> Message {
+    let (width, height) = size;
+    let mut drawable = vec![nested(
+        1,
+        vec![
+            nested(1, vec![float(1, position.0), float(2, position.1)]),
+            nested(2, vec![float(1, width), float(2, height)]),
+            varint(3, 3),
+            float(4, 0.0),
+        ],
+    )];
+    // A slide or a sheet owns its drawables and is named as the parent; a
+    // Pages page does not — the page group holds the reference instead, and a
+    // parent pointing at nothing is what makes Pages refuse the document.
+    if let Some(parent) = parent {
+        drawable.push(reference(2, parent));
+    }
+    // Only Pages flows text around a drawable, and only if it says how:
+    // `TSD.ExteriorTextWrapArchive`, copied field for field off a floating box
+    // Pages itself wrote — around both sides, 12pt of margin.
+    if wrap {
+        drawable.push(nested(
+            3,
+            vec![
+                varint(1, 1),
+                varint(2, 2),
+                varint(3, 0),
+                float(4, 12.0),
+                float(5, 0.0),
+                varint(6, 0),
+            ],
+        ));
+    }
+    message(vec![
+        nested(
+            1,
+            vec![
+                nested(1, drawable),
+                reference(2, style),
+                // The path the shape is drawn along.
+                nested(
+                    3,
+                    vec![
+                        varint(1, 0),
+                        varint(2, 0),
+                        nested(
+                            5,
+                            vec![
+                                nested(2, vec![float(1, width), float(2, height)]),
+                                nested(3, outline_path(outline, width, height)),
+                            ],
+                        ),
+                    ],
+                ),
+            ],
+        ),
+        // The storage twice: the field the app reads and the deprecated one it
+        // still writes.
+        reference(2, storage),
+        reference(4, storage),
+        varint(6, 1),
+    ])
+}
+
+/// `TSD.ImageArchive` — a picture, and the rectangle it is drawn in.
+///
+/// One level shallower than a shape: `{1: TSD.DrawableArchive, 3: media style,
+/// 4: originalSize, 7: flags, 9: naturalSize, 11: → the data}`. `naturalSize`
+/// is the picture's own pixels and `originalSize` the rectangle it was placed
+/// at, which for an image placed from nothing are the two things a resize
+/// later has to keep in step (§6).
+pub(crate) fn image(
+    parent: Option<u64>,
+    style: u64,
+    data: u64,
+    position: (f32, f32),
+    size: (f32, f32),
+    natural: (f32, f32),
+    wrap: bool,
+) -> Message {
+    let mut drawable = vec![nested(
+        1,
+        vec![
+            nested(1, vec![float(1, position.0), float(2, position.1)]),
+            nested(2, vec![float(1, size.0), float(2, size.1)]),
+            varint(3, 3),
+            float(4, 0.0),
+        ],
+    )];
+    if let Some(parent) = parent {
+        drawable.push(reference(2, parent));
+    }
+    if wrap {
+        drawable.push(nested(
+            3,
+            vec![
+                varint(1, 1),
+                varint(2, 2),
+                varint(3, 0),
+                float(4, 12.0),
+                float(5, 0.0),
+                varint(6, 0),
+            ],
+        ));
+    }
+    // Every image in the corpus has its aspect ratio locked, and the apps will
+    // not resize one non-proportionally. A new image is written the same way.
+    drawable.push(varint(7, 1));
+    message(vec![
+        nested(1, drawable),
+        reference(3, style),
+        nested(4, vec![float(1, size.0), float(2, size.1)]),
+        varint(7, 0),
+        nested(9, vec![float(1, natural.0), float(2, natural.1)]),
+        reference(11, data),
+        varint(18, 0),
+    ])
+}
+
+/// The `TSWP.StorageArchive` a text box owns: kind 3, and the text in it.
+pub(crate) fn text_box_storage(stylesheet: u64, paragraph: u64, list: u64, text: &str) -> Message {
+    let mut fields = vec![
+        // kind 3: a text box.
+        varint(1, 3),
+        reference(2, stylesheet),
+    ];
+    if !text.is_empty() {
+        fields.push(string(3, text));
+    }
+    fields.extend([
+        attribute_table(5, paragraph),
+        nested(
+            6,
+            vec![nested(1, vec![varint(1, 0), varint(2, 0), varint(3, 0)])],
+        ),
+        attribute_table(7, list),
+        varint(10, 1),
+        nested(
+            14,
+            vec![nested(1, vec![varint(1, 0), varint(2, 0), varint(3, 0)])],
+        ),
+        nested(
+            24,
+            vec![nested(1, vec![varint(1, 0), varint(2, 0), varint(3, 0)])],
+        ),
+    ]);
+    message(fields)
 }
 
 #[cfg(test)]

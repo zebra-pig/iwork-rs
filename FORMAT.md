@@ -1880,6 +1880,90 @@ what was observed whenever the resize is proportional. Every image in the corpus
 has `aspect_ratio_locked` set and the app will not perform a non-proportional
 one, so that case is **Unverified**.
 
+### Writing a drawable from nothing
+
+One archive serves all three apps — `TSWP.ShapeInfoArchive` again — and what
+differs is entirely **who holds it**:
+
+| App | The container's list | The shape's `parent` |
+|---|---|---|
+| Keynote | `KN.SlideArchive` 7 *and* 42 | the slide |
+| Numbers | `TN.SheetArchive` 2 | the sheet |
+| Pages | the page group in `TP.FloatingDrawablesArchive` 1, and `TP.DrawablesZOrderArchive` 1 | **nothing** |
+
+A Pages page owns nothing. Writing a `parent` into a floating shape names an
+object that does not contain it, and the containment iWork stores twice then
+disagrees with itself. Pages is also the only app that flows text around a
+drawable, and it will only do so if the shape says how: a
+`TSD.ExteriorTextWrapArchive` at `DrawableArchive` field 3, `{1: type, 2:
+direction, 3: fit, 4: margin, 5: alpha threshold, 6: is-html}`, copied field for
+field off a box Pages wrote itself.
+
+The page group is `{1: page index (from **zero**), 4: [{1: → drawable}]}`, and a
+page with nothing on it has no group at all — which is why every
+word-processing document in the corpus has an *empty* floating archive and the
+page-layout one has a group per page. A second box on the same page joins the
+group that is already there; a second group for the same index is not something
+the app writes.
+
+Three paths can be written from nothing, because these are the three that can
+be checked: a **rectangle** (six elements, the redundant `moveTo` included), a
+**line** (two), and an **ellipse** — four `curveTo` elements, control points at
+0.5522848 of the half-axis, which is an ellipse to within a ten-thousandth of
+its radius. `curveTo` carries three points: two controls and the end, read off a
+freehand drawing in `pages-layout`. Everything else the app offers is a point or
+scalar path source whose parameters nothing here has decoded, and is not
+offered.
+
+**Nothing is invented.** The style a new shape is drawn with, its stylesheet,
+its paragraph style and its list style are all taken from the document it lands
+in — the style of a text shape already there, failing that the theme's text-box
+preset. A document with none of them is refused by name rather than given an
+invented style it never defined, which is why a Pages document made from nothing
+carries one shape-style preset (`textbox-style-preset-0`) and an empty
+`TP.FloatingDrawablesArchive` from the start.
+
+Verified in all three apps, and past opening: Pages and Keynote both resaved a
+document with a box this crate added, keeping its geometry, its path and its
+text — the box went through the app's own model and came back.
+
+An **image** is the same containment with a different archive:
+`TSD.ImageArchive` (3005), one level shallower than a shape, `{1: Drawable,
+3: media style, 4: originalSize, 7: flags, 9: naturalSize, 11: → the data}`,
+plus three things outside the archive — the bytes under `Data/`, a
+`TSP.DataInfo` in the registry carrying their raw SHA-1 and their length, and
+the identifier in the *object's own* `MessageInfo.data_references` (§3). The
+last is not decoration: without it the picture is registered and pointed at and
+still not declared, which is what `Document::problems` calls out.
+
+**A new object must not inherit its neighbour's `MessageInfo`.** Writing an
+object beside another one borrows the neighbour for its shape; its extras are
+about the neighbour — which media it names (6), which objects (5), and in
+fields 7 to 11 whether it is a *version patch* of another message. Carried
+over, they make a fresh object claim media it does not use and declare itself a
+patch of something unrelated.
+
+A **table** is a drawable as well, and placing one needs nothing new:
+`TST.TableInfoArchive` (6000) is the same archive in Pages as in Numbers, with
+the same `TSD.DrawableArchive` at field 1, so a table floating on a page names
+no parent and the page group names it. What it cannot borrow it will not
+invent — the table styles come from a table the document already has, and a
+document with none is refused.
+
+### A data reference and an object reference are the same bytes
+
+`TSP.Reference` and `TSP.DataReference` are both `{1: identifier}`, the two
+identifier spaces **overlap**, and nothing in the encoding says which is which.
+Keynote settles it by demonstration: resaving a deck this crate wrote, it gave
+a slide thumbnail the *data* identifier 1041 while object 1041 was the image
+placed on the slide — so `KN.SlideNodeArchive.thumbnails` (16) reads, to any
+structural walk, as a reference to that image in another component.
+
+The file itself has the answer, and it is the object's own
+`MessageInfo.data_references`: the identifiers named there are data. Any
+reference check that walks the payload structurally — this crate's included —
+has to subtract them first.
+
 ---
 
 ## 7. Media — `TSP.DataInfo` and the `Data/` directory
@@ -2129,6 +2213,12 @@ bundled templates and 66 across this corpus — 396 header and footer storages �
 and never any other count, which is Pages' three header and three footer
 fields. A *footer* storage is `kind = 1` as well; the
 only thing that makes it a footer is being in field 2.
+
+Three of each, but not always three *storages*: a zone Pages has nothing to put
+in is a **null reference**, `{1: 0}` — object zero, which is no object. Watched
+when Pages resaved a document this crate made from nothing: eighteen null
+zones, six per section template, and the document is one Pages wrote and reads
+back. So a reference is only a promise of an object when it is not zero.
 
 The zone order is **left, centre, right**, and that is *Inferred*: nothing in
 the archive names them, and all three zones of a strip point at the same

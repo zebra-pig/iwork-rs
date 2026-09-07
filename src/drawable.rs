@@ -25,6 +25,14 @@
 //! says 33.86 × 66.28, 511.86 × 466.13 and whose mask says 25.89 × 56.52,
 //! 475 × 383. [`Drawable::frame`] is that composition.
 //!
+//! **A container holds its drawables, and one of the three does not.** A
+//! Keynote slide and a Numbers sheet each list what is on them and are named
+//! as each drawable's `parent`; a Pages page lists them in a page group of
+//! `TP.FloatingDrawablesArchive` and is named by nothing, so a drawable
+//! floating on a page has **no parent at all**. [`add_shape`], [`add_image`]
+//! and the table writer all resolve the container once and let it decide, for
+//! exactly that reason.
+//!
 //! **The style is a separate object, and it inherits.** Opacity, fill, stroke,
 //! shadow and reflection live in a `TSD.ShapeStyleArchive` (or
 //! `TSD.MediaStyleArchive`, whose property numbering is *different*), usually
@@ -1782,4 +1790,455 @@ mod tests {
         assert_eq!(pattern(0, 2, 2.0), StrokePattern::Dashed);
         assert_eq!(pattern(0, 2, 0.0001), StrokePattern::Dotted);
     }
+}
+
+// -- adding a drawable --------------------------------------------------------
+
+/// Where a new drawable can go, and how the container holds it.
+pub(crate) enum Container {
+    /// A Keynote slide: `owned_drawables` (7) and `drawables_z_order` (42).
+    Slide { identifier: u64 },
+    /// A Numbers sheet: `drawable_infos` (2).
+    Sheet { identifier: u64 },
+    /// A Pages page. Nothing owns the drawable — the page group in
+    /// `TP.FloatingDrawablesArchive` names it, and `TP.DrawablesZOrderArchive`
+    /// says where in the stack it sits.
+    Page {
+        floating: u64,
+        zorder: Option<u64>,
+        page: u64,
+    },
+}
+
+impl Container {
+    /// The object the drawable's `parent` points at, if the container is one
+    /// that owns its drawables. A Pages page is not.
+    pub(crate) fn parent(&self) -> Option<u64> {
+        match self {
+            Container::Slide { identifier } | Container::Sheet { identifier } => Some(*identifier),
+            Container::Page { .. } => None,
+        }
+    }
+
+    /// The object a new drawable is written beside, so it lands in the stream
+    /// the app expects to read it from.
+    fn neighbour(&self) -> u64 {
+        match self {
+            Container::Slide { identifier } | Container::Sheet { identifier } => *identifier,
+            Container::Page { floating, .. } => *floating,
+        }
+    }
+}
+
+/// Find what a caller means by a container: a slide (by its archive or its
+/// node), a sheet (by identifier or name), or a page (`page 2`).
+///
+/// Slides first, then sheets, then pages, because only the last is ambiguous
+/// with a bare number — and a document with slides or sheets has no pages to
+/// put anything on.
+pub(crate) fn container_of(
+    document: &crate::Document,
+    wanted: &str,
+) -> Result<Container, crate::Error> {
+    let by_id: Option<u64> = wanted.parse().ok();
+    if let Some(show) = document.show() {
+        for slide in &show.slides {
+            if by_id == Some(slide.identifier) || by_id == Some(slide.node) {
+                return Ok(Container::Slide {
+                    identifier: slide.identifier,
+                });
+            }
+        }
+    }
+    for (_, object) in document.objects() {
+        if object.message_type() != crate::table::TYPE_SHEET {
+            continue;
+        }
+        let Ok(archive) = Message::decode(object.payload()) else {
+            continue;
+        };
+        let named = archive
+            .bytes(crate::table::sheet_field::NAME)
+            .is_some_and(|raw| String::from_utf8_lossy(raw) == wanted);
+        if by_id == Some(object.identifier) || named {
+            return Ok(Container::Sheet {
+                identifier: object.identifier,
+            });
+        }
+    }
+    if let Some(page) = page_of(document, wanted)? {
+        return Ok(page);
+    }
+    Err(crate::Error::Format(format!(
+        "no slide, sheet or page {wanted:?} to put a drawable on"
+    )))
+}
+
+/// A Pages page, named `page 2` or just `2`, counting from one.
+///
+/// Nothing here knows how many pages a document has — laying the text out is
+/// the app's job, and this crate does not do it. So the number is taken on
+/// trust, and a box put past the end is a box the app will not show.
+fn page_of(document: &crate::Document, wanted: &str) -> Result<Option<Container>, crate::Error> {
+    let number = wanted
+        .strip_prefix("page ")
+        .unwrap_or(wanted)
+        .trim()
+        .parse::<u64>();
+    let Ok(page) = number else { return Ok(None) };
+    let Some((_, floating)) = document
+        .objects()
+        .find(|(_, object)| object.message_type() == crate::pages::TYPE_FLOATING_DRAWABLES)
+    else {
+        return Ok(None);
+    };
+    if page == 0 {
+        return Err(crate::Error::Format(
+            "pages are counted from one, so there is no page 0".into(),
+        ));
+    }
+    let floating = floating.identifier;
+    let zorder = document
+        .archive(crate::create::ROOT)
+        .ok()
+        .and_then(|root| reference_at(&root, &[crate::pages::document_field::DRAWABLES_ZORDER, 1]));
+    Ok(Some(Container::Page {
+        floating,
+        zorder,
+        page: page - 1,
+    }))
+}
+
+/// A style a text box can be drawn with, from the document rather than invented.
+///
+/// A shape already on the page is the best answer — the new box then looks like
+/// the ones beside it. Failing that, the theme's text-box preset, which is what
+/// the app itself reaches for when it makes one.
+fn text_box_style(document: &crate::Document) -> Option<u64> {
+    for drawable in document.drawables() {
+        if drawable.text.is_some() {
+            if let Some(style) = drawable.style {
+                return Some(style);
+            }
+        }
+    }
+    document
+        .objects()
+        .find(|(_, object)| object.message_type() == crate::create::TYPE_SHAPE_STYLE)
+        .map(|(_, object)| object.identifier)
+}
+
+/// The styles a new text storage points at: a paragraph style and a list style
+/// the document already has.
+fn text_styles(document: &crate::Document) -> Option<(u64, u64, u64)> {
+    let stylesheet = document
+        .objects()
+        .find(|(_, object)| object.message_type() == crate::create::TYPE_STYLESHEET)
+        .map(|(_, object)| object.identifier)?;
+    let paragraph = document
+        .objects()
+        .find(|(_, object)| object.message_type() == crate::style::TYPE_PARAGRAPH_STYLE)
+        .map(|(_, object)| object.identifier)?;
+    let list = document
+        .objects()
+        .find(|(_, object)| object.message_type() == crate::style::TYPE_LIST_STYLE)
+        .map(|(_, object)| object.identifier)?;
+    Some((stylesheet, paragraph, list))
+}
+
+/// The outline a new shape is drawn along.
+///
+/// Only three, because these are the three whose path this crate can write
+/// from nothing and check: everything else the app offers — a star, a
+/// chevron, a rounded rectangle — is a `TSD.PointPathSourceArchive` or a
+/// `TSD.ScalarPathSourceArchive` whose parameters nothing here has decoded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Outline {
+    /// The box itself, which is what a text box is.
+    #[default]
+    Rectangle,
+    /// An ellipse inscribed in the box.
+    Ellipse,
+    /// A straight line from the top left of the box to the bottom right, so a
+    /// height of zero is a horizontal rule.
+    Line,
+}
+
+/// Put a text box on a Keynote slide, a Numbers sheet or a Pages page.
+///
+/// Everything it points at comes from the document: the style of a text shape
+/// already there (or the theme's text-box preset), the stylesheet, a paragraph
+/// style and a list style. Nothing is invented, which is why the box looks like
+/// the document it lands in.
+///
+/// Returns the `TSWP.ShapeInfoArchive` — the object `iwork drawables` prints
+/// and [`crate::Document::set_geometry`] moves.
+pub fn add_text_box(
+    document: &mut crate::Document,
+    container: &str,
+    text: &str,
+    position: (f32, f32),
+    size: (f32, f32),
+) -> Result<u64, crate::Error> {
+    add_shape(
+        document,
+        container,
+        Outline::Rectangle,
+        text,
+        position,
+        size,
+    )
+}
+
+/// Put a shape on a Keynote slide, a Numbers sheet or a Pages page.
+///
+/// A shape is a text box that is not a rectangle and need hold no text: the
+/// archive is the same one, and the only difference is the path. See
+/// [`add_text_box`] for what it borrows from the document.
+pub fn add_shape(
+    document: &mut crate::Document,
+    container: &str,
+    outline: Outline,
+    text: &str,
+    position: (f32, f32),
+    size: (f32, f32),
+) -> Result<u64, crate::Error> {
+    let flat = size.0 <= 0.0 || size.1 <= 0.0;
+    // A line is allowed to be flat — that is what a horizontal rule is — but
+    // it still has to go somewhere, and a shape with no area is invisible.
+    let empty = match outline {
+        Outline::Line => size.0 == 0.0 && size.1 == 0.0,
+        _ => flat,
+    };
+    if empty || size.0 < 0.0 || size.1 < 0.0 {
+        return Err(crate::Error::Format(format!(
+            "a {} needs a size, and {} × {} is not one",
+            match outline {
+                Outline::Rectangle => "text box",
+                Outline::Ellipse => "shape",
+                Outline::Line => "line",
+            },
+            size.0,
+            size.1
+        )));
+    }
+    let container = container_of(document, container)?;
+    let style = text_box_style(document).ok_or_else(|| {
+        crate::Error::Format(
+            "this document has no shape style to draw a text box with, and inventing one here \
+             would be a style the document never defined"
+                .into(),
+        )
+    })?;
+    let (stylesheet, paragraph, list) = text_styles(document).ok_or_else(|| {
+        crate::Error::Format("this document has no text styles to write text with".into())
+    })?;
+
+    let parent = container.parent();
+    let neighbour = container.neighbour();
+
+    let mut grow = crate::create::Grow::new(document);
+    let storage = grow.allocate();
+    let shape = grow.allocate();
+    grow.beside(
+        neighbour,
+        storage,
+        crate::TYPE_STORAGE,
+        &crate::create::text_box_storage(stylesheet, paragraph, list, text),
+    )?;
+    grow.beside(
+        neighbour,
+        shape,
+        crate::create::TYPE_SHAPE_INFO,
+        &crate::create::text_box(
+            parent,
+            style,
+            storage,
+            outline,
+            position,
+            size,
+            matches!(container, Container::Page { .. }),
+        ),
+    )?;
+    grow.finish()?;
+
+    hold(document, &container, shape)?;
+    document.declare_external_references();
+    Ok(shape)
+}
+
+/// The downward half of containment: the container's own list of what is on
+/// it, which is also the z-order.
+pub(crate) fn hold(
+    document: &mut crate::Document,
+    container: &Container,
+    shape: u64,
+) -> Result<(), crate::Error> {
+    match container {
+        Container::Slide { identifier } => {
+            let identifier = *identifier;
+            let mut archive = document.archive(identifier)?;
+            archive.append_in_order(
+                crate::keynote::slide_field::OWNED_DRAWABLES,
+                Value::Bytes(crate::create::reference_bytes(shape)),
+            );
+            archive.append_in_order(
+                crate::keynote::slide_field::DRAWABLES_Z_ORDER,
+                Value::Bytes(crate::create::reference_bytes(shape)),
+            );
+            document.set_archive_of(identifier, &archive)?;
+        }
+        Container::Sheet { identifier } => {
+            let identifier = *identifier;
+            let mut archive = document.archive(identifier)?;
+            archive.append_in_order(
+                crate::table::sheet_field::DRAWABLES,
+                Value::Bytes(crate::create::reference_bytes(shape)),
+            );
+            document.set_archive_of(identifier, &archive)?;
+        }
+        Container::Page {
+            floating,
+            zorder,
+            page,
+        } => {
+            let (floating, zorder, page) = (*floating, *zorder, *page);
+            let mut archive = document.archive(floating)?;
+            put_on_page(&mut archive, page, shape);
+            document.set_archive_of(floating, &archive)?;
+            if let Some(zorder) = zorder {
+                let mut stack = document.archive(zorder)?;
+                stack.append_in_order(1, Value::Bytes(crate::create::reference_bytes(shape)));
+                document.set_archive_of(zorder, &stack)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A media style the document already has, for an image to be drawn with.
+///
+/// An image already placed is the best answer; failing that the theme's
+/// image preset. A `TSD.MediaStyleArchive` is not a shape style and the two
+/// number their properties differently, so a shape style will not do.
+fn image_style(document: &crate::Document) -> Option<u64> {
+    for drawable in document.drawables() {
+        if drawable.kind == Kind::Image {
+            if let Some(style) = drawable.style {
+                return Some(style);
+            }
+        }
+    }
+    document
+        .objects()
+        .find(|(_, object)| object.message_type() == TYPE_MEDIA_STYLE)
+        .map(|(_, object)| object.identifier)
+}
+
+/// Put an image on a Keynote slide, a Numbers sheet or a Pages page.
+///
+/// The bytes go into the package under `Data/`, a `TSP.DataInfo` is added to
+/// the registry with their SHA-1 and their length, and the drawable points at
+/// it. `size` is the rectangle on the page, in points; passing `None` uses the
+/// picture's own pixel size, which is what the app does when a picture is
+/// dropped at full size.
+///
+/// Only PNG and JPEG, because the pixel size has to be known — the registry
+/// records it and the drawable's `naturalSize` must agree with it, and this
+/// crate reads headers rather than decoding pictures.
+pub fn add_image(
+    document: &mut crate::Document,
+    container: &str,
+    bytes: &[u8],
+    preferred_name: &str,
+    position: (f32, f32),
+    size: Option<(f32, f32)>,
+) -> Result<u64, crate::Error> {
+    let natural = crate::media::pixel_size(bytes).ok_or_else(|| {
+        crate::Error::Format(
+            "the picture is not a PNG or a JPEG, so its pixel size cannot be read here — and              an image whose size the registry does not know is one the app draws wrong"
+                .into(),
+        )
+    })?;
+    let size = size.unwrap_or(natural);
+    if size.0 <= 0.0 || size.1 <= 0.0 {
+        return Err(crate::Error::Format(format!(
+            "an image needs a size, and {} × {} is not one",
+            size.0, size.1
+        )));
+    }
+    let container = container_of(document, container)?;
+    let style = image_style(document).ok_or_else(|| {
+        crate::Error::Format(
+            "this document has no media style to draw an image with, and inventing one here              would be a style the document never defined"
+                .into(),
+        )
+    })?;
+
+    let parent = container.parent();
+    let neighbour = container.neighbour();
+
+    let mut grow = crate::create::Grow::new(document);
+    // The data identifier comes out of the same counter as the objects. A
+    // `DataReference` and an object reference are told apart by where they
+    // sit, not by their value, so sharing the counter is what keeps a data
+    // identifier from ever being read as an object.
+    let data = grow.allocate();
+    let image = grow.allocate();
+    grow.beside_with(
+        neighbour,
+        image,
+        TYPE_IMAGE,
+        &crate::create::image(
+            parent,
+            style,
+            data,
+            position,
+            size,
+            natural,
+            matches!(container, Container::Page { .. }),
+        ),
+        &[data],
+    )?;
+    grow.finish()?;
+
+    document.register_media(data, bytes, preferred_name, natural)?;
+    hold(document, &container, image)?;
+    document.declare_external_references();
+    Ok(image)
+}
+
+/// Name a drawable in a `TP.FloatingDrawablesArchive` page group, making the
+/// group if the page has none yet.
+///
+/// The groups are a repeated field carrying the page index inside them, so
+/// they are not in any particular order and a page with nothing on it has no
+/// group at all — which is why every word-processing document this crate has
+/// read has an *empty* floating archive.
+fn put_on_page(archive: &mut Message, page: u64, shape: u64) {
+    const PAGE_GROUPS: u32 = 1;
+    const PAGE_INDEX: u32 = 1;
+    const DRAWABLES: u32 = 4;
+
+    let entry = crate::create::nested(DRAWABLES, vec![crate::create::reference(1, shape)]);
+    for field in archive
+        .fields
+        .iter_mut()
+        .filter(|f| f.number == PAGE_GROUPS)
+    {
+        let Value::Bytes(raw) = &field.value else {
+            continue;
+        };
+        let Ok(mut group) = Message::decode(raw) else {
+            continue;
+        };
+        if group.varint(PAGE_INDEX).unwrap_or(0) != page {
+            continue;
+        }
+        group.append_in_order(DRAWABLES, entry.value);
+        field.value = Value::Bytes(group.encode());
+        return;
+    }
+    let group = crate::create::message(vec![crate::create::varint(PAGE_INDEX, page), entry]);
+    archive.append_in_order(PAGE_GROUPS, Value::Bytes(group.encode()));
 }

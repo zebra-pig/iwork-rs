@@ -54,8 +54,8 @@ let deck = iwork::Document::new(iwork::Kind::Keynote)?;   // one slide, one mast
 deck.save("Deck.key")?;
 ```
 
-Nine objects go into the Pages document, 82 into the spreadsheet, 40 into the
-deck — against 569, 590 and 1063 in the blank documents the apps themselves
+Thirteen objects go into the Pages document, 82 into the spreadsheet, 42 into
+the deck — against 569, 590 and 1063 in the blank documents the apps themselves
 write. The difference is measurement: a document each app made was reduced one
 field at a time, and where deletion could not answer, the app was *asked* —
 every one of them narrates its document loading to the unified log, naming the
@@ -144,6 +144,10 @@ iwork drawables Talk.key                  # every placed object: geometry, style
 iwork media     Talk.key                  # every media file, its digest and its users
 iwork set-geometry Talk.key 2652464 250 300 400 120 out.key
 iwork replace-media Talk.key 2652622 new.png out.key
+iwork add-text-box Report.pages "page 2" "Randnotiz" 380 120 160 90 out.pages
+iwork add-shape Talk.key 2652176 ellipse "" 200 200 300 200 out.key
+iwork add-image Report.pages "page 3" photo.jpg 380 500 120 90 out.pages
+iwork add-table Report.pages "page 2" Preise 4 3 72 400 out.pages
 
 iwork tables    Budget.numbers            # every table: size, headers, merges, geometry
 iwork cells     Budget.numbers Zellarten  # every cell, with its type and data format
@@ -476,6 +480,61 @@ An honest limit, worth stating plainly: an app round trip proves the document
 opens and that the picture is still where it was. It cannot prove the pixels
 drawn are the new ones — nothing on a locked screen can see what is rendered.
 
+**A drawable can be added where there was none.** `Document::add_text_box` and
+`add_shape` put a box, an ellipse or a line on a Keynote slide, a Numbers sheet
+or a Pages page:
+
+```rust
+let mut doc = iwork::Document::new(iwork::Kind::Pages)?;
+doc.add_text_box("page 1", "Aus dem Nichts", (72.0, 300.0), (400.0, 100.0))?;
+doc.add_shape("page 1", Outline::Line, "", (72.0, 700.0), (400.0, 0.0))?;
+doc.save("Drawn.pages")?;
+```
+
+One archive serves all three apps; what differs is **who holds it**. A slide
+owns its drawables and is named as the shape's parent, a sheet the same — and a
+Pages page owns *nothing*: the page group in `TP.FloatingDrawablesArchive` names
+the shape, the shape names no parent, and it carries the text-wrap archive
+because Pages is the only app that flows text around anything. Three outlines,
+because these are the three whose path can be written and checked: a rectangle
+(with iWork's redundant closing `moveTo`), a line, and an ellipse drawn as four
+Bézier arcs.
+
+**Nothing is invented.** The style the box is drawn with, its stylesheet, its
+paragraph style and its list style all come from the document it lands in — a
+text shape already on it, or the theme's text-box preset — so a box added to a
+themed deck looks like the theme, and a document that has none of them is
+refused by name rather than given a style it never defined. Verified past
+opening: Pages and Keynote both *resaved* a document with an added box, keeping
+its geometry, its path and its words.
+
+**A picture can be placed the same way.** `Document::add_image` copies the
+bytes into the package, registers a `TSP.DataInfo` with their raw SHA-1 and
+their length, and declares the identifier in the object's own
+`data_references` — the last of which is what makes the app load the picture
+rather than draw a hole. PNG and JPEG only, because the registry records the
+pixel size and the drawable's `naturalSize` has to agree with it, and this
+crate reads headers rather than decoding pictures; anything else is refused
+rather than registered with a guess. Pages, Numbers and Keynote all open the
+result, and Pages and Keynote resave it with the bytes intact.
+
+**A table is a drawable too**, so it can be placed the same way:
+`Document::add_table_at` puts one on a Numbers sheet, a Keynote slide or a
+Pages page, and the whole difference between the three is the containment. It
+still borrows the styles of a table the document already has — a document with
+none is refused rather than given an invented table style — so this grows a
+report that has a table, not a Pages file made from nothing. Pages reads the
+new table's cells back and resaves the document with it still floating where it
+was put.
+
+One thing that fell out of asking Keynote: **a data reference and an object
+reference are the same bytes**, `{1: identifier}`, and the two identifier
+spaces overlap. Resaving a deck, Keynote gave a slide thumbnail the *data*
+identifier 1041 while object 1041 was the image on that slide — so a structural
+walk reads the thumbnail as a cross-component reference to the image. The
+object's own `MessageInfo.data_references` is what settles it, and the
+reference checks here subtract it first.
+
 ## What is verified
 
 Everything below is asserted by `cargo test` when you supply fixtures.
@@ -552,6 +611,17 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | **The app reads back the moved rectangle** | — | — | ✅ |
 | Replace an image's bytes; registry and drawables stay in step | — | — | ✅ |
 | A replacement is refused when edit state would make it a lie | ✅ | — | ✅ |
+| Add a text box, an ellipse or a line where there was none | ✅ | ✅ | ✅ |
+| A page's box has no parent; a slide's and a sheet's do | ✅ | ✅ | ✅ |
+| A shape with no size, or a container that is not there, is refused by name | ✅ | ✅ | ✅ |
+| **The app reads back the words in an added box** | ✅ | ✅ | ✅ |
+| **The app resaves a document with an added box, and keeps it** | ✅ | — | ✅ |
+| Place a picture: bytes, registry entry, digest and declaration | ✅ | ✅ | ✅ |
+| A picture whose pixel size cannot be read is refused | ✅ | ✅ | ✅ |
+| A new object claims none of its neighbour's media | ✅ | ✅ | ✅ |
+| **The app resaves a document with an added picture, bytes intact** | ✅ | — | ✅ |
+| Float a table on a Pages page, with every cell writable | ✅ | — | — |
+| **The app reads the new table's cells and resaves it in place** | ✅ | — | — |
 | Formulas: the AST, its 40 node types and 48 function ids in this corpus | ✅ | ✅ | — (no fixture) |
 | Every formula archive re-encodes to the bytes it came from (every one in the corpus) | ✅ | ✅ | ✅ |
 | Every formula validates field by field against the 15.3.1 schema | ✅ | ✅ | ✅ |

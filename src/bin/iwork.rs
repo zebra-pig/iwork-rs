@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::process::ExitCode;
 
+use iwork::drawable::Outline;
 use iwork::pb::{self, Message, Value};
 use iwork::{registry, style, Document, Error};
 
@@ -80,11 +81,27 @@ drawables and media
                                            move or resize one drawable
   iwork replace-media <file> <id> <image> <out>
                                            swap the bytes an image is drawn from
+  iwork add-text-box <file> <where> <text> <x> <y> <w> <h> <out>
+                                           put a text box on a slide, a sheet
+                                           or a page
+  iwork add-shape <file> <where> <outline> <text> <x> <y> <w> <h> <out>
+                                           the same, drawn along <outline>:
+                                           rectangle, ellipse or line
+  iwork add-image <file> <where> <image> <x> <y> [<w> <h>] <out>
+                                           place a PNG or a JPEG, at its own
+                                           pixel size unless given one
 
 An <id> is an object identifier as printed by `iwork drawables`; for
 replace-media it may also be a media identifier as printed by `iwork media`.
 Positions and sizes are in points, and are the rectangle the app reports — for
 a cropped image that is the mask's window, not the picture's own rectangle.
+
+For add-text-box, <where> is a Keynote slide (an object id from `iwork
+slides`), a Numbers sheet (its name or id) or a Pages page (`page 2`, counting
+from one). The box is drawn with a style the document already has — the style
+of a text shape on it, or the theme's text-box preset — so it looks like what
+is around it. A document with no such style is refused rather than given an
+invented one.
 
 tables
 
@@ -102,8 +119,9 @@ tables
   iwork insert-row <file> <table> <at> <out>
                                            insert an empty row before index
                                            <at> (<at> == row count appends)
-  iwork add-table <file> <sheet> <name> <rows> <cols> <out>
-                                           add a table to a sheet that exists
+  iwork add-table <file> <where> <name> <rows> <cols> [<x> <y>] <out>
+                                           add a table to a sheet, a slide or a
+                                           Pages page, at <x>,<y> if given
   iwork add-sheet <file> <name> <table> <rows> <cols> <out>
                                            add a sheet with one table on it
   iwork fill-formula <file> <table> <from> <to> [value] <out>
@@ -284,7 +302,24 @@ fn main() -> ExitCode {
             .and_then(|(rows, columns)| add_sheet(file, name, table, rows, columns, out)),
         ["add-table", file, sheet, name, rows, columns, out] => index(rows)
             .and_then(|rows| Ok((rows, index(columns)?)))
-            .and_then(|(rows, columns)| add_table(file, sheet, name, rows, columns, out)),
+            .and_then(|(rows, columns)| add_table(file, sheet, name, rows, columns, None, out)),
+        ["add-table", file, place, name, rows, columns, x, y, out] => index(rows)
+            .and_then(|rows| Ok((rows, index(columns)?)))
+            .and_then(|(rows, columns)| {
+                add_table(file, place, name, rows, columns, Some((x, y)), out)
+            }),
+        ["add-text-box", file, place, text, x, y, w, h, out] => {
+            add_text_box(file, place, "rectangle", text, x, y, w, h, out)
+        }
+        ["add-shape", file, place, outline, text, x, y, w, h, out] => {
+            add_text_box(file, place, outline, text, x, y, w, h, out)
+        }
+        ["add-image", file, place, image, x, y, out] => {
+            add_image(file, place, image, x, y, None, out)
+        }
+        ["add-image", file, place, image, x, y, w, h, out] => {
+            add_image(file, place, image, x, y, Some((w, h)), out)
+        }
         ["add-slide", file, out] => add_slide(file, None, out),
         ["add-slide", file, layout, out] => add_slide(file, Some(layout), out),
         ["create", kind, out] => create_document(kind, out, None),
@@ -736,16 +771,110 @@ fn add_sheet(
 
 fn add_table(
     path: &str,
-    sheet: &str,
+    container: &str,
     name: &str,
     rows: usize,
     columns: usize,
+    at: Option<(&str, &str)>,
     out: &str,
 ) -> Result<(), Error> {
+    let position = match at {
+        Some((x, y)) => {
+            let number = |raw: &str| {
+                raw.parse::<f32>()
+                    .map_err(|_| Error::Format(format!("{raw}: a position is a number of points")))
+            };
+            (number(x)?, number(y)?)
+        }
+        None => (0.0, 0.0),
+    };
     let mut doc = Document::open(path)?;
-    let table = doc.add_table(sheet, name, rows, columns)?;
+    let table = doc.add_table_at(container, name, rows, columns, position)?;
     doc.save(out)?;
-    println!("added table {name:?} (object {table}) to sheet {sheet}, {rows}×{columns}");
+    println!("added table {name:?} (object {table}) to {container}, {rows}×{columns}");
+    report_streams(&doc, out);
+    Ok(())
+}
+
+/// `iwork add-text-box` — a text box on a slide, a sheet or a page.
+#[allow(clippy::too_many_arguments)]
+fn add_text_box(
+    path: &str,
+    where_: &str,
+    outline: &str,
+    text: &str,
+    x: &str,
+    y: &str,
+    w: &str,
+    h: &str,
+    out: &str,
+) -> Result<(), Error> {
+    let number = |what: &str, raw: &str| {
+        raw.parse::<f32>()
+            .map_err(|_| Error::Format(format!("{raw}: {what} is a number of points")))
+    };
+    let outline = match outline {
+        "rectangle" | "box" => Outline::Rectangle,
+        "ellipse" | "oval" | "circle" => Outline::Ellipse,
+        "line" | "rule" => Outline::Line,
+        other => {
+            return Err(Error::Format(format!(
+                "{other}: an outline is rectangle, ellipse or line"
+            )))
+        }
+    };
+    let position = (number("a position", x)?, number("a position", y)?);
+    let size = (number("a size", w)?, number("a size", h)?);
+    let mut doc = Document::open(path)?;
+    let shape = doc.add_shape(where_, outline, text, position, size)?;
+    doc.save(out)?;
+    let what = match outline {
+        Outline::Rectangle if text.is_empty() => "rectangle",
+        Outline::Rectangle => "text box",
+        Outline::Ellipse => "ellipse",
+        Outline::Line => "line",
+    };
+    println!(
+        "added {what} {shape} at {},{} — {} × {}",
+        position.0, position.1, size.0, size.1
+    );
+    report_streams(&doc, out);
+    Ok(())
+}
+
+/// `iwork add-image` — a picture on a slide, a sheet or a page.
+fn add_image(
+    path: &str,
+    where_: &str,
+    image: &str,
+    x: &str,
+    y: &str,
+    size: Option<(&str, &str)>,
+    out: &str,
+) -> Result<(), Error> {
+    let number = |what: &str, raw: &str| {
+        raw.parse::<f32>()
+            .map_err(|_| Error::Format(format!("{raw}: {what} is a number of points")))
+    };
+    let position = (number("a position", x)?, number("a position", y)?);
+    let size = match size {
+        Some((w, h)) => Some((number("a size", w)?, number("a size", h)?)),
+        None => None,
+    };
+    let bytes = std::fs::read(image).map_err(|e| Error::Format(format!("{image}: {e}")))?;
+    let name = std::path::Path::new(image)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "image".to_string());
+    let mut doc = Document::open(path)?;
+    let drawable = doc.add_image(where_, &bytes, &name, position, size)?;
+    doc.save(out)?;
+    println!(
+        "added image {drawable} at {},{} — {} byte(s) as {name}",
+        position.0,
+        position.1,
+        bytes.len()
+    );
     report_streams(&doc, out);
     Ok(())
 }

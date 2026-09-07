@@ -578,11 +578,61 @@ encoding nobody here has decoded), and — across tables — tracked by UID.
 an AST — there is no parser and no encoder — so every formula written is one the
 document already had somewhere.)*
 
-## Phase 13 — Drawables from nothing
+## Phase 13 — Drawables from nothing — **done**
 
 A shape, a text box, an image, a table on a Pages page. All four are a drawable
 plus its style plus a place in a z-order, and the geometry write path already
 exists.
+
+- [x] A text box on a Keynote slide, a Numbers sheet and a Pages page.
+      *(`Document::add_text_box`. One archive — `TSWP.ShapeInfoArchive` — for
+      all three; what differs is who holds it. A slide owns its drawables
+      (`owned_drawables` and `drawables_z_order`) and is named as the shape's
+      parent; a sheet owns them the same way at `drawable_infos`; a Pages page
+      owns **nothing** — the page group in `TP.FloatingDrawablesArchive` names
+      the shape, the shape names no parent, and it carries a
+      `TSD.ExteriorTextWrapArchive` because only Pages flows text around
+      anything. Verified in all three apps, and through a resave in Pages and
+      Keynote: both loaded the box into their own model and wrote it back
+      where it was.)*
+- [x] Three outlines rather than one. *(`Outline::{Rectangle, Ellipse, Line}`,
+      because these are the three whose `TSP.Path` this crate can write and
+      check: a rectangle is move–line–line–line–close–move, a line is two
+      elements, an ellipse is four `curveTo`s at 0.5522848 of the box. The
+      rest of the app's shapes are point or scalar path sources whose
+      parameters nothing here has decoded.)*
+- [x] Borrow, never invent. *(Every style, stylesheet, paragraph style and list
+      style a new shape points at comes from the document it lands in — the
+      style of a text shape already there, or the theme's text-box preset — so
+      a box added to a themed document looks like the theme. A document with
+      none of them is refused by name. A Pages document made from nothing now
+      carries one shape-style preset and an empty floating-drawables archive,
+      so it has both.)*
+- [x] An image: the bytes, the registry entry, the declaration.
+      *(`Document::add_image`. Three things outside the archive — the file
+      under `Data/`, a `TSP.DataInfo` with the raw SHA-1 and the byte length,
+      and the identifier in the object's own `MessageInfo.data_references`,
+      without which the picture is registered, pointed at and still not
+      declared. PNG and JPEG only: the registry records the pixel size and the
+      drawable's `naturalSize` must agree with it. All three apps open it;
+      Pages and Keynote resave it with the bytes intact.)*
+- [x] Two bugs the image work turned up, both now fixed and written down.
+      *(**A new object inherited its neighbour's `MessageInfo`** — its data
+      references, its object references, and fields 7–11, which say a message
+      is a version patch of another. **A data reference and an object
+      reference are the same bytes**, `{1: identifier}`, and the spaces
+      overlap: Keynote resaved a deck giving a thumbnail the data identifier
+      1041 while object 1041 was the image, and the reference check read it as
+      a cross-component reference. The object's own `data_references` settles
+      it.)*
+- [x] A table on a Pages page. *(`Document::add_table_at`. A table is a
+      drawable like any other, so the whole difference from the Numbers case
+      is the containment: `TST.TableInfoArchive` names no parent and the page
+      group names it. It still borrows a table already in the document for its
+      styles — a document with none is refused by name, which is why this
+      works on the report fixture and not on a Pages document made from
+      nothing. Pages reads the cells back and resaves the document with the
+      table still floating at 72, 400 on page 2.)*
 
 ## Phase 14 — Charts, written
 

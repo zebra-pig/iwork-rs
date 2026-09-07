@@ -3970,8 +3970,25 @@ impl Document {
         rows: usize,
         columns: usize,
     ) -> Result<u64, Error> {
+        self.add_table_at(sheet, name, rows, columns, (0.0, 0.0))
+    }
+
+    /// The same, anywhere a drawable can go — a Numbers sheet, a Keynote
+    /// slide or a Pages page (`page 2`) — at a position in points.
+    ///
+    /// A table is a drawable like any other, so the containment rules are the
+    /// ones in [`Document::add_text_box`]: a sheet and a slide own theirs and
+    /// are named as the parent, a page owns nothing.
+    pub fn add_table_at(
+        &mut self,
+        container: &str,
+        name: &str,
+        rows: usize,
+        columns: usize,
+        position: (f32, f32),
+    ) -> Result<u64, Error> {
         check_table_size(rows, columns)?;
-        crate::table::add_table(self, sheet, name, rows, columns)
+        crate::table::add_table(self, container, name, rows, columns, position)
     }
 
     /// Add a sheet, with one table on it, to a Numbers document.
@@ -3988,6 +4005,140 @@ impl Document {
     ) -> Result<u64, Error> {
         check_table_size(rows, columns)?;
         crate::table::add_sheet(self, name, table, rows, columns)
+    }
+
+    /// Put a text box on a Keynote slide, a Numbers sheet or a Pages page.
+    ///
+    /// The container is named by identifier, a sheet by its name, or a page as
+    /// `page 2`, counting from one; the position and size are in points, as
+    /// everything geometric here is. What the box is drawn with comes from the
+    /// document — the style of a text shape already on it, or the theme's
+    /// text-box preset — so a box added to a deck made from a theme looks like
+    /// the theme.
+    ///
+    /// Returns the drawable, which [`Document::set_geometry`] can then move.
+    pub fn add_text_box(
+        &mut self,
+        container: &str,
+        text: &str,
+        position: (f32, f32),
+        size: (f32, f32),
+    ) -> Result<u64, Error> {
+        crate::drawable::add_text_box(self, container, text, position, size)
+    }
+
+    /// Put an image on a Keynote slide, a Numbers sheet or a Pages page.
+    ///
+    /// The bytes are copied into the package and registered; `size` is the
+    /// rectangle in points, and `None` draws the picture at its own pixel
+    /// size. PNG and JPEG only — see [`crate::drawable::add_image`].
+    pub fn add_image(
+        &mut self,
+        container: &str,
+        bytes: &[u8],
+        preferred_name: &str,
+        position: (f32, f32),
+        size: Option<(f32, f32)>,
+    ) -> Result<u64, Error> {
+        crate::drawable::add_image(self, container, bytes, preferred_name, position, size)
+    }
+
+    /// Add a file to the package and a `TSP.DataInfo` naming it to the media
+    /// registry.
+    ///
+    /// The registry is refcounted (§7), so this is the allocating half of what
+    /// [`Document::replace_media`] rewrites in place: a fresh identifier, the
+    /// raw SHA-1 of the bytes, the two names, the byte length, and the pixel
+    /// size in the image attributes the app reads it from.
+    pub(crate) fn register_media(
+        &mut self,
+        data: u64,
+        bytes: &[u8],
+        preferred_name: &str,
+        pixel_size: (f32, f32),
+    ) -> Result<String, Error> {
+        use crate::media::field as data_field;
+
+        let metadata = self
+            .objects()
+            .find(|(_, object)| object.message_type() == crate::TYPE_PACKAGE_METADATA)
+            .map(|(_, object)| object.identifier)
+            .ok_or_else(|| Error::Format("no TSP.PackageMetadata".into()))?;
+        let stored = crate::media::stored_name(preferred_name, data);
+        let digest = crate::media::sha1(bytes);
+
+        let mut info = Message::default();
+        info.set_in_order(data_field::IDENTIFIER, Value::Varint(data));
+        info.set_in_order(data_field::DIGEST, Value::Bytes(digest.to_vec()));
+        info.set_in_order(
+            data_field::PREFERRED_FILE_NAME,
+            Value::Bytes(preferred_name.as_bytes().to_vec()),
+        );
+        info.set_in_order(
+            data_field::FILE_NAME,
+            Value::Bytes(stored.as_bytes().to_vec()),
+        );
+        // `TSP.DataAttributes { 100: TSD.ImageDataAttributes { 1: size } }` —
+        // the extension is how a picture's pixels get recorded at all, and
+        // `replace_media` will not update a size the entry does not carry.
+        let size = crate::pb::Message {
+            fields: vec![crate::pb::Field {
+                number: 1,
+                value: Value::Bytes(
+                    crate::pb::Message {
+                        fields: vec![
+                            crate::pb::Field {
+                                number: 1,
+                                value: Value::Fixed32(pixel_size.0.to_le_bytes()),
+                            },
+                            crate::pb::Field {
+                                number: 2,
+                                value: Value::Fixed32(pixel_size.1.to_le_bytes()),
+                            },
+                        ],
+                    }
+                    .encode(),
+                ),
+            }],
+        };
+        info.set_in_order(
+            data_field::ATTRIBUTES,
+            Value::Bytes(
+                crate::pb::Message {
+                    fields: vec![crate::pb::Field {
+                        number: data_field::IMAGE_ATTRIBUTES,
+                        value: Value::Bytes(size.encode()),
+                    }],
+                }
+                .encode(),
+            ),
+        );
+        info.set_in_order(
+            data_field::MATERIALIZED_LENGTH,
+            Value::Varint(bytes.len() as u64),
+        );
+
+        let mut archive = self.archive_of(metadata)?;
+        archive.append_in_order(4, Value::Bytes(info.encode()));
+        self.set_archive(metadata, &archive)?;
+        self.package.set(&format!("Data/{stored}"), bytes.to_vec());
+        Ok(stored)
+    }
+
+    /// Put a shape on a Keynote slide, a Numbers sheet or a Pages page.
+    ///
+    /// The same archive as [`Document::add_text_box`] with a different path,
+    /// and the text may be empty. See [`crate::drawable::Outline`] for the
+    /// three outlines this crate can draw.
+    pub fn add_shape(
+        &mut self,
+        container: &str,
+        outline: crate::drawable::Outline,
+        text: &str,
+        position: (f32, f32),
+        size: (f32, f32),
+    ) -> Result<u64, Error> {
+        crate::drawable::add_shape(self, container, outline, text, position, size)
     }
 
     /// Add a slide to the end of a Keynote deck.
@@ -4722,6 +4873,11 @@ impl Document {
                 .entry((entry.section_template, entry.footer))
                 .or_default() += 1;
             match self.object(entry.storage) {
+                // A zone Pages has nothing to put in is a **null reference** —
+                // `{1: 0}`, object zero, which is no object. Watched: Pages
+                // resaving a document made from nothing writes three of those
+                // per section template rather than three empty storages.
+                _ if entry.storage == 0 => {}
                 Some((_, object)) if object.message_type() == crate::TYPE_STORAGE => {
                     let kind = Message::decode(object.payload())
                         .ok()
@@ -4829,7 +4985,6 @@ impl Document {
     ///   both ways and the pair is meaningless if they disagree.
     /// * **A drawable's parent exists.**
     fn media_problems(&self) -> Vec<String> {
-        use crate::pb::Reader;
         let mut problems = Vec::new();
         let files = self.data_files();
         let known: BTreeSet<u64> = files.iter().map(|f| f.identifier).collect();
@@ -4907,7 +5062,7 @@ impl Document {
                     _ => None,
                 })
                 .flat_map(|raw| {
-                    let mut reader = Reader::new(raw);
+                    let mut reader = crate::pb::Reader::new(raw);
                     let mut out = Vec::new();
                     while !reader.done() {
                         match reader.varint() {
@@ -5028,6 +5183,30 @@ impl Document {
     /// documents of this corpus it reports **zero** undeclared references,
     /// because iWork already declares every one of the rest.
     pub fn undeclared_references(&self) -> Vec<(u64, u64, u64)> {
+        /// `MessageInfo.data_references` (6), packed varints, over every
+        /// message of one object.
+        fn data_references(object: &crate::iwa::ArchiveObject) -> BTreeSet<u64> {
+            let mut out = BTreeSet::new();
+            for field in object
+                .messages
+                .iter()
+                .flat_map(|message| message.extra.iter())
+                .filter(|field| field.number == 6)
+            {
+                let Value::Bytes(raw) = &field.value else {
+                    continue;
+                };
+                let mut reader = crate::pb::Reader::new(raw);
+                while !reader.done() {
+                    match reader.varint() {
+                        Ok(value) => out.insert(value),
+                        Err(_) => break,
+                    };
+                }
+            }
+            out
+        }
+
         let Some(index) = self.component_index() else {
             return Vec::new();
         };
@@ -5044,7 +5223,20 @@ impl Document {
             }
             targets.sort_unstable();
             targets.dedup();
+            // A `TSP.DataReference` is `{1: identifier}` and so is a
+            // `TSP.Reference`: nothing in the bytes tells them apart, and the
+            // two identifier spaces overlap. Keynote proves it — resaving a
+            // deck this crate wrote, it gave a slide thumbnail the *data*
+            // identifier 1041 while object 1041 was an image, and
+            // `KN.SlideNodeArchive.thumbnails` (16) then read as a reference
+            // to that image in another component. The file settles it: the
+            // object's own `MessageInfo.data_references` names which of these
+            // identifiers are data.
+            let data = data_references(object);
             for target in targets {
+                if data.contains(&target) {
+                    continue;
+                }
                 let Some(&to) = index.by_object.get(&target) else {
                     continue;
                 };
@@ -5296,6 +5488,23 @@ impl Document {
         message_type: u32,
         archive: &Message,
     ) -> Result<(), Error> {
+        self.add_object_after_with(neighbour, identifier, message_type, archive, &[])
+    }
+
+    /// The same, declaring the media the new object refers to.
+    ///
+    /// `MessageInfo.data_references` (6) is the object's own list of the
+    /// `TSP.DataInfo` identifiers its payload names, and an image that does not
+    /// declare its picture is a document `Document::problems` calls out —
+    /// rightly, since the app uses the list to decide what to load.
+    pub(crate) fn add_object_after_with(
+        &mut self,
+        neighbour: u64,
+        identifier: u64,
+        message_type: u32,
+        archive: &Message,
+        data_references: &[u64],
+    ) -> Result<(), Error> {
         if self.object(identifier).is_some() {
             return Err(Error::Format(format!(
                 "object {identifier} is already in the document"
@@ -5306,13 +5515,31 @@ impl Document {
             .ok_or(Error::NoSuchObject(neighbour))?;
         let mut object = self.streams[&stream][index].clone();
         object.identifier = identifier;
+        // The neighbour is borrowed for its *shape*, not its contents. Its
+        // `ArchiveInfo` and `MessageInfo` extras are about the neighbour —
+        // which objects and which media it names, and, in fields 7 to 11,
+        // whether it is a version patch of something. Carrying those onto a
+        // new object claims media it does not use and makes it a patch of a
+        // message that has nothing to do with it.
+        object.extra.clear();
         object.messages.truncate(1);
         let message = object
             .messages
             .first_mut()
             .ok_or_else(|| Error::Format(format!("object {neighbour} carries no message")))?;
+        message.extra.clear();
         message.message_type = message_type;
         message.payload = archive.encode();
+        if !data_references.is_empty() {
+            let mut packed = Vec::new();
+            for data in data_references {
+                crate::pb::write_varint(&mut packed, *data);
+            }
+            message.extra.push(crate::pb::Field {
+                number: 6,
+                value: Value::Bytes(packed),
+            });
+        }
         self.streams
             .get_mut(&stream)
             .expect("stream came from the document")
