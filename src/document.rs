@@ -4676,6 +4676,47 @@ impl Document {
         crate::drawable::add_shape(self, container, outline, text, position, size)
     }
 
+    /// Attach a comment to a range of text.
+    ///
+    /// The range is in UTF-16 code units and half-open. See
+    /// [`crate::annotations::add_comment`] for what it writes and what it
+    /// refuses.
+    pub fn add_comment(
+        &mut self,
+        storage: u64,
+        start: u64,
+        end: u64,
+        edit: &crate::annotations::CommentEdit,
+    ) -> Result<u64, Error> {
+        crate::annotations::add_comment(self, storage, start, end, edit)
+    }
+
+    /// Animate a drawable on or off a slide.
+    ///
+    /// See [`crate::keynote::add_build`]: the effect is a *build* identifier,
+    /// not a transition one, and the drawable has to be on the slide.
+    pub fn add_build(
+        &mut self,
+        slide: u64,
+        drawable: u64,
+        edit: &crate::keynote::BuildEdit,
+    ) -> Result<u64, Error> {
+        crate::keynote::add_build(self, slide, drawable, edit)
+    }
+
+    /// Give a slide a transition, or take its transition away.
+    ///
+    /// See [`crate::keynote::set_transition`]: the effect may be named the way
+    /// `iwork slides` prints it or by its archive identifier, and `"none"`
+    /// removes it.
+    pub fn set_transition(
+        &mut self,
+        slide: u64,
+        edit: &crate::keynote::TransitionEdit,
+    ) -> Result<crate::keynote::Transition, Error> {
+        crate::keynote::set_transition(self, slide, edit)
+    }
+
     /// Add a slide to the end of a Keynote deck.
     ///
     /// Drawn from one of the deck's own layouts — `None` takes the first, which

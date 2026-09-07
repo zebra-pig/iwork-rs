@@ -32,6 +32,8 @@ metadata, identity and the review layer
   iwork metadata  <file>                   Properties.plist, DocumentIdentifier,
                                            build history, locale, template,
                                            custom-format list, encryption
+  iwork add-comment <file> <storage> <start> <end> <author> <text> <out>
+                                           attach a comment to a range of text
   iwork annotations <file>                 annotation authors, comments and
                                            their anchors, tracked changes
   iwork duplicate <file> <out>             save a copy with a *new* document
@@ -62,9 +64,13 @@ ship. The templates are in
 `/Applications/<App>.app/Contents/SharedSupport/Templates`, and a document made
 from one there records which one it came from.
 
-Nothing in this repository's corpus has a comment or a tracked change and no
-app's scripting dictionary will make one, so `iwork annotations` reports the
-author storage every document has, and would report the rest if it ever met it.
+No app's scripting dictionary has a comment command, so the fixtures with one
+were made through the Insert menu on an unlocked screen. `iwork add-comment`
+writes one: the comment, its author (added to the document's one author storage
+if that name is not there yet) and the two entries in the storage's run-anchored
+`table_highlight` — the anchor at <start>, and the bare index at <end> that ends
+the run. It refuses a storage carrying tracked changes, a range past the end of
+the text, an empty range, and an overlap with a comment already there.
 
 Character indices — <at>, <from>, <to> — are UTF-16 code units, the unit iWork
 counts text in, so an emoji is two, and ranges are half-open. An edit that
@@ -199,6 +205,13 @@ Keynote decks
                                            copy a slide, straight after it
   iwork add-slide <file> [layout] <out>    add an empty slide at the end, drawn
                                            from one of the deck's layouts
+  iwork effects                            every transition effect, by name and
+                                           by the identifier the archive holds
+  iwork set-transition <file> <slide> <effect> [<duration> [<delay>]] <out>
+                                           give a slide a transition; `none`
+                                           takes its transition away
+  iwork add-build <file> <slide> <drawable> in|out [<effect>] <out>
+                                           animate a drawable on or off
 
 All Keynote-only; a Pages or Numbers document has no `KN.ShowArchive` and they
 say so. A <slide> is the object id `iwork slides` prints, either the slide's or
@@ -313,6 +326,18 @@ fn main() -> ExitCode {
         }
         ["metadata", file] => metadata(file),
         ["annotations", file] => annotations(file),
+        ["add-comment", file, storage, start, end, author, text, out] => identifier(storage)
+            .and_then(|storage| {
+                let range = |raw: &str| {
+                    raw.parse::<u64>().map_err(|_| {
+                        Error::Format(format!("{raw}: a text position is a whole number"))
+                    })
+                };
+                Ok((storage, range(start)?, range(end)?))
+            })
+            .and_then(|(storage, start, end)| {
+                add_comment(file, storage, start, end, author, text, out)
+            }),
         ["duplicate", file, out] => duplicate(file, out),
         ["new", template, out] => new_document(template, out),
         ["fill-formula", file, table, from, to, out] => {
@@ -344,6 +369,29 @@ fn main() -> ExitCode {
         ["add-image", file, place, image, x, y, w, h, out] => {
             add_image(file, place, image, x, y, Some((w, h)), out)
         }
+        ["effects"] => {
+            for (name, wire) in iwork::keynote::EFFECTS {
+                println!("  {name:<28} {wire}");
+            }
+            Ok(())
+        }
+        ["set-transition", file, slide, effect, out] => {
+            identifier(slide).and_then(|slide| set_transition(file, slide, effect, None, None, out))
+        }
+        ["set-transition", file, slide, effect, duration, out] => identifier(slide)
+            .and_then(|slide| set_transition(file, slide, effect, Some(duration), None, out)),
+        ["set-transition", file, slide, effect, duration, delay, out] => identifier(slide)
+            .and_then(|slide| {
+                set_transition(file, slide, effect, Some(duration), Some(delay), out)
+            }),
+        ["add-build", file, slide, drawable, kind, out] => identifier(slide)
+            .and_then(|slide| Ok((slide, identifier(drawable)?)))
+            .and_then(|(slide, drawable)| add_build(file, slide, drawable, kind, None, out)),
+        ["add-build", file, slide, drawable, kind, effect, out] => identifier(slide)
+            .and_then(|slide| Ok((slide, identifier(drawable)?)))
+            .and_then(|(slide, drawable)| {
+                add_build(file, slide, drawable, kind, Some(effect), out)
+            }),
         ["add-slide", file, out] => add_slide(file, None, out),
         ["add-slide", file, layout, out] => add_slide(file, Some(layout), out),
         ["create", kind, out] => create_document(kind, out, None),
@@ -898,6 +946,118 @@ fn add_image(
         position.0,
         position.1,
         bytes.len()
+    );
+    report_streams(&doc, out);
+    Ok(())
+}
+
+/// `iwork set-transition` — the effect a slide is left by.
+fn set_transition(
+    path: &str,
+    slide: u64,
+    effect: &str,
+    duration: Option<&str>,
+    delay: Option<&str>,
+    out: &str,
+) -> Result<(), Error> {
+    let seconds = |what: &str, raw: Option<&str>| match raw {
+        Some(raw) => raw
+            .parse::<f64>()
+            .map(Some)
+            .map_err(|_| Error::Format(format!("{raw}: {what} is a number of seconds"))),
+        None => Ok(None),
+    };
+    let edit = iwork::keynote::TransitionEdit {
+        effect: effect.to_string(),
+        duration: seconds("a duration", duration)?,
+        delay: seconds("a delay", delay)?,
+        ..Default::default()
+    };
+    let mut doc = Document::open(path)?;
+    let now = doc.set_transition(slide, &edit)?;
+    doc.save(out)?;
+    if now.is_none() {
+        println!("slide {slide} now leaves with no transition");
+    } else {
+        println!(
+            "slide {slide} now leaves with {} ({}), {}s, {}",
+            iwork::keynote::effect_name(&now.effect).unwrap_or("an effect this crate cannot name"),
+            now.effect,
+            now.duration,
+            if now.automatic {
+                format!("automatic after {}s", now.delay)
+            } else {
+                "on click".to_string()
+            }
+        );
+    }
+    report_streams(&doc, out);
+    Ok(())
+}
+
+/// `iwork add-comment` — a comment on a range of text.
+fn add_comment(
+    path: &str,
+    storage: u64,
+    start: u64,
+    end: u64,
+    author: &str,
+    text: &str,
+    out: &str,
+) -> Result<(), Error> {
+    let mut doc = Document::open(path)?;
+    let comment = doc.add_comment(
+        storage,
+        start,
+        end,
+        &iwork::annotations::CommentEdit {
+            author: author.to_string(),
+            text: text.to_string(),
+        },
+    )?;
+    doc.save(out)?;
+    println!("added comment {comment} on storage {storage}, characters {start}..{end}");
+    report_streams(&doc, out);
+    Ok(())
+}
+
+/// `iwork add-build` — a drawable animated on or off a slide.
+fn add_build(
+    path: &str,
+    slide: u64,
+    drawable: u64,
+    kind: &str,
+    effect: Option<&str>,
+    out: &str,
+) -> Result<(), Error> {
+    use iwork::keynote::{BuildEdit, BuildKind};
+    let kind = match kind {
+        "in" | "In" => BuildKind::In,
+        "out" | "Out" => BuildKind::Out,
+        other => {
+            return Err(Error::Format(format!(
+                "{other}: a build is `in` (onto the slide) or `out` (off it)"
+            )))
+        }
+    };
+    let mut doc = Document::open(path)?;
+    let build = doc.add_build(
+        slide,
+        drawable,
+        &BuildEdit {
+            kind,
+            effect: effect.unwrap_or_default().to_string(),
+            ..Default::default()
+        },
+    )?;
+    doc.save(out)?;
+    println!(
+        "added build {build}: drawable {drawable} animates {} with {}",
+        match kind {
+            BuildKind::In => "onto the slide",
+            BuildKind::Out => "off the slide",
+        },
+        effect.unwrap_or_else(|| kind.default_effect())
     );
     report_streams(&doc, out);
     Ok(())

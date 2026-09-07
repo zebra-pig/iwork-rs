@@ -1494,3 +1494,394 @@ fn keynote_saves_the_deck_with_the_slide_this_crate_copied() {
     assert!(after.problems().is_empty(), "{:?}", after.problems());
     let _ = std::fs::remove_file(&out);
 }
+
+// -- writing a transition ----------------------------------------------------
+
+/// The effect, its duration and its trigger, written and read back.
+///
+/// **A transition belongs to the slide it leaves**, so this is the slide the
+/// audience is looking at when the effect runs. Two objects carry it: the
+/// slide's `transition` (4) and the node's `has_transition` (7), and a deck
+/// with one but not the other plays what its outline does not show.
+#[test]
+fn a_slide_can_be_given_a_transition() {
+    let path = fixture!("keynote-deck.key");
+    let mut doc = Document::open(&path).unwrap();
+    let slide = doc.slides()[0].identifier;
+    assert!(
+        doc.slides()[0].transition.is_none(),
+        "the deck starts plain"
+    );
+
+    let now = doc
+        .set_transition(
+            slide,
+            &iwork::keynote::TransitionEdit {
+                effect: "object cube".into(),
+                duration: Some(1.5),
+                automatic: Some(true),
+                delay: Some(0.25),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(now.effect, "apple:ca-cube");
+    assert_eq!(now.duration, 1.5);
+    assert_eq!(now.delay, 0.25);
+    assert!(now.automatic);
+
+    let read = doc.slides()[0].transition.clone();
+    assert_eq!(read, now, "what was written is what is read back");
+    assert!(read.seed != 0, "a transition carries a seed");
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+
+    // The node's flag, which is the app's own navigator's answer.
+    let node = doc.slides()[0].node;
+    let archive = doc.archive(node).unwrap();
+    assert_eq!(archive.varint(7), Some(1), "has_transition");
+}
+
+/// The identifier and the printed name are the same thing to the writer.
+#[test]
+fn an_effect_can_be_named_either_way() {
+    let path = fixture!("keynote-deck.key");
+    for spelling in ["dissolve", "apple:dissolve", "Dissolve"] {
+        let mut doc = Document::open(&path).unwrap();
+        let slide = doc.slides()[0].identifier;
+        let now = doc
+            .set_transition(
+                slide,
+                &iwork::keynote::TransitionEdit {
+                    effect: spelling.into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(now.effect, "apple:dissolve", "{spelling}");
+        assert_eq!(now.duration, 1.0, "the app's own default for every effect");
+    }
+}
+
+/// An effect Keynote does not have is refused by name rather than written as a
+/// string the app will silently ignore.
+#[test]
+fn an_effect_that_does_not_exist_is_refused() {
+    let path = fixture!("keynote-deck.key");
+    let mut doc = Document::open(&path).unwrap();
+    let slide = doc.slides()[0].identifier;
+    let refusal = doc
+        .set_transition(
+            slide,
+            &iwork::keynote::TransitionEdit {
+                effect: "teleport".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(refusal.contains("44 effects"), "{refusal}");
+    assert!(doc.changed_streams().is_empty(), "a refusal wrote nothing");
+}
+
+/// **`transition` is a required field of `KN.SlideArchive`.** "No transition"
+/// is not the field's absence — Keynote refuses to parse a slide without it,
+/// and the whole component then fails to load. What the app writes is the same
+/// message with the effect `"none"`, and so does this.
+#[test]
+fn no_transition_is_written_as_none_rather_than_removed() {
+    let path = fixture!("keynote-transitions.key");
+    let mut doc = Document::open(&path).unwrap();
+    let slide = doc.slides()[1].identifier;
+    assert!(!doc.slides()[1].transition.is_none(), "it starts with one");
+
+    let now = doc
+        .set_transition(
+            slide,
+            &iwork::keynote::TransitionEdit {
+                effect: "none".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(now.is_none());
+
+    let archive = doc.archive(slide).unwrap();
+    let holder = archive
+        .bytes(iwork::keynote::slide_field::TRANSITION)
+        .and_then(pb::decode_nested)
+        .expect("the field is still there, because the app requires it");
+    let attributes = holder
+        .bytes(iwork::keynote::transition_field::ATTRIBUTES)
+        .and_then(pb::decode_nested)
+        .expect("and it still holds attributes");
+    let animation = attributes
+        .bytes(iwork::keynote::transition_field::ANIMATION_ATTRIBUTES)
+        .and_then(pb::decode_nested)
+        .expect("and animation attributes");
+    assert_eq!(
+        animation
+            .bytes(iwork::keynote::transition_field::EFFECT)
+            .map(|raw| String::from_utf8_lossy(raw).into_owned()),
+        Some("none".to_string())
+    );
+    let node = doc.slides()[1].node;
+    assert_eq!(doc.archive(node).unwrap().varint(7), Some(0));
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+}
+
+/// The `custom_*` parameters belong to the effect that wrote them.
+///
+/// Magic Move's "fade unmatched objects" means nothing to a dissolve, so
+/// changing the effect drops the block; keeping the effect keeps it.
+#[test]
+fn the_parameters_belong_to_the_effect() {
+    let path = fixture!("keynote-transitions.key");
+    let with_parameters = Document::open(&path)
+        .unwrap()
+        .slides()
+        .into_iter()
+        .find(|s| !s.transition.parameters.is_empty())
+        .expect("the fixture has one");
+
+    // Same effect: the parameters stay.
+    let mut doc = Document::open(&path).unwrap();
+    let now = doc
+        .set_transition(
+            with_parameters.identifier,
+            &iwork::keynote::TransitionEdit {
+                effect: with_parameters.transition.effect.clone(),
+                duration: Some(3.0),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(now.duration, 3.0);
+    assert_eq!(now.parameters, with_parameters.transition.parameters);
+
+    // A different effect: they go.
+    let mut doc = Document::open(&path).unwrap();
+    let now = doc
+        .set_transition(
+            with_parameters.identifier,
+            &iwork::keynote::TransitionEdit {
+                effect: "dissolve".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(
+        now.parameters.is_empty(),
+        "a dissolve kept another effect's parameters: {:?}",
+        now.parameters
+    );
+}
+
+/// Keynote opens a deck this crate gave a transition, and writes it back with
+/// the transition still on it. Off unless `IWORK_APP_CHECK=1`.
+#[test]
+fn keynote_resaves_a_transition_this_crate_wrote() {
+    if std::env::var("IWORK_APP_CHECK").as_deref() != Ok("1") {
+        eprintln!("IWORK_APP_CHECK is not 1 — skipping the app round trip");
+        return;
+    }
+    let path = fixture!("keynote-transitions.key");
+    let mut doc = Document::open(&path).unwrap();
+    let given = doc.slides()[0].identifier;
+    let taken = doc.slides()[1].identifier;
+    doc.set_transition(
+        given,
+        &iwork::keynote::TransitionEdit {
+            effect: "dissolve".into(),
+            duration: Some(2.5),
+            automatic: Some(true),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    doc.set_transition(
+        taken,
+        &iwork::keynote::TransitionEdit {
+            effect: "none".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let out = temp("iwork-transition.key");
+    let _ = std::fs::remove_dir_all(&out);
+    doc.save(&out).unwrap();
+    let status = std::process::Command::new(script("resave.sh"))
+        .arg(&out)
+        .status()
+        .unwrap_or_else(|e| panic!("resave.sh: {e}"));
+    assert!(status.success(), "Keynote would not resave the deck");
+
+    let after = Document::open(&out).unwrap();
+    let slides = after.slides();
+    let given = slides.iter().find(|s| s.identifier == given).unwrap();
+    assert_eq!(given.transition.effect, "apple:dissolve");
+    assert_eq!(given.transition.duration, 2.5);
+    assert!(given.transition.automatic);
+    let taken = slides.iter().find(|s| s.identifier == taken).unwrap();
+    assert!(
+        taken.transition.is_none(),
+        "Keynote put a transition back: {:?}",
+        taken.transition.effect
+    );
+    assert!(after.problems().is_empty(), "{:?}", after.problems());
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+// -- writing a build ----------------------------------------------------------
+
+/// A build is two objects and two lists: the `KN.BuildArchive` in the slide's
+/// `builds`, and the `KN.BuildChunkArchive` in its `buildChunks`, which is the
+/// order the app plays them in. The node's three counters are what the
+/// navigator shows.
+#[test]
+fn a_drawable_can_be_animated_onto_a_slide() {
+    let path = fixture!("keynote-deck.key");
+    let mut doc = Document::open(&path).unwrap();
+    let slide = doc.slides()[0].identifier;
+    let shape = doc
+        .add_text_box(
+            &slide.to_string(),
+            "Baut sich auf",
+            (100.0, 100.0),
+            (600.0, 120.0),
+        )
+        .unwrap();
+
+    let build = doc
+        .add_build(slide, shape, &iwork::keynote::BuildEdit::default())
+        .unwrap();
+
+    let read = doc.slides()[0].clone();
+    assert_eq!(read.builds.len(), 1);
+    assert_eq!(read.build_chunks.len(), 1, "one chunk per build event");
+    let it = read
+        .builds
+        .iter()
+        .find(|b| b.identifier == build)
+        .expect("the build reads back");
+    assert_eq!(it.drawable, Some(shape));
+    assert_eq!(it.animation.animation_type, "In");
+    assert_eq!(it.animation.effect, "apple:dissolve character");
+    assert_eq!(it.animation.duration, 1.0);
+    assert_eq!(it.delivery, "All at Once");
+    assert!(
+        it.unknown_attributes.is_empty(),
+        "the writer wrote a field the reader cannot name: {:?}",
+        it.unknown_attributes
+    );
+
+    let node = doc.archive(read.node).unwrap();
+    assert_eq!(node.varint(6), Some(1), "has_builds");
+    assert_eq!(node.varint(20), Some(1), "has_explicit_builds");
+    assert_eq!(node.varint(15), Some(1), "build_event_count");
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+    assert!(doc.undeclared_references().is_empty());
+}
+
+/// A build animates something the slide owns. One naming a drawable from
+/// somewhere else animates nothing and says nothing about it either.
+#[test]
+fn a_build_on_a_drawable_the_slide_does_not_own_is_refused() {
+    let path = fixture!("keynote-deck.key");
+    let mut doc = Document::open(&path).unwrap();
+    let slide = doc.slides()[0].identifier;
+    let elsewhere = doc.slides().iter().skip(1).find_map(|s| {
+        doc.archive(s.identifier).ok().and_then(|a| {
+            a.fields
+                .iter()
+                .find(|f| f.number == 7)
+                .and_then(|f| match &f.value {
+                    iwork::pb::Value::Bytes(raw) => {
+                        iwork::pb::decode_nested(raw).and_then(|m| m.varint(1))
+                    }
+                    _ => None,
+                })
+        })
+    });
+    let Some(elsewhere) = elsewhere else {
+        eprintln!("no drawable on another slide — skipping");
+        return;
+    };
+    let refusal = doc
+        .add_build(slide, elsewhere, &iwork::keynote::BuildEdit::default())
+        .unwrap_err()
+        .to_string();
+    assert!(refusal.contains("is not on slide"), "{refusal}");
+    assert!(doc.changed_streams().is_empty(), "a refusal wrote nothing");
+}
+
+/// A build-out says so, and takes the other default effect.
+#[test]
+fn a_build_out_says_out() {
+    let path = fixture!("keynote-deck.key");
+    let mut doc = Document::open(&path).unwrap();
+    let slide = doc.slides()[0].identifier;
+    let shape = doc
+        .add_text_box(&slide.to_string(), "Geht ab", (0.0, 0.0), (100.0, 40.0))
+        .unwrap();
+    let build = doc
+        .add_build(
+            slide,
+            shape,
+            &iwork::keynote::BuildEdit {
+                kind: iwork::keynote::BuildKind::Out,
+                duration: Some(2.0),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let slide = doc.slides().into_iter().next().unwrap();
+    let it = slide.builds.iter().find(|b| b.identifier == build).unwrap();
+    assert_eq!(it.animation.animation_type, "Out");
+    assert_eq!(it.animation.effect, "apple:bc-appear");
+    assert_eq!(it.animation.duration, 2.0);
+}
+
+/// Keynote opens a deck with a build this crate authored and writes it back
+/// with the build on it. Off unless `IWORK_APP_CHECK=1`.
+#[test]
+fn keynote_resaves_a_build_this_crate_wrote() {
+    if std::env::var("IWORK_APP_CHECK").as_deref() != Ok("1") {
+        eprintln!("IWORK_APP_CHECK is not 1 — skipping the app round trip");
+        return;
+    }
+    let path = fixture!("keynote-deck.key");
+    let mut doc = Document::open(&path).unwrap();
+    let slide = doc.slides()[0].identifier;
+    let shape = doc
+        .add_text_box(
+            &slide.to_string(),
+            "Baut sich auf",
+            (100.0, 100.0),
+            (600.0, 120.0),
+        )
+        .unwrap();
+    doc.add_build(slide, shape, &iwork::keynote::BuildEdit::default())
+        .unwrap();
+
+    let out = temp("iwork-build.key");
+    let _ = std::fs::remove_dir_all(&out);
+    doc.save(&out).unwrap();
+    let status = std::process::Command::new(script("resave.sh"))
+        .arg(&out)
+        .status()
+        .unwrap_or_else(|e| panic!("resave.sh: {e}"));
+    assert!(status.success(), "Keynote would not resave the deck");
+
+    let after = Document::open(&out).unwrap();
+    let build = after
+        .slides()
+        .into_iter()
+        .flat_map(|s| s.builds)
+        .find(|b| b.drawable == Some(shape))
+        .expect("Keynote dropped the build");
+    assert_eq!(build.animation.effect, "apple:dissolve character");
+    assert_eq!(build.animation.animation_type, "In");
+    assert!(after.problems().is_empty(), "{:?}", after.problems());
+    let _ = std::fs::remove_dir_all(&out);
+}

@@ -2446,3 +2446,405 @@ mod tests {
         assert_eq!(decoded.unknown_attributes, vec![99]);
     }
 }
+
+// -- writing a transition -----------------------------------------------------
+
+/// What a transition is to become. `None` in a field keeps what the slide has,
+/// or takes the app's own default when it has none.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TransitionEdit {
+    /// The effect, by the name [`effect_name`] prints or by the identifier the
+    /// archive holds — `"dissolve"` and `"apple:dissolve"` are the same thing.
+    /// `"none"` removes the transition.
+    pub effect: String,
+    /// Seconds. The app writes 1.0 for every one of the 44 effects.
+    pub duration: Option<f64>,
+    /// Seconds before it starts.
+    pub delay: Option<f64>,
+    /// Advance without a click.
+    pub automatic: Option<bool>,
+    /// Which way it travels. **Keynote's own writer never emits this**, and 0 —
+    /// the effect's own default — is what every effect set from a script
+    /// carries; the non-zero values are known only from decks its PowerPoint
+    /// importer wrote. Setting one is therefore writing a field the app does
+    /// not, which is why it is opt-in rather than defaulted.
+    pub direction: Option<u64>,
+}
+
+/// The duration the app gives every one of the 44 effects.
+const DEFAULT_TRANSITION_DURATION: f64 = 1.0;
+
+/// Give a slide a transition, or take its transition away.
+///
+/// **A transition belongs to the slide it leaves** — Keynote plays it on the
+/// way *out* — so this is the slide the audience is looking at when the effect
+/// runs, not the one it reveals.
+///
+/// Two objects change: the `KN.SlideArchive`'s `transition` (4), and the
+/// `KN.SlideNodeArchive`'s `has_transition` (7), which is the flag the app's
+/// own navigator reads. Writing one without the other gives a deck that plays
+/// a transition the outline does not show, or shows one it does not play.
+///
+/// **The parameters belong to the effect.** `custom_bounce`, `custom_twist`,
+/// the Magic Move settings and the rest sit beside the animation attributes and
+/// mean nothing to a different effect, so changing the effect drops them rather
+/// than carrying them across; keeping the same effect keeps them. The random
+/// seed is kept when there is one and minted when there is not — the app copies
+/// it verbatim through its own duplicate, so it is an identity, not a nonce.
+pub fn set_transition(
+    document: &mut crate::Document,
+    slide: u64,
+    edit: &TransitionEdit,
+) -> Result<Transition, Error> {
+    // Naming a slide by its node is what `iwork slides` prints and what every
+    // other write here accepts, and the *slide* archive is what carries the
+    // transition — so resolve one to the other before touching anything.
+    let (node, _) = slide_node_in_deck(document, slide)?;
+    let slide = reference(&document.archive(node)?, node_field::SLIDE)
+        .ok_or_else(|| Error::Format(format!("slide node {node} names no slide")))?;
+    let mut archive = document.archive(slide)?;
+    let wire = transition_identifier(&edit.effect)?;
+
+    let was = transition(&archive);
+    let existing = archive
+        .bytes(slide_field::TRANSITION)
+        .and_then(decode_nested)
+        .and_then(|t| {
+            t.bytes(transition_field::ATTRIBUTES)
+                .and_then(decode_nested)
+        });
+
+    let set_has_transition = |document: &mut crate::Document, has: bool| -> Result<(), Error> {
+        let mut node_archive = document.archive(node)?;
+        node_archive.set(node_field::HAS_TRANSITION, Value::Varint(u64::from(has)));
+        document.set_archive_of(node, &node_archive)
+    };
+
+    // **`transition` is a required field of `KN.SlideArchive`.** Removing it is
+    // not "no transition": Keynote refuses to parse the slide at all — "Cannot
+    // parse message of type KN.SlideArchive because it is missing required
+    // fields: transition", and then the whole component fails to load. What
+    // the app writes for a slide with no transition is the same message with
+    // the effect `"none"` in it, which is what this writes too.
+
+    // The animation attributes, in the order and the shape the app writes them.
+    let mut animation = Message::default();
+    animation.set_in_order(
+        transition_field::ANIMATION_TYPE,
+        Value::Bytes(b"Transition".to_vec()),
+    );
+    animation.set_in_order(
+        transition_field::EFFECT,
+        Value::Bytes(wire.as_bytes().to_vec()),
+    );
+    animation.set_in_order(
+        transition_field::DURATION,
+        Value::Fixed64(
+            edit.duration
+                .or(Some(was.duration).filter(|_| !was.is_none()))
+                .unwrap_or(DEFAULT_TRANSITION_DURATION)
+                .to_le_bytes(),
+        ),
+    );
+    if let Some(direction) = edit.direction {
+        animation.set_in_order(transition_field::DIRECTION, Value::Varint(direction));
+    }
+    animation.set_in_order(
+        transition_field::DELAY,
+        Value::Fixed64(edit.delay.unwrap_or(was.delay).to_le_bytes()),
+    );
+    animation.set_in_order(
+        transition_field::AUTOMATIC,
+        Value::Varint(u64::from(edit.automatic.unwrap_or(was.automatic))),
+    );
+    animation.set_in_order(
+        transition_field::SEED,
+        Value::Varint(match was.seed {
+            0 => transition_seed(slide),
+            seed => seed,
+        }),
+    );
+    animation.set_in_order(transition_field::RTL, Value::Varint(u64::from(was.rtl)));
+
+    let mut attributes = Message::default();
+    attributes.set_in_order(
+        transition_field::ANIMATION_ATTRIBUTES,
+        Value::Bytes(animation.encode()),
+    );
+    // The `custom_*` block: kept only when the effect is the one it was written
+    // for. A bounce on a dissolve is not a bounce, it is a field the app has to
+    // ignore or misread — and "no transition" carries none at all.
+    if wire != "none" && was.effect == wire_of(&edit.effect) {
+        if let Some(existing) = &existing {
+            for field in &existing.fields {
+                if field.number != transition_field::ANIMATION_ATTRIBUTES {
+                    attributes.set_in_order(field.number, field.value.clone());
+                }
+            }
+        }
+    }
+
+    let mut holder = Message::default();
+    holder.set_in_order(
+        transition_field::ATTRIBUTES,
+        Value::Bytes(attributes.encode()),
+    );
+    archive.set_in_order(slide_field::TRANSITION, Value::Bytes(holder.encode()));
+    document.set_archive_of(slide, &archive)?;
+    set_has_transition(document, wire != "none")?;
+
+    Ok(transition(&archive))
+}
+
+/// The archive identifier an effect is written as, from either spelling.
+fn transition_identifier(effect: &str) -> Result<String, Error> {
+    let wanted = effect.trim();
+    if let Some((_, wire)) = EFFECTS
+        .iter()
+        .find(|(name, wire)| name.eq_ignore_ascii_case(wanted) || *wire == wanted)
+    {
+        return Ok((*wire).to_string());
+    }
+    Err(Error::Format(format!(
+        "{effect:?} is not one of the {} effects Keynote offers — `iwork effects` lists them, \
+         by name and by the identifier the archive holds",
+        EFFECTS.len()
+    )))
+}
+
+/// The same lookup, for comparing against what a slide already carries.
+fn wire_of(effect: &str) -> String {
+    transition_identifier(effect).unwrap_or_else(|_| effect.to_string())
+}
+
+/// A `random_number_seed` for a slide that has none.
+///
+/// The app copies this verbatim through its own duplicate, so it identifies the
+/// transition rather than randomising it; deriving it from the slide keeps a
+/// deck this crate writes twice byte-identical.
+fn transition_seed(slide: u64) -> u64 {
+    let mut z = slide
+        .wrapping_mul(0x2545_F491_4F6C_DD1D)
+        .wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    // The app's seeds are 32-bit-ish (36861517 on the fixture), so this stays
+    // in the range one of its own would occupy.
+    (z ^ (z >> 31)) & 0x7FFF_FFFF
+}
+
+// -- writing a build ----------------------------------------------------------
+
+/// Whether a build brings a drawable on or takes it off.
+///
+/// This is `animation_type` on the animation attributes, and it is the whole of
+/// the distinction: `keynote-builds.key`'s four build-ins say `"In"` and its
+/// four build-outs say `"Out"`, and nothing else differs in kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BuildKind {
+    #[default]
+    In,
+    Out,
+}
+
+impl BuildKind {
+    fn animation_type(self) -> &'static str {
+        match self {
+            BuildKind::In => "In",
+            BuildKind::Out => "Out",
+        }
+    }
+
+    /// The effect the Animate inspector gives a new build of this kind, and the
+    /// only two build effects this corpus has measured.
+    pub fn default_effect(self) -> &'static str {
+        match self {
+            BuildKind::In => "apple:dissolve character",
+            BuildKind::Out => "apple:bc-appear",
+        }
+    }
+}
+
+/// What a build is to be.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BuildEdit {
+    pub kind: BuildKind,
+    /// The build effect's identifier. **Not a transition effect** — the two
+    /// enumerations are different, `"apple:dissolve character"` is a build and
+    /// `"apple:dissolve"` is a transition — and only the two in
+    /// [`BuildKind::default_effect`] have been seen written by the app. Empty
+    /// takes the kind's default.
+    pub effect: String,
+    pub duration: Option<f64>,
+    pub delay: Option<f64>,
+}
+
+impl Default for BuildEdit {
+    fn default() -> BuildEdit {
+        BuildEdit {
+            kind: BuildKind::In,
+            effect: String::new(),
+            duration: None,
+            delay: None,
+        }
+    }
+}
+
+/// The duration and event trigger the Animate inspector gives a new build.
+const DEFAULT_BUILD_DURATION: f64 = 1.0;
+/// `eventTrigger` 1 — On Click, which is what all eight builds of the fixture
+/// carry.
+const BUILD_ON_CLICK: u64 = 1;
+
+/// Animate a drawable on or off a slide.
+///
+/// **A build is two objects and two lists.** The `KN.BuildArchive` (8) says
+/// what is animated and how, and goes in the slide's `builds` (2); a
+/// `KN.BuildChunkArchive` (153) says *when*, and goes in the slide's
+/// `buildChunks` (43), which is the order the app plays them in. The node's
+/// `has_builds` (6), `has_explicit_builds` (20) and `build_event_count` (15)
+/// are what the app's own navigator reads, and a deck with builds the node does
+/// not count is a deck whose outline disagrees with what it plays.
+///
+/// Two fields are written because `keynote-builds.key` has them and **neither
+/// has been measured**: the build attributes' field 17 (`60`) and the chunk's
+/// fields 6, 7 and 8, a flag and a pair of UUIDs. They are reproduced in the
+/// shape the app wrote them, with the UUIDs derived from the chunk's own
+/// identifier the way every other identity here is. Nothing pretends to know
+/// what they mean.
+///
+/// The effect is an identifier of the **build** enumeration, not the
+/// transition one — `"apple:dissolve character"` rather than `"apple:dissolve"`
+/// — and only the two in [`BuildKind::default_effect`] have been seen written
+/// by the app, so anything else is passed through and taken on trust.
+pub fn add_build(
+    document: &mut crate::Document,
+    slide: u64,
+    drawable: u64,
+    edit: &BuildEdit,
+) -> Result<u64, Error> {
+    let (node, _) = slide_node_in_deck(document, slide)?;
+    let slide = reference(&document.archive(node)?, node_field::SLIDE)
+        .ok_or_else(|| Error::Format(format!("slide node {node} names no slide")))?;
+    let mut archive = document.archive(slide)?;
+
+    // The drawable has to be *on this slide*: a build naming a shape the slide
+    // does not own animates nothing, and says nothing about it either.
+    let owned: Vec<u64> = references(&archive, slide_field::OWNED_DRAWABLES);
+    if !owned.contains(&drawable) {
+        return Err(Error::Format(format!(
+            "drawable {drawable} is not on slide {slide} — a build animates something the \
+             slide owns, and this one owns {}",
+            match owned.len() {
+                0 => "nothing".to_string(),
+                n => format!("{n} drawable(s)"),
+            }
+        )));
+    }
+    let effect = match edit.effect.trim() {
+        "" => edit.kind.default_effect().to_string(),
+        given => given.to_string(),
+    };
+
+    let mut grow = crate::create::Grow::new(document);
+    let build = grow.allocate();
+    let chunk = grow.allocate();
+    grow.beside(
+        slide,
+        build,
+        TYPE_BUILD,
+        &build_archive(drawable, &effect, edit, build),
+    )?;
+    grow.beside(
+        slide,
+        chunk,
+        TYPE_BUILD_CHUNK,
+        &chunk_archive(build, edit, chunk),
+    )?;
+    grow.finish()?;
+
+    archive.append_in_order(
+        slide_field::BUILDS,
+        Value::Bytes(crate::create::reference_bytes(build)),
+    );
+    archive.append_in_order(
+        slide_field::BUILD_CHUNKS,
+        Value::Bytes(crate::create::reference_bytes(chunk)),
+    );
+    document.set_archive_of(slide, &archive)?;
+
+    // The node's three counters, which is what the navigator shows.
+    let chunks = references(&archive, slide_field::BUILD_CHUNKS).len() as u64;
+    let mut node_archive = document.archive(node)?;
+    node_archive.set(node_field::HAS_BUILDS, Value::Varint(1));
+    node_archive.set(node_field::HAS_EXPLICIT_BUILDS, Value::Varint(1));
+    node_archive.set(node_field::BUILD_EVENT_COUNT, Value::Varint(chunks));
+    document.set_archive_of(node, &node_archive)?;
+    document.declare_external_references();
+    Ok(build)
+}
+
+/// `KN.BuildArchive`, in the shape the Animate inspector writes one.
+fn build_archive(drawable: u64, effect: &str, edit: &BuildEdit, seed: u64) -> Message {
+    use crate::create::{double, message, nested, reference, string, varint};
+    message(vec![
+        reference(build_field::DRAWABLE, drawable),
+        // `delivery` is a *required* string and this is the value all eight
+        // builds of the fixture carry.
+        string(build_field::DELIVERY, "All at Once"),
+        double(3, 0.0),
+        nested(
+            build_field::ATTRIBUTES,
+            vec![
+                varint(build_field::EVENT_TRIGGER, BUILD_ON_CLICK),
+                // Unmeasured, and 60 on every build the app wrote.
+                double(17, 60.0),
+                nested(
+                    build_field::ANIMATION_ATTRIBUTES,
+                    vec![
+                        string(transition_field::ANIMATION_TYPE, edit.kind.animation_type()),
+                        string(transition_field::EFFECT, effect),
+                        double(
+                            transition_field::DURATION,
+                            edit.duration.unwrap_or(DEFAULT_BUILD_DURATION),
+                        ),
+                        double(transition_field::DELAY, edit.delay.unwrap_or(0.0)),
+                        varint(transition_field::SEED, transition_seed(seed)),
+                        varint(transition_field::RTL, 0),
+                    ],
+                ),
+                varint(build_field::CUSTOM_TEXT_DELIVERY, 1),
+                varint(build_field::CUSTOM_DELIVERY_OPTION, 1),
+            ],
+        ),
+        varint(build_field::CHUNK_ID_SEED, 1),
+    ])
+}
+
+/// `KN.BuildChunkArchive` — when the build plays.
+fn chunk_archive(build: u64, edit: &BuildEdit, seed: u64) -> Message {
+    use crate::create::{double, message, nested, reference, varint};
+    let uuid = || {
+        vec![
+            varint(1, transition_seed(seed).wrapping_mul(0x9E37_79B9_7F4A_7C15)),
+            varint(
+                2,
+                transition_seed(seed ^ 1).wrapping_mul(0xD1B5_4A32_D192_ED03),
+            ),
+        ]
+    };
+    message(vec![
+        reference(build_field::CHUNK_BUILD, build),
+        double(build_field::CHUNK_DELAY, edit.delay.unwrap_or(0.0)),
+        double(
+            build_field::CHUNK_DURATION,
+            edit.duration.unwrap_or(DEFAULT_BUILD_DURATION),
+        ),
+        varint(build_field::CHUNK_AUTOMATIC, 0),
+        // 6, 7 and 8 are the app's and are unmeasured; the shape is the
+        // fixture's and the identities are derived, as every identity here is.
+        varint(build_field::CHUNK_REFERENT, 1),
+        nested(7, vec![nested(1, uuid()), varint(2, 1)]),
+        nested(8, uuid()),
+    ])
+}

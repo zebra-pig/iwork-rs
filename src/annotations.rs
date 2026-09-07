@@ -60,6 +60,17 @@
 //! accepted or rejected change leaves behind. The reader keeps reporting
 //! rather than pretending, and the remaining tripwires still guard those.
 //!
+//! ## What writes here
+//!
+//! [`add_comment`] attaches a comment to a range of text: the comment, its
+//! `TSWP.HighlightArchive`, an author in the document's one author storage if
+//! that name is not there yet, and two entries in the run-anchored
+//! `table_highlight` — the anchor at the start, and a *bare index* at the end,
+//! which is where the run stops rather than a comment on nothing. The table
+//! also has to start at 0, whatever the comment does. Nothing else here writes:
+//! a reply, a resolved state and a cell comment are all still schema-only, and
+//! a tracked change is refused for the reason below.
+//!
 //! ## Tracked deletions keep their characters
 //!
 //! The one claim here that changes what an *edit* may do. A deletion under
@@ -74,7 +85,7 @@
 use std::collections::BTreeMap;
 
 use crate::drawable::Color;
-use crate::pb::{Message, Value};
+use crate::pb::{decode_nested, Message, Value};
 use crate::style::reference_target;
 
 /// `TSK.AnnotationAuthorArchive` — a comment or change author.
@@ -838,4 +849,337 @@ mod tests {
         assert_eq!(date(&outer, 2), Some(768_000_000.0));
         assert_eq!(date(&outer, 3), None);
     }
+}
+
+// -- writing a comment -------------------------------------------------------
+
+/// Field numbers of `TSWP.HighlightArchive` and of the author storage — the two
+/// archives with no module of their own above, because until now nothing wrote
+/// them.
+mod highlight_field {
+    /// `TSWP.HighlightArchive.comment`.
+    pub const COMMENT: u32 = 1;
+    /// `TSWP.HighlightArchive.uuid`, a *string* UUID and not a `TSP.UUID`.
+    pub const UUID: u32 = 2;
+    /// `TSK.AnnotationAuthorStorageArchive.annotation_author`.
+    pub const STORAGE_AUTHOR: u32 = 1;
+}
+
+/// Who is commenting, and what they said.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CommentEdit {
+    /// The author's name as the app shows it. An author of that name already in
+    /// the document is reused; otherwise one is added to the author storage.
+    pub author: String,
+    pub text: String,
+}
+
+/// Attach a comment to a range of text.
+///
+/// The range is in **UTF-16 code units**, the unit iWork indexes text in, and
+/// half-open — the same convention as every other range in this crate.
+///
+/// Four objects are involved and the shape is the fixture's, not the schema's:
+/// a `TSD.CommentStorageArchive` (3056) holding the words, the date and a
+/// reference to a `TSK.AnnotationAuthorArchive` (212); a `TSWP.HighlightArchive`
+/// (2013) pointing at the comment; and two entries in the storage's
+/// `table_highlight` (23) — the anchor at `start`, and a **bare index at `end`**
+/// that ends the run. A table entry with no reference is not a comment on
+/// nothing; it is where the previous comment stops.
+///
+/// **What it refuses.** A storage carrying tracked changes, because every edit
+/// to one is refused here; a range that runs past the end of the text; an empty
+/// range, which would anchor a comment to nothing; and a range that overlaps a
+/// comment already there — `table_overlapping_highlight` (25) is what the app
+/// uses for two comments over one stretch of text, and no document in this
+/// corpus has one to write from.
+pub fn add_comment(
+    document: &mut crate::Document,
+    storage: u64,
+    start: u64,
+    end: u64,
+    edit: &CommentEdit,
+) -> Result<u64, crate::Error> {
+    use crate::pb::Value;
+
+    if end <= start {
+        return Err(crate::Error::Format(format!(
+            "a comment covers a range of text, and {start}..{end} is empty"
+        )));
+    }
+    if edit.text.is_empty() {
+        return Err(crate::Error::Format(
+            "a comment with no words in it is not a comment".into(),
+        ));
+    }
+
+    let text = document.storage_text(storage)?;
+    let length = text.encode_utf16().count() as u64;
+    if end > length {
+        return Err(crate::Error::Format(format!(
+            "storage {storage} holds {length} unit(s) of text, so a comment cannot cover \
+             {start}..{end}"
+        )));
+    }
+
+    let archive = document.archive(storage)?;
+    for table in crate::text::CHANGE_TABLES {
+        if archive.get(*table).is_some() {
+            return Err(crate::Error::Format(format!(
+                "storage {storage} carries tracked changes, and this crate does not edit one"
+            )));
+        }
+    }
+    if archive
+        .get(crate::text::OVERLAPPING_HIGHLIGHT_TABLE)
+        .is_some()
+    {
+        return Err(crate::Error::Format(format!(
+            "storage {storage} uses table_overlapping_highlight (25), which no document here \
+             has and nothing here writes"
+        )));
+    }
+
+    // The entries already there, so an overlap is refused rather than layered.
+    let mut entries = highlight_entries(&archive)?;
+    if let Some((index, _)) = entries
+        .iter()
+        .find(|(index, target)| target.is_some() && *index < end && *index >= start)
+    {
+        return Err(crate::Error::Format(format!(
+            "storage {storage} already has a comment anchored at {index}, inside {start}..{end}"
+        )));
+    }
+    // …and the one in force *at* `start`, which would run through the new one.
+    if let Some((index, _)) = entries
+        .iter()
+        .rfind(|(index, target)| *index <= start && target.is_some())
+    {
+        let ends_at = entries
+            .iter()
+            .find(|(after, _)| *after > *index)
+            .map(|(after, _)| *after)
+            .unwrap_or(length);
+        if ends_at > start {
+            return Err(crate::Error::Format(format!(
+                "storage {storage} already has a comment covering {index}..{ends_at}, which \
+                 {start}..{end} overlaps"
+            )));
+        }
+    }
+
+    let author = find_or_add_author(document, &edit.author)?;
+
+    let mut grow = crate::create::Grow::new(document);
+    let comment = grow.allocate();
+    let highlight = grow.allocate();
+    grow.beside(
+        storage,
+        comment,
+        TYPE_COMMENT_STORAGE,
+        &comment_archive(&edit.text, author, comment),
+    )?;
+    grow.beside(
+        storage,
+        highlight,
+        TYPE_HIGHLIGHT,
+        &highlight_archive(comment, highlight),
+    )?;
+    grow.finish()?;
+
+    // The anchor and the end of its run, in index order — an attribute table
+    // that is not sorted is one the app reads as a different range.
+    entries.push((start, Some(highlight)));
+    if !entries.iter().any(|(index, _)| *index == end) {
+        entries.push((end, None));
+    }
+    // **A run-anchored table starts at 0**, whatever it says about the run: the
+    // entry at 0 is what covers the text before the first comment, and a table
+    // whose first entry is anywhere else leaves those characters with no
+    // attribute at all — which `Document::problems` calls out by name.
+    if !entries.iter().any(|(index, _)| *index == 0) {
+        entries.push((0, None));
+    }
+    entries.sort_by_key(|(index, _)| *index);
+    let mut archive = document.archive(storage)?;
+    archive.clear(crate::text::HIGHLIGHT_TABLE);
+    let mut table = Message::default();
+    for (index, target) in &entries {
+        let mut entry = Message::default();
+        entry.set_in_order(1, Value::Varint(*index));
+        if let Some(target) = target {
+            entry.set_in_order(2, Value::Bytes(crate::create::reference_bytes(*target)));
+        }
+        table.append_in_order(1, Value::Bytes(entry.encode()));
+    }
+    archive.set_in_order(crate::text::HIGHLIGHT_TABLE, Value::Bytes(table.encode()));
+    document.set_archive_of(storage, &archive)?;
+    document.declare_external_references();
+    Ok(comment)
+}
+
+/// The `table_highlight` entries of a storage, as `(index, target)`.
+fn highlight_entries(archive: &Message) -> Result<Vec<(u64, Option<u64>)>, crate::Error> {
+    let Some(table) = archive
+        .bytes(crate::text::HIGHLIGHT_TABLE)
+        .and_then(decode_nested)
+    else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for value in table.all(1) {
+        let Value::Bytes(raw) = value else { continue };
+        let entry = decode_nested(raw).ok_or_else(|| {
+            crate::Error::Format("a table_highlight entry does not decode".into())
+        })?;
+        let index = entry.varint(1).unwrap_or(0);
+        let target = entry
+            .bytes(2)
+            .and_then(decode_nested)
+            .as_ref()
+            .and_then(reference_target);
+        out.push((index, target));
+    }
+    Ok(out)
+}
+
+/// `TSD.CommentStorageArchive` — the words, when, and by whom.
+fn comment_archive(text: &str, author: u64, seed: u64) -> Message {
+    use crate::create::{message, nested, reference, string, varint};
+    message(vec![
+        string(comment_field::TEXT, text),
+        nested(
+            comment_field::CREATION_DATE,
+            vec![crate::create::double(1, now())],
+        ),
+        reference(comment_field::AUTHOR, author),
+        // The comment's own identity. Nothing outside the document refers to
+        // it, so it is derived from the object it belongs to rather than drawn
+        // from anywhere — a document written twice is then the same document.
+        nested(
+            comment_field::STORAGE_UUID,
+            vec![varint(1, mix(seed, 1)), varint(2, mix(seed, 2))],
+        ),
+    ])
+}
+
+/// `TSWP.HighlightArchive` — what the text points at, and what points at the
+/// comment.
+fn highlight_archive(comment: u64, seed: u64) -> Message {
+    use crate::create::{message, reference, string};
+    message(vec![
+        reference(highlight_field::COMMENT, comment),
+        string(highlight_field::UUID, &uuid_from(seed)),
+    ])
+}
+
+/// An author of that name, or a new one in the document's author storage.
+///
+/// Every iWork document carries exactly one
+/// `TSK.AnnotationAuthorStorageArchive`, empty until someone comments; this is
+/// what fills it. The colour is the app's own first author colour — the yellow
+/// `pages-comments` carries — because an author has to be tinted something and
+/// nothing here can ask the app which.
+fn find_or_add_author(document: &mut crate::Document, name: &str) -> Result<u64, crate::Error> {
+    use crate::create::{float, message, nested, string, varint};
+    use crate::pb::Value;
+
+    let existing = annotations(document);
+    if let Some(author) = existing
+        .authors
+        .iter()
+        .find(|author| author.name.as_deref() == Some(name))
+    {
+        return Ok(author.identifier);
+    }
+    let (storage, _) = existing.author_storage.ok_or_else(|| {
+        crate::Error::Format(
+            "this document has no TSK.AnnotationAuthorStorageArchive, and a comment needs an \
+             author to belong to"
+                .into(),
+        )
+    })?;
+
+    let mut grow = crate::create::Grow::new(document);
+    let author = grow.allocate();
+    grow.beside(
+        storage,
+        author,
+        TYPE_AUTHOR,
+        &message(vec![
+            string(author_field::NAME, name),
+            nested(
+                author_field::COLOR,
+                vec![
+                    varint(1, 1),
+                    float(3, 0.980_392_16),
+                    float(4, 0.937_254_9),
+                    float(5, 0.352_941_2),
+                    float(6, 1.0),
+                    varint(12, 1),
+                    float(13, 1.0),
+                ],
+            ),
+            // The collaboration identity: a UUID and a 64-hex digest, in the
+            // shape the app writes one. It identifies this author within this
+            // document and means nothing outside it.
+            string(
+                author_field::PUBLIC_ID,
+                &format!("{}:{}", uuid_from(author), digest_from(author)),
+            ),
+            varint(author_field::IS_PUBLIC_AUTHOR, 0),
+        ]),
+    )?;
+    grow.finish()?;
+
+    let mut archive = document.archive(storage)?;
+    archive.append_in_order(
+        highlight_field::STORAGE_AUTHOR,
+        Value::Bytes(crate::create::reference_bytes(author)),
+    );
+    document.set_archive_of(storage, &archive)?;
+    document.declare_external_references();
+    Ok(author)
+}
+
+/// Now, as `TSP.Date` counts it: seconds since 2001-01-01.
+fn now() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64() - crate::table::APPLE_EPOCH)
+        .unwrap_or(0.0)
+}
+
+/// splitmix64, for identities that have to differ and mean nothing else.
+fn mix(seed: u64, salt: u64) -> u64 {
+    let mut z = seed
+        .wrapping_mul(0x2545_F491_4F6C_DD1D)
+        .wrapping_add(salt.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// A UUID string in the shape Apple writes them, derived rather than drawn.
+fn uuid_from(seed: u64) -> String {
+    let hex: String = (0..4)
+        .flat_map(|salt| mix(seed, salt + 10).to_be_bytes())
+        .map(|b| format!("{b:02X}"))
+        .collect();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
+}
+
+/// The 64 hex digits after the colon in a collaboration public id.
+fn digest_from(seed: u64) -> String {
+    (0..4)
+        .flat_map(|salt| mix(seed, salt + 20).to_be_bytes())
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }

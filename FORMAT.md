@@ -3463,6 +3463,51 @@ The cell route is the same string-table indirection every other cell payload
 uses: the cell holds a key, the list holds the comment. No list of type 10
 exists anywhere in the corpus.
 
+### Writing a comment
+
+Four archives and an attribute table, and the two things that decide whether the
+result is a document or a mess are both about the table.
+
+It is **run-anchored**: an entry says "from here on", and the comment ends where
+the next entry begins. So a comment on `start..end` is *two* entries — the
+anchor at `start`, and a **bare index at `end`**, an entry with no reference at
+all. A bare entry is not a comment on nothing; it is where the previous comment
+stops, and leaving it out runs the comment to the end of the text.
+
+And it **starts at 0**, whatever the comment does. The entry at 0 is what covers
+the characters before the first comment; a table whose first entry is anywhere
+else leaves them with no attribute, which is a document the app has to guess
+about. `pages-comments` shows it: 0 → highlight, 12 bare, 63 → highlight, and
+so on.
+
+The rest is shape:
+
+```text
+TSD.CommentStorageArchive (3056)   1 text, 2.1 date (f64, Apple epoch),
+                                   3 → author, 5 {1,2} a two-u64 UUID
+TSWP.HighlightArchive (2013)       1 → the comment, 2 a *string* UUID
+TSK.AnnotationAuthorArchive (212)  1 name, 2 colour, 3 "UUID:64 hex" — the
+                                   collaboration public id, 4 is_public_author
+```
+
+The author storage is empty in every untouched document and is where a new
+author goes. The colour has to be *something*, and nothing here can ask the app
+which one it would pick, so a new author gets the yellow `pages-comments`
+carries. The public id identifies the author within the document and means
+nothing outside it, so like every other identity this crate mints it is derived
+rather than drawn — a document written twice is the same document.
+
+**What it refuses.** A storage carrying tracked changes, because every edit to
+one is refused here; a range past the end of the text; an empty range, which
+anchors a comment to nothing; and an overlap with a comment already there —
+that is what `table_overlapping_highlight` (25) is for, and no document in this
+corpus has one to write from.
+
+Verified past opening, which is the only measure available: no scripting
+dictionary can read a comment back, so the app's own model is the witness.
+Pages opened a document with a comment this crate authored — author, anchor,
+words and date, on a document that had none — and wrote all of it back.
+
 ### Change tracking
 
 The document's half is `TP`, and only Pages has it:
@@ -3745,6 +3790,34 @@ Duration, delay and `is_automatic` match the app's `transition duration`,
 `transition delay` and `automatic transition` exactly. `random_number_seed`
 differs on every slide and is copied verbatim by the app's own duplicate.
 
+#### Writing one
+
+Two objects, and a deck that carries one without the other is wrong in a way
+nothing complains about: `KN.SlideArchive.transition` (4) is what plays, and
+`KN.SlideNodeArchive.has_transition` (7) is what the app's own navigator shows.
+
+**`transition` is a *required* field of `KN.SlideArchive`.** "No transition" is
+not the field's absence — asked to open a slide without it, Keynote says so by
+name in the unified log, *"Cannot parse message of type KN.SlideArchive because
+it is missing required fields: transition"*, and then the whole slide component
+fails to load and takes the deck's outline with it. What the app writes for a
+slide with no transition is the same message with the effect `"none"` in it and
+a duration and delay beside it. So does this crate.
+
+The animation attributes are written in the shape the app writes them — 1, 2, 3,
+5, 6, 11, 16 — and **not** field 4: Keynote's own writer never emits a direction,
+and the values in [`direction_name`] are known only from decks its PowerPoint
+importer wrote, so setting one is writing a field the app does not. The seed is
+kept when the slide has one and derived from the slide's identifier when it does
+not, because the app copies it verbatim through its own duplicate: it is an
+identity, not a nonce, and deriving it keeps a deck written twice identical.
+
+**The `custom_*` block belongs to the effect that wrote it.** Magic Move's "fade
+unmatched objects" means nothing to a dissolve, so changing the effect drops the
+block and keeping the effect keeps it. Verified through a resave: Keynote opened
+a deck given a 2.5-second automatic dissolve and a slide whose transition had
+been taken away, and wrote both back as they were.
+
 #### The custom_\* block, and what belongs to what
 
 `KN.TransitionAttributesArchive` fields 9–20 are the parameters of the *effect*,
@@ -3924,6 +3997,31 @@ Build 2, after 0.3 s" would live. `startOffset`/`endOffset` are where a
 by-bullet-group text build would put its range. That part is a reading of the
 schema; the fixture's chunks are all single-stage, so it has still not been
 watched doing anything interesting.
+
+#### Writing one
+
+Two objects and two lists: the `KN.BuildArchive` goes in the slide's `builds`
+(2) and its `KN.BuildChunkArchive` in `buildChunks` (43), which is the order the
+app plays them in — one chunk per build, as every one of the fixture's eight
+has. The node's `has_builds` (6), `has_explicit_builds` (20) and
+`build_event_count` (15) are what the navigator shows, and a deck whose node
+does not count its builds disagrees with what it plays.
+
+The effect is a **build** identifier and not a transition one: `"apple:dissolve
+character"` where a transition would say `"apple:dissolve"`, and the two
+enumerations do not overlap. Only the fixture's two — that and
+`"apple:bc-appear"` for a build-out — have been seen written by the app;
+anything else is passed through on trust.
+
+**Two things are written because the app writes them and neither has been
+measured**: the attributes' field 17, which is `60` on all eight builds, and the
+chunk's 6, 7 and 8 — a flag and a pair of UUIDs. They are reproduced in the
+app's shape with derived identities, and nothing here pretends to know what they
+mean. A build whose drawable the slide does not own is refused: it animates
+nothing, and says nothing about it either.
+
+Keynote opened a deck with a build this crate wrote on a text box this crate
+also wrote, and saved both back.
 
 ### Recordings and cameras — identified, never authored
 

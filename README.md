@@ -201,6 +201,9 @@ iwork slides    Talk.key                  # every slide: layout, placeholders an
 iwork layouts   Talk.key                  # the theme's slide layouts, and which
                                           # slides are built on each
 iwork set-notes Talk.key 2652498 "…" out.key
+iwork effects                             # all 44, by name and by identifier
+iwork set-transition Talk.key 2652176 "object cube" 1.5 out.key
+iwork add-build Talk.key 2652176 2652501 in out.key
 iwork skip-slide   Talk.key 2652498 out.key   # leave it out of the show
 iwork unskip-slide Talk.key 2652498 out.key
 iwork move-slide Talk.key 2652498 0 out.key   # to position 0
@@ -216,6 +219,7 @@ iwork metadata  Report.pages              # the two plists, the identity, the bu
                                           # history, locale, template, custom formats
 iwork annotations Report.pages            # authors, comments and their anchors,
                                           # tracked changes
+iwork add-comment Report.pages 1732539 5 12 "Prüferin" "Hier bitte prüfen." out.pages
 iwork duplicate Report.pages copy.pages   # a copy with a *new* document identity
 iwork new "/Applications/Pages.app/Contents/SharedSupport/Templates/08_Journal_Newsletter/ISO.template" \
           Newsletter.pages                # a document from a template bundle
@@ -722,6 +726,10 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | Comments anchor through highlights at the selected characters, with a real author | ✅ | — | — |
 | Tracked changes: insertions and a deletion, anchored, in one session | ✅ | — | — |
 | An edit through a tracked change is refused by name | ✅ | ✅ | ✅ |
+| Write a comment: its author, its anchor, and the run it ends | ✅ | — | — |
+| The anchor table starts at 0 and the bare entry stops the run | ✅ | — | — |
+| One author however many comments; an overlap is refused | ✅ | — | — |
+| **The app resaves an authored comment, author and words intact** | ✅ | — | — |
 | Keynote builds: in/out told apart by `animation_type`, effects by stored id | — | — | ✅ |
 | Alt text (`accessibility_description`) read — 59 of them, in twelve fixtures | ✅ | ✅ | ✅ |
 | The show: theme, slide size, slide tree, layouts in the app's order | — | — | ✅ |
@@ -737,6 +745,12 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | Magic Move's whole surface: fade unmatched, acceleration, text granularity | — | — | ✅ |
 | No transition anywhere carries a parameter the 15.3.1 schema does not name | — | — | ✅ |
 | The app writes no transition direction — absent in seven decks and 182 themes | — | — | ✅ |
+| Give a slide a transition, by name or by identifier; refuse one that is not | — | — | ✅ |
+| "None" is written as the app writes it, not as the field's absence | — | — | ✅ |
+| The `custom_*` parameters follow the effect, and go when it changes | — | — | ✅ |
+| **The app resaves a written transition, and a removed one stays removed** | — | — | ✅ |
+| Animate a drawable on or off; a drawable the slide does not own is refused | — | — | ✅ |
+| **The app resaves a written build, on a text box also written here** | — | — | ✅ |
 | Playback: loop, play on open, restart-when-idle, and its **minutes-vs-seconds** trap | — | — | ✅ |
 | Presentation type and the two self-playing delays sit at their defaults, written | — | — | ✅ |
 | A soundtrack in every deck, empty in all of them; its track list is a data-id list | — | — | ✅ |
@@ -812,6 +826,16 @@ the effects bring a parameter and thirty-three bring none. Keynote writes the
 ones the effect *has*, false values included, so they are read as optionals —
 `apple:scale` carries `custom_bounce` = false, which is not the same as having
 no bounce at all.
+
+**A transition can be given, changed and taken away.** `Document::set_transition`
+writes the effect, its duration, its delay and its automatic flag, and updates
+the node's `has_transition` beside it — a deck with one but not the other plays
+what its outline does not show. "No transition" is not the field's absence:
+`transition` is a *required* field of `KN.SlideArchive`, and Keynote says so by
+name in the unified log before failing to load the slide at all, so what the app
+writes — and what this writes — is the same message with the effect `"none"` in
+it. The direction is left alone unless asked for, because Keynote's own writer
+never emits one.
 
 Three things about a transition cannot be reached from a script and are marked
 as such in [§13](FORMAT.md#13-keynote-structure--kn): the **direction**, whose
@@ -1026,12 +1050,22 @@ fuzzing story rather than half of it.
   refcounts and its external-reference declarations all have to go together and
   no probe has watched Keynote do it. A slide's *layout* cannot be changed and
   cannot be copied — Keynote's own dictionary makes `slide layout` read-only.
-- **Builds and transition parameters are read, not written.** The transition's
-  effect, duration, delay and automatic flag are decoded and reported, and so
-  are the eight builds `keynote-builds.key` carries — effect, delivery, event
-  trigger and the `"In"`/`"Out"` direction. The action-build and chunk-timing
-  fields beside them are named from the schema and unexercised. Nothing here
-  writes an animation.
+- **A transition can be written; a build cannot.** `iwork set-transition` gives
+  a slide any of the 44 effects, with a duration, a delay and the automatic
+  flag, and `none` takes it away — verified through a resave in Keynote. What
+  is *not* written is the direction, because Keynote's own writer never emits
+  one, and the `custom_*` parameters, which belong to the effect that wrote
+  them and are dropped when the effect changes. The eight builds
+  `keynote-builds.key` carries are read — effect, delivery, event trigger and
+  the `"In"`/`"Out"` direction — and `iwork add-build` writes one: the build,
+  its chunk, both of the slide's lists and the node's three counters. Keynote
+  resaved a deck with a build this crate wrote on a text box this crate also
+  wrote. Two fields go in because the app writes them and **neither has been
+  measured** — the attributes' field 17, `60` on all eight of the fixture's
+  builds, and the chunk's flag and pair of UUIDs; they are reproduced in the
+  app's shape and nothing here claims to know what they mean. The action-build,
+  motion-path and by-bullet-group fields beside them stay schema-only, so a
+  build is a whole-object dissolve or disappear and nothing subtler.
 - **A copied slide's thumbnail is the original's.** The node keeps the source's
   `thumbnails` data reference and is marked `thumbnailsAreDirty`, which is what
   Keynote's own duplicate leaves behind — so the navigator shows the right
@@ -1083,6 +1117,18 @@ fuzzing story rather than half of it.
   written by this crate needs trying in the app before it is trusted —
   `scripts/app-check.sh` is how, and `IWORK_APP_CHECK=1 cargo test` runs it over
   every fixture, on a machine that has the apps.
+- **A comment can be written; a reply cannot.** `iwork add-comment` attaches one
+  to a range of text: the comment, its author — added to the document's one
+  author storage if that name is not there yet — and the two entries in the
+  storage's run-anchored `table_highlight`, the anchor at the start and the
+  *bare* index at the end that stops the run. That table also has to **start at
+  0**, whatever the comment does, or the characters before it have no attribute
+  at all. Pages opened a document with a comment authored this way and wrote
+  every part of it back, which is the only measure there is: no scripting
+  dictionary can read a comment. Refused by name: a storage carrying tracked
+  changes, a range past the end of the text, an empty range, and an overlap with
+  a comment already there — overlapping comments are what
+  `table_overlapping_highlight` is for, and nothing here has one to write from.
 - **Comments come only from the menu, and replies not yet at all.** No
   scripting dictionary has a comment command or a comment class, and no
   template the three apps ship carries a comment: all 26 base-corpus fixtures

@@ -705,7 +705,47 @@ formula-crossing tables — every one a named refusal today.
 
 ## Phase 16 — The review layer, authored
 
-Comments, tracked changes, builds and transitions: all read, none written.
+Comments, tracked changes, builds and transitions: all read, none written — and
+three of the four written now. What is left is the one that should be left.
+
+- [x] Transitions. *(`Document::set_transition`: the effect by either spelling,
+      the duration, the delay and the automatic flag, with the node's
+      `has_transition` kept in step — a deck with one but not the other plays
+      what its outline does not show. **`transition` is a required field of
+      `KN.SlideArchive`**: "no transition" is not the field's absence, which
+      Keynote refuses to parse and says so by name, but the same message with
+      the effect `"none"` in it. The direction is opt-in, because the app's own
+      writer never emits one; the `custom_*` block follows the effect and is
+      dropped when the effect changes. Keynote resaved a written dissolve and a
+      removed transition unchanged.)*
+- [x] Comments, authored. *(`Document::add_comment`: the comment, a
+      `TSWP.HighlightArchive`, an author in the document's one author storage,
+      and two entries in the run-anchored `table_highlight` — the anchor at the
+      start and a **bare index** at the end, which is where the run stops
+      rather than a comment on nothing. The table also has to **start at 0**,
+      whatever the comment does, or the text before it carries no attribute;
+      the crate's own audit caught that on the first try. Refused: a tracked
+      storage, a range past the text, an empty range, an overlap — overlapping
+      comments are `table_overlapping_highlight`'s business and no fixture has
+      one. Pages resaved an authored comment whole, which is the only measure
+      available: no scripting dictionary can read one back.)*
+- [ ] Tracked changes, authored. **The one that should stay open.** Recording a
+      change is not writing an archive beside an edit: a tracked deletion keeps
+      its characters — they are still in the text and Pages draws them struck
+      through — so `table_deletion` is not the run table it looks like, and the
+      edit path would have to *not* delete while saying it did. The corpus has
+      one deletion and no insertion, nothing scriptable makes either, and every
+      edit through a tracked storage is refused today for exactly this reason.
+      Guessing here would produce documents that open and are wrong.
+- [x] Builds, authored. *(`Document::add_build`: the `KN.BuildArchive` in the
+      slide's `builds` and its chunk in `buildChunks`, which is the order the
+      app plays them in, plus the node's three counters — a deck whose node
+      does not count its builds disagrees with what it plays. The effect is a
+      **build** identifier and not a transition one, and only the fixture's two
+      have been seen written by the app. Two fields are written because the app
+      writes them and neither has been measured: the attributes' 17 (`60` on
+      all eight) and the chunk's flag and pair of UUIDs. Keynote resaved a
+      build this crate wrote on a text box this crate also wrote.)*
 
 ## Verification log
 
