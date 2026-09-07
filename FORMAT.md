@@ -3820,9 +3820,42 @@ accepting it — which is the only way to know what a *writer* has to produce.
 repeated field, or one package entry — collect whatever objects that orphans,
 write the result, and ask the app to open it and read its text back. Keep the
 deletion if the app still does both; put it back if it does not. Repeat until
-nothing more can go. The app is the whole of the oracle: nothing in the file
-says which fields matter, and every previous attempt in this repository to
-reason it out from the schemas was wrong.
+nothing more can go.
+
+**The better method, found late: ask the app.** The oracle does not have to be
+binary. Every one of these apps writes to the unified log while it opens a
+document, and what it writes is a diagnosis:
+
+```
+log stream --style compact --predicate 'process == "Numbers"'
+```
+
+```text
+[TSPPersistenceLogCat] Cannot parse message of type "TST.TableModelArchive"
+  because it is missing required fields: category_owner_deprecated.owner_uid.lower
+
+[TSUAssertCat] -[TSSStylesheet p_addStyle:withParent:identifier:shouldDoDOLC:]
+  Adding style (TSDMediaStyle*) to locked stylesheet (TSSStylesheet*)
+
+[TSUAssertCat] -[TSPObject willModifyForUpgradeWithOptions:] Object
+  [TSTTableInfo-1052] was modified during read unexpectedly. The file format
+  version of the document is the latest.
+
+[TSUAssertCat] Caught NSInvalidArgumentException while running finalize handler:
+  -[KNSlide generateObjectPlaceholderIfNecessary]: unrecognized selector
+```
+
+It names the message, the field, the class and the method. Three afternoons of
+bisecting were spent before this was tried, and the same questions were then
+answered in three lines each. `TSPPersistenceLogCat` carries the parse errors,
+`TSUAssertCat` the model's own assertions; the last line before "Failed to
+initialize object context" is the one that matters, and the hundreds of
+"is not strongly referenced from" assertions above it are noise the apps emit
+about their own documents too.
+
+The deletion method still has its place — it answers "is this needed?", which
+the log never volunteers — but a document the app refuses should be handed to
+the log first.
 
 Two things about the method, both learned by getting them wrong:
 
@@ -3930,6 +3963,33 @@ Keynote's root is `KN.DocumentArchive` → `KN.ShowArchive` → theme → styles
 with the slides hanging off `ShowArchive` field 3 as a tree of
 `KN.SlideNodeArchive`. Its calculation-engine reference *is* deletable, unlike
 Numbers'.
+
+**What both of them insist on, and Pages does not:**
+
+- **`TSS.StylesheetArchive.is_locked` is field 4 and defaults to `true`.** A
+  stylesheet that does not say otherwise cannot be added to, and the apps add to
+  it at load — for any style a document is missing. This is the single most
+  expensive default in the format, and the Pages blueprint only ever worked
+  because it had copied `is_locked = 0` out of a document that did.
+- **A theme carries style presets**, `TSD.ThemePresetsArchive` at field 100: six
+  line styles, six shape styles, a text-box style, six image styles, six movie
+  styles and a drawing line style, as references to `TSWP.ShapeStyleArchive` and
+  `TSD.MediaStyleArchive` objects. Without them the app asks for preset 0 of a
+  kind it has none of and gives up.
+- **A style archive's `super` chain is `required` all the way down.** A
+  `TSWP.ShapeStyleArchive` is a `TSD.ShapeStyleArchive` is a `TSS.StyleArchive`
+  — three levels — and "missing required fields: super.super" is what one level
+  too few looks like.
+- **Numbers keeps a table's parts in components of their own** (one per tile,
+  per interning list, per header bucket) and its `TableInfoArchive` and
+  `TableModelArchive` in the `CalculationEngine` component. Flattening a
+  document Numbers wrote into one component makes Numbers refuse it.
+- **Keynote keeps each slide in a component of its own**, because a slide node
+  holds a *lazy* reference to its slide.
+- **An optional field with a default is not always one you may leave out.** A
+  `KN.SlideNodeArchive` without `isSlideNumberVisible` (18) or
+  `background_is_no_fill_or_color_fill_with_alpha` (28) is complained about by
+  name, and both are `optional` with defaults in the schema.
 
 ## Writing documents
 
