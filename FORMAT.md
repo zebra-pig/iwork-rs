@@ -3923,8 +3923,9 @@ minimum is a seed, and the app grows it.
 
 ### Numbers, and Keynote
 
-Neither has been reduced to the end, and neither can be written from nothing
-yet. What the same method has established so far:
+Both can be written from nothing now, and both were harder than Pages by the
+same margin: Pages needs five objects that carry anything, Numbers needs 82 and
+Keynote 40. What the method established:
 
 **A Numbers root needs four things a Pages root does not.** `TN.DocumentArchive`
 keeps its sheet list, a stylesheet (field 4), a `TSK` 205 (field 5, an object
@@ -3950,19 +3951,30 @@ every cell of an empty table unwritable by anything that finds a cell through
 its row's entry. A table written from nothing can afford an entry per row — 522
 bytes each — and then every cell of it can be written.
 
-What is *not* known is why Numbers refuses a document this crate writes. The
-app's whole object graph, grafted into a package written here, is refused too,
-which points at the package rather than the objects; the theme's default-style
-map (field 110) and the stylesheet's 467 styles are the parts no probe has
-reached. The machine's Numbers then stopped opening documents at all — any
-document, including ones it had opened an hour earlier, answering AppleScript
-happily and hanging on every `open` — so the next session starts by restarting
-it.
+**A `TST.TableModelArchive` names twenty-six styles**: a table style, seventeen
+cell styles (body, header row, header column, footer, five category levels, five
+group levels, three pivot areas) and eight paragraph styles, one per area of
+text. Its `DataStore` names eight interning lists — string, style, formula,
+format twice, control-cell-spec, and two more at fields 19 and 20 whose types
+are 10 and 11. And its `category_owner_deprecated.owner_uid` carries `lower` and
+`upper` that are `required` even when both are zero, which the app says by name.
+
+**What makes a Keynote slide archive a master is its `name`.** Not the message
+type — 5 and 6 carry the same message and Keynote's own decks write masters at 5
+— not `inDocument`, which is true on both, not the component it lives in, and
+not its placeholders. A master has `name` (field 10) and names no
+`template_slide`; a show slide is the other way round. A deck that gets this
+wrong parses perfectly and then dies in a finalize handler on `-[KNSlide
+generateObjectPlaceholderIfNecessary]: unrecognized selector`, the app holding a
+show slide where it wanted a master.
 
 Keynote's root is `KN.DocumentArchive` → `KN.ShowArchive` → theme → stylesheet,
 with the slides hanging off `ShowArchive` field 3 as a tree of
 `KN.SlideNodeArchive`. Its calculation-engine reference *is* deletable, unlike
-Numbers'.
+Numbers'. A `KN.ShowArchive` requires its theme, its slide tree, its size and
+its stylesheet; a `KN.SlideNodeArchive` requires `isSkipped`, `hasBuilds` and
+`hasTransition`; a `KN.SlideArchive` requires a style, a transition and
+`inDocument`.
 
 **What both of them insist on, and Pages does not:**
 
@@ -3997,12 +4009,14 @@ Generating **from a template** is still the easy way, and `Document::from_
 template` is still what to reach for when Apple's software is installed: a
 template is a document package, so nothing has to be synthesised at all.
 
-But it can be done from nothing, and §14 is the measurement that says how
-little. `Document::new` writes eleven objects for Pages — the five above, plus
-a list style, two column styles and the paragraph style given a name, a font
-and an alignment, because a document nobody would want is not worth writing.
-The style graph is the reason this was thought impossible; the answer is that
-almost none of it is required, and what is required is two empty messages.
+But it can be done from nothing, for all three apps, and §14 is the measurement
+that says how little. `Document::new` writes nine objects for Pages — the five
+above, plus a list style, two column styles and the paragraph style given a
+name, a font and an alignment, because a document nobody would want is not worth
+writing — 82 for a Numbers spreadsheet and 40 for a Keynote deck. The style
+graph is the reason this was thought impossible; the answer is that for Pages
+almost none of it is required, and that for the other two what is required is a
+theme's *presets* rather than its styles.
 
 Rules a writer must respect:
 

@@ -322,6 +322,10 @@ const DEFAULT_TABLE: &str = "Table 1";
 const DEFAULT_ROWS: usize = 22;
 const DEFAULT_COLUMNS: usize = 7;
 
+/// The slide a new deck starts with, in points — 16:9, which is what Keynote
+/// offers first.
+const DEFAULT_SLIDE_SIZE: (f32, f32) = (1920.0, 1080.0);
+
 /// How wide a table [`Document::new_spreadsheet`] will make.
 ///
 /// A row carries 255 cell offsets whatever the table's width — see
@@ -505,6 +509,9 @@ impl Document {
     ///
     /// let sheet = iwork::Document::new(iwork::Kind::Numbers)?;
     /// sheet.save("Blank.numbers")?;
+    ///
+    /// let deck = iwork::Document::new(iwork::Kind::Keynote)?;
+    /// deck.save("Blank.key")?;
     /// # Ok(()) }
     /// ```
     pub fn new(kind: Kind) -> Result<Document, Error> {
@@ -519,36 +526,10 @@ impl Document {
     pub fn new_on(kind: Kind, paper: crate::create::Paper) -> Result<Document, Error> {
         let blueprint = match kind {
             Kind::Pages => crate::create::pages(paper),
-            // The Numbers blueprint is written and measured — see
-            // [`crate::create::numbers`] — and Numbers does not open what it
-            // writes, so it is not offered. A document the app refuses is worse
-            // than no document at all.
-            // The Numbers blueprint is written and measured — see
-            // [`crate::create::numbers`] — and Numbers does not open what it
-            // writes, so it is not offered. A document the app refuses is worse
-            // than no document at all.
-            // The Numbers blueprint is written and measured — see
-            // [`crate::create::numbers`] — and Numbers does not open what it
-            // writes, so it is not offered. A document the app refuses is worse
-            // than no document at all.
-            // Numbers and Keynote both have blueprints — see
-            // [`crate::create::numbers`] and [`crate::create::keynote`] — and
-            // neither app opens what they write, so neither is offered. A
-            // document the app refuses is worse than no document at all.
             Kind::Numbers => {
                 crate::create::numbers(DEFAULT_SHEET, DEFAULT_TABLE, DEFAULT_ROWS, DEFAULT_COLUMNS)
             }
-            // The Keynote blueprint is written and measured — see
-            // [`crate::create::keynote`] — and Keynote does not open what it
-            // writes, so it is not offered. A document the app refuses is worse
-            // than no document at all.
-            Kind::Keynote => {
-                return Err(Error::Format(format!(
-                    "{} documents cannot be created from nothing yet — \
-                     Document::from_template can still copy one",
-                    kind.as_str()
-                )))
-            }
+            Kind::Keynote => crate::create::keynote(DEFAULT_SLIDE_SIZE),
             Kind::Unknown => {
                 return Err(Error::Format(
                     "a document has to be a Pages, Numbers or Keynote one".into(),

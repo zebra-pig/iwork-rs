@@ -36,21 +36,33 @@ doc.save("Report-edited.pages")?;
 ```
 
 A new document is made two ways. From nothing at all — no Apple software
-anywhere, which is what the first line of this file promises:
+anywhere, which is what the first line of this file promises — for all three
+apps:
 
 ```rust
 let mut doc = iwork::Document::new(iwork::Kind::Pages)?;
 doc.append_paragraph("Aus dem Nichts")?;
 doc.append_paragraph("A second paragraph, and the first one keeps its style")?;
 doc.save("Made.pages")?;                       // Pages opens it, and resaves it
+
+// A spreadsheet, sized as you like, with every cell writable from the start.
+let mut sheet = iwork::Document::new_spreadsheet("Sales", "Q1", 4, 3)?;
+sheet.set_cell("Q1", 0, 0, iwork::table::CellValue::Text("Region".into()))?;
+sheet.save("Sales.numbers")?;
+
+let deck = iwork::Document::new(iwork::Kind::Keynote)?;   // one slide, one master
+deck.save("Deck.key")?;
 ```
 
-Eleven objects go into that, and they are eleven because a document Pages made
-was reduced one field at a time — deleting, collecting what that orphaned, and
-asking Pages after every deletion whether it still opened the result and still
-read the text back — until 569 objects would not go below five that carry
-anything. FORMAT.md §14 has the measurement and the two rules only the app could
-have given. `iwork create pages Made.pages` does the same from the shell.
+Nine objects go into the Pages document, 82 into the spreadsheet, 40 into the
+deck — against 569, 590 and 1063 in the blank documents the apps themselves
+write. The difference is measurement: a document each app made was reduced one
+field at a time, and where deletion could not answer, the app was *asked* —
+every one of them narrates its document loading to the unified log, naming the
+message it cannot parse, the field it is missing and the method it cannot send.
+FORMAT.md §14 has the method and everything it found. `iwork create pages
+Made.pages` does the same from the shell, and `examples/` writes a report and a
+spreadsheet from Rust data.
 
 Or out of a template, the way the apps make one:
 
@@ -971,18 +983,19 @@ fuzzing story rather than half of it.
   at a different character style is accepted and survives a reopen, but has not
   been observed to change the rendering, so something else evidently wins.
   Unresolved.
-- **A document is created from a template, or from nothing — Pages only, so
-  far.** `Document::from_template` copies a template bundle into a new identity;
-  two things it cannot do are name the template when the bundle is not one of
-  the app's own — a user template in `~/Library` has an identifier and it is not
+- **A document is created from a template, or from nothing.**
+  `Document::from_template` copies a template bundle into a new identity; two
+  things it cannot do are name the template when the bundle is not one of the
+  app's own — a user template in `~/Library` has an identifier and it is not
   derivable from the path — and clear view state, of which there is none in any
   bundled template to clear. A `.template` renamed `.pages` also works and
   always has; what `from_template` adds is the identity.
-  `Document::new` needs no template and no app, and is Pages-only for now:
-  Numbers and Keynote are refused by name until the same reduction has been run
-  against them. What it writes is the *minimum* plus a usable style, not a
-  document with a theme — the app fills the rest in the first time it saves,
-  which was watched happening rather than hoped for.
+  `Document::new` needs no template and no app, and all three apps open what it
+  writes and save it back. What it writes is the measured minimum plus what
+  makes the result usable rather than merely legal — a paragraph style with a
+  font, a table with writable cells, a slide with a master. It is not a document
+  with a *theme*: the apps fill the rest in the first time they save, which was
+  watched happening rather than hoped for.
 - **The file type is kept, not chosen.** A package (a directory) is read and
   saved as a package, a single file as a single file. `File > Advanced > Change
   File Type` is a menu item, so what a document a user has set to the package

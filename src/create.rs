@@ -851,42 +851,26 @@ fn pages_document(stylesheet: u64, body: u64, paper: Paper) -> Message {
 }
 
 // -- Numbers ------------------------------------------------------------------
-//
-// Everything below is `allow(dead_code)` because `Document::new` does not offer
-// it: Numbers refuses what it writes, and a document the app refuses is worse
-// than no document at all. It is kept, and unit-tested for everything that can
-// be checked without the app, because the measurements behind it are the
-// expensive part — see [`numbers`].
 
 /// `TN.DocumentArchive` — the root of a Numbers document, and object 1.
-#[allow(dead_code)]
 const TYPE_NUMBERS_DOCUMENT: u32 = 1;
 /// `TN.SheetArchive`.
-#[allow(dead_code)]
 const TYPE_SHEET: u32 = 2;
 /// `TST.TableInfoArchive` — the drawable a table hangs off.
-#[allow(dead_code)]
 const TYPE_TABLE_INFO: u32 = 6000;
 /// `TST.TableModelArchive` — the table itself.
-#[allow(dead_code)]
 const TYPE_TABLE_MODEL: u32 = 6001;
 /// `TST.Tile` — the cells, 256 rows at a time.
-#[allow(dead_code)]
 const TYPE_TILE: u32 = 6002;
 /// `TST.TableDataList` — the interning tables cells refer into.
-#[allow(dead_code)]
 const TYPE_DATA_LIST: u32 = 6005;
 /// `TST.HeaderStorageBucket` — per-row and per-column sizes and cell counts.
-#[allow(dead_code)]
 const TYPE_HEADER_BUCKET: u32 = 6006;
 
 /// A tile covers this many rows, and `TileStorage.tile_size` says so.
-#[allow(dead_code)]
 const TILE_SIZE: u64 = 256;
 /// What Numbers gives a new table, in points.
-#[allow(dead_code)]
 const DEFAULT_ROW_HEIGHT: f64 = 19.929931640625;
-#[allow(dead_code)]
 const DEFAULT_COLUMN_WIDTH: f64 = 98.0;
 
 /// A Numbers document with one sheet and one empty table.
@@ -913,7 +897,6 @@ const DEFAULT_COLUMN_WIDTH: f64 = 98.0;
 ///   eight paragraph styles, one per area of the table; its `DataStore` names
 ///   eight interning lists; and its `category_owner_deprecated.owner_uid` has
 ///   `lower` and `upper` that are `required` even when they are zero.
-#[allow(dead_code)]
 pub(crate) fn numbers(
     sheet_name: &str,
     table_name: &str,
@@ -1140,7 +1123,6 @@ pub(crate) fn numbers(
 /// format list is field 6 — a `TSK.FormatStructArchive`, whose field 1 is the
 /// format type. 260 is automatic, and it is what Numbers writes for a cell
 /// nobody has formatted, text cells included.
-#[allow(dead_code)]
 fn automatic_format_list() -> Message {
     message(vec![
         varint(1, 2),
@@ -1153,7 +1135,6 @@ fn automatic_format_list() -> Message {
 }
 
 /// `TST.TableDataList` — `{1: listType, 2: nextListID}` and no entries.
-#[allow(dead_code)]
 fn data_list(list_type: u64) -> Message {
     message(vec![varint(1, list_type), varint(2, 1)])
 }
@@ -1165,7 +1146,6 @@ fn data_list(list_type: u64) -> Message {
 /// entry for a row with no cells is optional in documents Numbers writes; it is
 /// written here because a row that exists and says nothing about itself is
 /// harder to reason about than one that does.
-#[allow(dead_code)]
 fn header_bucket(count: usize) -> Message {
     let mut fields = vec![varint(1, 1)];
     for index in 0..count {
@@ -1188,7 +1168,6 @@ fn header_bucket(count: usize) -> Message {
 /// weight in this storage version, `required` in the schema, and present on
 /// every row of every tile in the corpus. They are written because a `required`
 /// field a parser cannot find is a parse error, not a default.
-#[allow(dead_code)]
 fn tile(rows: usize, columns: usize) -> Message {
     let mut fields = vec![
         varint(1, 0),
@@ -1223,21 +1202,18 @@ fn tile(rows: usize, columns: usize) -> Message {
 /// pads the array well past the table's width — 255 entries for a five-column
 /// table — and the padding is what leaves room for a column to be given a cell
 /// later, so it is written the same way here.
-#[allow(dead_code)]
 fn empty_offsets(columns: usize) -> Vec<u8> {
     let slots = columns.max(OFFSET_SLOTS);
     (-1i16).to_le_bytes().repeat(slots)
 }
 
 /// How many offsets a row carries whatever its width, as Numbers writes them.
-#[allow(dead_code)]
 const OFFSET_SLOTS: usize = 255;
 
 /// `TST.TableInfoArchive` — the drawable the table is drawn as.
 ///
 /// Field 1 is the `TSD.DrawableArchive` every placed object begins with: a
 /// geometry and the thing it hangs off, which for a Numbers table is the sheet.
-#[allow(dead_code)]
 fn table_info(sheet: u64, model: u64, rows: usize, columns: usize, seed: u64) -> Message {
     let width = columns as f32 * DEFAULT_COLUMN_WIDTH as f32;
     let height = rows as f32 * DEFAULT_ROW_HEIGHT as f32;
@@ -1271,7 +1247,6 @@ fn table_info(sheet: u64, model: u64, rows: usize, columns: usize, seed: u64) ->
 }
 
 /// Everything [`table_model`] needs, so its signature stays readable.
-#[allow(dead_code)]
 struct TableParts<'a> {
     name: &'a str,
     rows: usize,
@@ -1298,7 +1273,6 @@ struct TableParts<'a> {
 
 /// The areas of a table that carry a cell style of their own, in the order the
 /// model's fields name them.
-#[allow(dead_code)]
 const CELL_AREAS: &[&str] = &[
     "bodyStyle",
     "headerRowStyle",
@@ -1320,7 +1294,6 @@ const CELL_AREAS: &[&str] = &[
 ];
 
 /// The same for the text in those areas.
-#[allow(dead_code)]
 const TEXT_AREAS: &[&str] = &[
     "Table Header",
     "Table Body",
@@ -1336,7 +1309,6 @@ const TEXT_AREAS: &[&str] = &[
 ///
 /// The row/column asymmetry at the data store is Apple's: rows get a *list* of
 /// bucket references and columns get a single one.
-#[allow(dead_code)]
 fn table_model(parts: TableParts) -> Message {
     message(vec![
         string(1, &table_id()),
@@ -1473,7 +1445,6 @@ fn table_model(parts: TableParts) -> Message {
 
 /// A four-word `TSCE` UID, derived from the table's seed so that a document is
 /// internally consistent and two documents do not share one.
-#[allow(dead_code)]
 fn uid(seed: u64, which: u64) -> Vec<Field> {
     let word = |n: u64| ((seed.wrapping_mul(0x9E37_79B9) ^ (which << 8) ^ n) & 0xFFFF_FFFF) + 1;
     vec![
@@ -1485,7 +1456,6 @@ fn uid(seed: u64, which: u64) -> Vec<Field> {
 }
 
 /// A two-word `TSP.UUID`, from the same seed.
-#[allow(dead_code)]
 fn uuid_pair(seed: u64, which: u64) -> Vec<Field> {
     let word = |n: u64| seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (which << 32) ^ n;
     vec![varint(1, word(1)), varint(2, word(2))]
@@ -1493,7 +1463,6 @@ fn uuid_pair(seed: u64, which: u64) -> Vec<Field> {
 
 /// A paragraph style for one area of a table: bold in a header, plain in the
 /// body, 10 pt throughout, which is what the app's own table styles carry.
-#[allow(dead_code)]
 fn table_text_style(identifier: &str, name: &str, stylesheet: u64, list: u64) -> Message {
     use crate::style::property;
     message(vec![
@@ -1530,7 +1499,6 @@ fn table_text_style(identifier: &str, name: &str, stylesheet: u64, list: u64) ->
 }
 
 /// A style that is nothing but a name and the stylesheet it belongs to.
-#[allow(dead_code)]
 fn named_style(identifier: &str, stylesheet: u64) -> Message {
     message(vec![nested(
         1,
@@ -1539,7 +1507,6 @@ fn named_style(identifier: &str, stylesheet: u64) -> Message {
 }
 
 /// `TST.CellStyleArchive` — a cell's padding and its fill.
-#[allow(dead_code)]
 fn cell_style(identifier: &str, stylesheet: u64) -> Message {
     message(vec![
         nested(1, vec![string(2, identifier), reference(5, stylesheet)]),
@@ -1560,17 +1527,13 @@ fn cell_style(identifier: &str, stylesheet: u64) -> Message {
 }
 
 /// `TST.TableStyleArchive`.
-#[allow(dead_code)]
 const TYPE_TABLE_STYLE: u32 = 6003;
 /// `TST.CellStyleArchive`.
-#[allow(dead_code)]
 const TYPE_CELL_STYLE: u32 = 6004;
 /// `TSWP.ShapeStyleArchive`.
-#[allow(dead_code)]
 const TYPE_SHAPE_STYLE: u32 = 2025;
 
 /// `TST.TableModelArchive.table_id` — an uppercase UUID, as Numbers writes it.
-#[allow(dead_code)]
 fn table_id() -> String {
     crate::metadata::uuid()
 }
@@ -1580,7 +1543,6 @@ fn table_id() -> String {
 /// The layout fields are the ones a sheet Numbers made carries, kept because a
 /// sheet is a *page* as well as a container: field 7 is its zoom, 13 and 14 its
 /// print margins, 22 the style it is drawn with.
-#[allow(dead_code)]
 fn sheet_archive(name: &str, table: u64, style: u64, guides: u64, headers: &[u64]) -> Message {
     let mut fields = vec![
         string(1, name),
@@ -1637,11 +1599,9 @@ fn page_storage(stylesheet: u64, paragraph: u64, list: u64) -> Message {
 
 /// `TSD.GuideStorageArchive` — a sheet's user guides, of which a new sheet has
 /// none.
-#[allow(dead_code)]
 const TYPE_GUIDE_STORAGE: u32 = 3047;
 
 /// `TN.SheetStyleArchive` — a white sheet.
-#[allow(dead_code)]
 fn sheet_style(stylesheet: u64) -> Message {
     message(vec![
         nested(
@@ -1657,7 +1617,6 @@ fn sheet_style(stylesheet: u64) -> Message {
 }
 
 /// `TSP.Color`, white and opaque.
-#[allow(dead_code)]
 fn white() -> Vec<Field> {
     vec![
         varint(1, 1),
@@ -1671,7 +1630,6 @@ fn white() -> Vec<Field> {
 }
 
 /// `TN.SheetStyleArchive`.
-#[allow(dead_code)]
 const TYPE_SHEET_STYLE: u32 = 12050;
 
 /// `TN.DocumentArchive` — object 1, and type 1.
@@ -1679,7 +1637,6 @@ const TYPE_SHEET_STYLE: u32 = 12050;
 /// Every reference here is one the reduction could not delete: a Numbers
 /// document with no stylesheet, no theme, no `TSK` 205 or no calculation
 /// engine is refused, where a Pages document needs none of the four.
-#[allow(dead_code)]
 fn numbers_document(sheet: u64, stylesheet: u64, support: u64, theme: u64, engine: u64) -> Message {
     message(vec![
         reference(1, sheet),
@@ -1696,7 +1653,6 @@ fn numbers_document(sheet: u64, stylesheet: u64, support: u64, theme: u64, engin
 /// `{identifier, style}`, which is how the app looks one up by name. Pages
 /// keeps the same pair nested under field 8 and opens a document with neither;
 /// Numbers keeps them at the top level and does not.
-#[allow(dead_code)]
 fn numbers_stylesheet(named: &[(String, u64)]) -> Message {
     let mut fields: Vec<Field> = named
         .iter()
@@ -1801,14 +1757,12 @@ const TYPE_MEDIA_STYLE: u32 = 3016;
 /// three of the thirty go and the rest do not. A palette is indexed by
 /// position, which is the obvious reason a shorter one would not do, so this
 /// writes the count the app was watched insisting on.
-#[allow(dead_code)]
 fn numbers_theme(stylesheet: u64, presets: Field) -> Message {
     numbers_theme_with(stylesheet, presets, Vec::new())
 }
 
 /// The same, with whatever the app puts outside the `TSS.ThemeArchive` — for
 /// Keynote, the master slides.
-#[allow(dead_code)]
 fn numbers_theme_with(stylesheet: u64, presets: Field, extra: Vec<Field>) -> Message {
     let mut theme = vec![reference(4, stylesheet), presets];
     for (red, green, blue) in PALETTE {
@@ -1832,7 +1786,6 @@ fn numbers_theme_with(stylesheet: u64, presets: Field, extra: Vec<Field>) -> Mes
 
 /// Twenty-seven colours: a greyscale ramp and two rows of hues, which is the
 /// shape of the palette the apps ship.
-#[allow(dead_code)]
 const PALETTE: &[(f32, f32, f32)] = &[
     (1.0, 1.0, 1.0),
     (0.84, 0.84, 0.84),
@@ -1864,70 +1817,52 @@ const PALETTE: &[(f32, f32, f32)] = &[
 ];
 
 /// `TN.ThemeArchive`.
-#[allow(dead_code)]
 const TYPE_NUMBERS_THEME: u32 = 12009;
 /// `TSK` 205 — empty in every document measured, and required all the same.
-#[allow(dead_code)]
 const TYPE_DOCUMENT_SUPPORT: u32 = 205;
 /// `TSCE.CalculationEngineArchive`.
-#[allow(dead_code)]
 const TYPE_CALCULATION_ENGINE: u32 = 4000;
 
 // -- Keynote ------------------------------------------------------------------
 
 /// `KN.DocumentArchive` — the root of a deck, and object 1.
-#[allow(dead_code)]
 const TYPE_KEYNOTE_DOCUMENT: u32 = 1;
 /// `KN.ShowArchive`.
-#[allow(dead_code)]
 const TYPE_SHOW: u32 = 2;
 /// `KN.SlideNodeArchive` — a slide's place in the show's tree.
-#[allow(dead_code)]
 const TYPE_SLIDE_NODE: u32 = 4;
 /// `KN.SlideArchive`.
-#[allow(dead_code)]
 const TYPE_SLIDE: u32 = 5;
-/// `KN.SlideArchive` again, at the type id that makes it a *master*.
-///
-/// The registry gives 5 and 6 the same message and the same base class,
-/// `KNAbstractSlide`; which of its subclasses the unarchiver builds is the only
-/// thing that differs, and a master written at 5 dies on `-[KNSlide
-/// generateObjectPlaceholderIfNecessary]: unrecognized selector`.
-#[allow(dead_code)]
-const TYPE_MASTER_SLIDE: u32 = 6;
-
 /// `KN.SlideStyleArchive`.
-#[allow(dead_code)]
 const TYPE_SLIDE_STYLE: u32 = 9;
 /// `KN.ThemeArchive`.
-#[allow(dead_code)]
 const TYPE_KEYNOTE_THEME: u32 = 10;
 
-/// A Keynote deck with one empty slide.
+/// A Keynote deck with one empty slide, and the master it is drawn from.
 ///
-/// **Keynote does not open this yet, and [`crate::Document::new`] refuses to
-/// hand it out.** Everything it writes parses — the app reports no missing
-/// field and no unreadable message — and it then dies in a finalize handler:
+/// **What makes a slide archive a master is its `name`.** The deck died for an
+/// afternoon on
 ///
 /// ```text
 /// Caught NSInvalidArgumentException while running finalize handler:
 /// -[KNSlide generateObjectPlaceholderIfNecessary]: unrecognized selector
 /// ```
 ///
-/// Which is to say the app has a slide where it wanted a *master*, and what
-/// makes a slide archive a master is the open question. It is not the message
-/// type (5 and 6 are the same message and the app's own decks write masters at
-/// 5), not `inDocument` (true on both), not the component name (`TemplateSlide`
-/// against `Slide`, which this writes), and not the placeholders (added, all
-/// three, and the selector is still sent to a `KNSlide`).
+/// — the app holding a show slide where it wanted a master — and none of the
+/// obvious answers was the answer. Not the message type: 5 and 6 carry the same
+/// message and Keynote's own decks write masters at 5. Not `inDocument`, true
+/// on both. Not the component name, `TemplateSlide` against `Slide`, which this
+/// already wrote. Not the placeholders. What separates a master from a show
+/// slide in every deck in the corpus is that a master has `name` (field 10) and
+/// names no `template_slide`, and a show slide is the other way round — and
+/// giving the master a name is what made Keynote open this.
 ///
 /// The schemas carved out of 15.3.1 (`reference/protos-15.3`) name the required
-/// fields, so this is the first of the three written by reading rather than by
+/// fields, so this is the one of the three written by reading rather than by
 /// deleting: a `KN.ShowArchive` needs its theme, its slide tree, its size and
 /// its stylesheet; a `KN.SlideNodeArchive` needs to say whether it is skipped,
 /// has builds and has a transition; a `KN.SlideArchive` needs a style, a
 /// transition and to say it is in the document.
-#[allow(dead_code)]
 pub(crate) fn keynote(slide_size: (f32, f32)) -> Blueprint {
     let mut blueprint = Blueprint::new(Kind::Keynote);
     let document = blueprint.document();
@@ -2022,7 +1957,6 @@ pub(crate) fn keynote(slide_size: (f32, f32)) -> Blueprint {
 }
 
 /// `KN.ShowArchive` — everything about the deck that is not a slide.
-#[allow(dead_code)]
 fn show_archive(theme: u64, stylesheet: u64, node: u64, size: (f32, f32)) -> Message {
     message(vec![
         reference(2, theme),
@@ -2040,7 +1974,6 @@ fn show_archive(theme: u64, stylesheet: u64, node: u64, size: (f32, f32)) -> Mes
 /// on slide node" and "Slide background alpha expected in document saved at or
 /// after version …" for a node that leaves out 18 and 28. An optional field
 /// with a default is not always a field you may omit.
-#[allow(dead_code)]
 fn slide_node(slide: u64, seed: u64) -> Message {
     message(vec![
         reference(2, slide),
@@ -2066,7 +1999,6 @@ fn slide_node(slide: u64, seed: u64) -> Message {
 
 /// The master slide: a style, a transition, and the object placeholder every
 /// slide drawn from it inherits.
-#[allow(dead_code)]
 fn master_archive(style: u64, placeholders: &[u64]) -> Message {
     message(vec![
         reference(1, style),
@@ -2075,7 +2007,13 @@ fn master_archive(style: u64, placeholders: &[u64]) -> Message {
         reference(5, placeholders[0]),
         reference(6, placeholders[1]),
         reference(30, placeholders[2]),
+        // A master has a name and a show slide does not, which is one of the
+        // two things that tell them apart in a document Keynote wrote — the
+        // other being that a show slide names its `template_slide` and a master
+        // names none.
+        string(10, "Title"),
         varint(19, 1),
+        varint(41, 0),
     ])
 }
 
@@ -2085,7 +2023,6 @@ fn master_archive(style: u64, placeholders: &[u64]) -> Message {
 /// Four archives deep — `KN.Placeholder` over `TSWP.ShapeInfo` over `TSD.Shape`
 /// over `TSD.Drawable` — because each one's `super` is `required` and the app
 /// says so by name when it is not there.
-#[allow(dead_code)]
 fn object_placeholder(slide: u64, size: (f32, f32), kind: u64) -> Message {
     message(vec![
         nested(
@@ -2115,14 +2052,12 @@ fn object_placeholder(slide: u64, size: (f32, f32), kind: u64) -> Message {
 }
 
 /// `KN.PlaceholderArchive`.
-#[allow(dead_code)]
 const TYPE_PLACEHOLDER: u32 = 7;
 
 /// `KN.SlideArchive` — the slide itself, with nothing on it.
 ///
 /// `template_slide` is what makes it a slide rather than a master: a slide in
 /// the show names the master it is drawn from, and the master names none.
-#[allow(dead_code)]
 fn slide_archive(style: u64, template: Option<u64>) -> Message {
     let mut fields = vec![
         reference(1, style),

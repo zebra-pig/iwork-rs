@@ -147,13 +147,52 @@ fn paper_sets_the_page_and_nothing_else() {
     assert_eq!(a4.objects().count(), letter.objects().count());
 }
 
-/// Keynote says so by name rather than writing a document it will not open.
+/// A document has to be one of the three.
 #[test]
-fn the_app_that_cannot_be_created_yet_is_refused_by_name() {
-    for kind in [Kind::Keynote, Kind::Unknown] {
-        let refused = Document::new(kind);
-        assert!(refused.is_err(), "{kind:?} should not be creatable yet");
+fn a_document_of_no_kind_is_refused_by_name() {
+    assert!(Document::new(Kind::Unknown).is_err());
+}
+
+/// A new deck: one slide, one master, and a size.
+#[test]
+fn a_new_deck_has_a_slide_and_the_master_it_is_drawn_from() {
+    let doc = Document::new(Kind::Keynote).unwrap();
+    assert_eq!(doc.kind(), Kind::Keynote);
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+    assert!(doc.undeclared_references().is_empty());
+
+    let show = doc.show().expect("a deck has a show");
+    assert_eq!(show.width.round(), 1920.0);
+    assert_eq!(show.height.round(), 1080.0);
+    assert_eq!(doc.slides().len(), 1);
+    // The master is what the slide is drawn from, and it is told from a slide
+    // by having a name.
+    assert_eq!(doc.slide_layouts().len(), 1);
+}
+
+/// The measure that counts, for the deck. Off unless `IWORK_APP_CHECK=1`.
+#[test]
+fn keynote_opens_a_deck_this_crate_made_from_nothing() {
+    if std::env::var("IWORK_APP_CHECK").as_deref() != Ok("1") {
+        eprintln!("IWORK_APP_CHECK is not 1 — skipping the app round trip");
+        return;
     }
+    let doc = Document::new(Kind::Keynote).unwrap();
+    let out = scratch("iwork-created.key");
+    doc.save(&out).unwrap();
+
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/app-check.sh");
+    let output = std::process::Command::new(&script)
+        .arg(&out)
+        .output()
+        .unwrap_or_else(|e| panic!("{}: {e}", script.display()));
+    assert!(
+        output.status.success(),
+        "Keynote would not open a deck made from nothing:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = std::fs::remove_file(&out);
 }
 
 /// A new spreadsheet: one sheet, one table, and every cell of it writable.
