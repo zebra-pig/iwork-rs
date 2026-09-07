@@ -992,7 +992,12 @@ pub(crate) fn numbers(
     // document it was measured in), and a calculation engine.
     let sheet_style = blueprint.add(style_component, TYPE_SHEET_STYLE, sheet_style(stylesheet));
     named.push(("sheet-0-sheetStyle".to_string(), sheet_style));
-    let theme = blueprint.add(document, TYPE_NUMBERS_THEME, numbers_theme(stylesheet));
+    let presets = theme_presets(&mut blueprint, style_component, stylesheet, &mut named);
+    let theme = blueprint.add(
+        document,
+        TYPE_NUMBERS_THEME,
+        numbers_theme(stylesheet, presets),
+    );
     let support = blueprint.add(document, TYPE_DOCUMENT_SUPPORT, message(Vec::new()));
     // The calculation engine's component, which is also where the table lives:
     // a document Numbers wrote keeps its `TST.TableInfoArchive` and
@@ -1708,6 +1713,86 @@ fn numbers_stylesheet(named: &[(String, u64)]) -> Message {
     message(fields)
 }
 
+/// The style presets a theme carries, and the objects they name.
+///
+/// `TSD.ThemePresetsArchive`, field 100 of the theme: six line styles, six
+/// shape styles, one text-box style, six image styles, six movie styles and one
+/// drawing line style. They are not decoration either — a theme without them
+/// sends the app looking for `presetOfKind:index:` at load, and what it says
+/// then is
+///
+/// ```text
+/// Attempt to request TSSLineStylePresetKind preset for out of bounds index 0.
+/// invalid nil value for 'presetStyle'
+/// Failed to initialize object context
+/// ```
+///
+/// A line, shape, text-box or drawing-line preset is a `TSWP.ShapeStyleArchive`
+/// — whose `super` is a `TSD.ShapeStyleArchive` whose `super` is the
+/// `TSS.StyleArchive`, two levels down — and an image or movie preset is a
+/// `TSD.MediaStyleArchive`, one level down. Getting that wrong is what
+/// "missing required fields: super.super" means.
+fn theme_presets(
+    blueprint: &mut Blueprint,
+    component: ComponentId,
+    stylesheet: u64,
+    named: &mut Vec<(String, u64)>,
+) -> Field {
+    let shape =
+        |blueprint: &mut Blueprint, named: &mut Vec<(String, u64)>, kind: &str, index: usize| {
+            let identifier = format!("{kind}-preset-{index}");
+            let style = blueprint.add(
+                component,
+                TYPE_SHAPE_STYLE,
+                message(vec![nested(
+                    1,
+                    vec![nested(
+                        1,
+                        vec![string(2, &identifier), reference(5, stylesheet)],
+                    )],
+                )]),
+            );
+            named.push((identifier, style));
+            style
+        };
+    let mut presets = Vec::new();
+    for index in 0..6 {
+        presets.push(reference(4, shape(blueprint, named, "line-style", index)));
+    }
+    for index in 0..6 {
+        presets.push(reference(5, shape(blueprint, named, "shape-style", index)));
+    }
+    presets.push(reference(6, shape(blueprint, named, "textbox-style", 0)));
+    let media =
+        |blueprint: &mut Blueprint, named: &mut Vec<(String, u64)>, kind: &str, index: usize| {
+            let identifier = format!("{kind}-preset-{index}");
+            let style = blueprint.add(
+                component,
+                TYPE_MEDIA_STYLE,
+                message(vec![nested(
+                    1,
+                    vec![string(2, &identifier), reference(5, stylesheet)],
+                )]),
+            );
+            named.push((identifier, style));
+            style
+        };
+    for index in 0..6 {
+        presets.push(reference(7, media(blueprint, named, "image-style", index)));
+    }
+    for index in 0..6 {
+        presets.push(reference(8, media(blueprint, named, "movie-style", index)));
+    }
+    presets.push(reference(
+        9,
+        shape(blueprint, named, "drawing-line-style", 0),
+    ));
+    nested(100, presets)
+}
+
+/// `TSD.MediaStyleArchive`.
+const TYPE_MEDIA_STYLE: u32 = 3016;
+
 /// The theme: a stylesheet, and the palette every style picks its colours from.
 ///
 /// The palette is not decoration. Reducing a theme Numbers wrote gives up its
@@ -1716,8 +1801,15 @@ fn numbers_stylesheet(named: &[(String, u64)]) -> Message {
 /// position, which is the obvious reason a shorter one would not do, so this
 /// writes the count the app was watched insisting on.
 #[allow(dead_code)]
-fn numbers_theme(stylesheet: u64) -> Message {
-    let mut theme = vec![reference(4, stylesheet)];
+fn numbers_theme(stylesheet: u64, presets: Field) -> Message {
+    numbers_theme_with(stylesheet, presets, Vec::new())
+}
+
+/// The same, with whatever the app puts outside the `TSS.ThemeArchive` — for
+/// Keynote, the master slides.
+#[allow(dead_code)]
+fn numbers_theme_with(stylesheet: u64, presets: Field, extra: Vec<Field>) -> Message {
+    let mut theme = vec![reference(4, stylesheet), presets];
     for (red, green, blue) in PALETTE {
         theme.push(nested(
             10,
@@ -1732,7 +1824,9 @@ fn numbers_theme(stylesheet: u64) -> Message {
             ],
         ));
     }
-    message(vec![nested(1, theme)])
+    let mut fields = vec![nested(1, theme)];
+    fields.extend(extra);
+    message(fields)
 }
 
 /// Twenty-seven colours: a greyscale ramp and two rows of hues, which is the
@@ -1777,6 +1871,272 @@ const TYPE_DOCUMENT_SUPPORT: u32 = 205;
 /// `TSCE.CalculationEngineArchive`.
 #[allow(dead_code)]
 const TYPE_CALCULATION_ENGINE: u32 = 4000;
+
+// -- Keynote ------------------------------------------------------------------
+
+/// `KN.DocumentArchive` — the root of a deck, and object 1.
+#[allow(dead_code)]
+const TYPE_KEYNOTE_DOCUMENT: u32 = 1;
+/// `KN.ShowArchive`.
+#[allow(dead_code)]
+const TYPE_SHOW: u32 = 2;
+/// `KN.SlideNodeArchive` — a slide's place in the show's tree.
+#[allow(dead_code)]
+const TYPE_SLIDE_NODE: u32 = 4;
+/// `KN.SlideArchive`.
+#[allow(dead_code)]
+const TYPE_SLIDE: u32 = 5;
+/// `KN.SlideArchive` again, at the type id that makes it a *master*.
+///
+/// The registry gives 5 and 6 the same message and the same base class,
+/// `KNAbstractSlide`; which of its subclasses the unarchiver builds is the only
+/// thing that differs, and a master written at 5 dies on `-[KNSlide
+/// generateObjectPlaceholderIfNecessary]: unrecognized selector`.
+#[allow(dead_code)]
+const TYPE_MASTER_SLIDE: u32 = 6;
+
+/// `KN.SlideStyleArchive`.
+#[allow(dead_code)]
+const TYPE_SLIDE_STYLE: u32 = 9;
+/// `KN.ThemeArchive`.
+#[allow(dead_code)]
+const TYPE_KEYNOTE_THEME: u32 = 10;
+
+/// A Keynote deck with one empty slide.
+///
+/// **Keynote does not open this yet, and [`crate::Document::new`] refuses to
+/// hand it out.** Everything it writes parses — the app reports no missing
+/// field and no unreadable message — and it then dies in a finalize handler:
+///
+/// ```text
+/// Caught NSInvalidArgumentException while running finalize handler:
+/// -[KNSlide generateObjectPlaceholderIfNecessary]: unrecognized selector
+/// ```
+///
+/// Which is to say the app has a slide where it wanted a *master*, and what
+/// makes a slide archive a master is the open question. It is not the message
+/// type (5 and 6 are the same message and the app's own decks write masters at
+/// 5), not `inDocument` (true on both), not the component name (`TemplateSlide`
+/// against `Slide`, which this writes), and not the placeholders (added, all
+/// three, and the selector is still sent to a `KNSlide`).
+///
+/// The schemas carved out of 15.3.1 (`reference/protos-15.3`) name the required
+/// fields, so this is the first of the three written by reading rather than by
+/// deleting: a `KN.ShowArchive` needs its theme, its slide tree, its size and
+/// its stylesheet; a `KN.SlideNodeArchive` needs to say whether it is skipped,
+/// has builds and has a transition; a `KN.SlideArchive` needs a style, a
+/// transition and to say it is in the document.
+#[allow(dead_code)]
+pub(crate) fn keynote(slide_size: (f32, f32)) -> Blueprint {
+    let mut blueprint = Blueprint::new(Kind::Keynote);
+    let document = blueprint.document();
+    let seed = {
+        let hex = crate::metadata::uuid().replace('-', "");
+        u64::from_str_radix(&hex[0..16], 16).unwrap_or(0x9E37_79B9_7F4A_7C15)
+    };
+    let (style_component, stylesheet) = blueprint.component("DocumentStylesheet", false);
+
+    let slide_style = blueprint.add(
+        style_component,
+        TYPE_SLIDE_STYLE,
+        named_style("slide-style-default", stylesheet),
+    );
+    let mut named = vec![("slide-style-default".to_string(), slide_style)];
+
+    let presets = theme_presets(&mut blueprint, style_component, stylesheet, &mut named);
+    let theme = blueprint.allocate();
+    blueprint.put(
+        style_component,
+        stylesheet,
+        TYPE_STYLESHEET,
+        numbers_stylesheet(&named),
+    );
+    // Both slides live in components of their own: a slide node holds a *lazy*
+    // reference to its slide, and a slide in `Document` is one the app reports
+    // as "Failed to load lazy slide reference".
+    //
+    // The template slide is the master this one is drawn from. A deck without
+    // one loads and then says "invalid nil value for 'masterSlide'".
+    // The master's object placeholder — the frame a slide's own content lands
+    // in. A master without one sends the app looking for
+    // `generateObjectPlaceholderIfNecessary`, which is a method the show-slide
+    // class does not have, and the deck dies on the selector.
+    let (template_component, template) = blueprint.component("TemplateSlide", true);
+    // All three of them: a master has a title, a body and an object
+    // placeholder, and a slide drawn from it inherits the frames.
+    let placeholders: Vec<u64> = [2u64, 3, 4]
+        .iter()
+        .map(|kind| {
+            blueprint.add(
+                template_component,
+                TYPE_PLACEHOLDER,
+                object_placeholder(template, slide_size, *kind),
+            )
+        })
+        .collect();
+    blueprint.put(
+        template_component,
+        template,
+        TYPE_SLIDE,
+        master_archive(slide_style, &placeholders),
+    );
+    let template_node = blueprint.add(document, TYPE_SLIDE_NODE, slide_node(template, seed));
+    let slide = blueprint.in_own_component(
+        "Slide",
+        TYPE_SLIDE,
+        slide_archive(slide_style, Some(template)),
+    );
+    let node = blueprint.add(document, TYPE_SLIDE_NODE, slide_node(slide, seed));
+    blueprint.put(
+        document,
+        theme,
+        TYPE_KEYNOTE_THEME,
+        numbers_theme_with(
+            stylesheet,
+            presets,
+            vec![
+                // `templates`, and the one to draw a new slide from.
+                reference(2, template_node),
+                string(3, &crate::metadata::uuid()),
+                reference(5, template_node),
+                reference(6, template_node),
+            ],
+        ),
+    );
+    let show = blueprint.add(
+        document,
+        TYPE_SHOW,
+        show_archive(theme, stylesheet, node, slide_size),
+    );
+    blueprint.put(
+        document,
+        ROOT,
+        TYPE_KEYNOTE_DOCUMENT,
+        message(vec![
+            reference(2, show),
+            nested(3, vec![nested(1, Vec::new())]),
+        ]),
+    );
+    blueprint
+}
+
+/// `KN.ShowArchive` — everything about the deck that is not a slide.
+#[allow(dead_code)]
+fn show_archive(theme: u64, stylesheet: u64, node: u64, size: (f32, f32)) -> Message {
+    message(vec![
+        reference(2, theme),
+        // The slide tree: `{2: repeated slide node}`.
+        nested(3, vec![reference(2, node)]),
+        nested(4, vec![float(1, size.0), float(2, size.1)]),
+        reference(5, stylesheet),
+    ])
+}
+
+/// `KN.SlideNodeArchive` — where a slide sits in the show.
+///
+/// Three of these are `required` in the schema and two more are `optional` and
+/// insisted on anyway: Keynote's own loader says "Missing isSlideNumberVisible
+/// on slide node" and "Slide background alpha expected in document saved at or
+/// after version …" for a node that leaves out 18 and 28. An optional field
+/// with a default is not always a field you may omit.
+#[allow(dead_code)]
+fn slide_node(slide: u64, seed: u64) -> Message {
+    message(vec![
+        reference(2, slide),
+        // `isSkipped`, `hasBuilds`, `hasTransition`, `hasNote`.
+        varint(4, 0),
+        varint(6, 0),
+        varint(7, 0),
+        varint(8, 0),
+        varint(14, 1),
+        // `isSlideNumberVisible`.
+        varint(18, 0),
+        varint(20, 0),
+        // `depth`: a slide at the top level of the outline.
+        varint(21, 1),
+        varint(26, 4294967295),
+        varint(27, 2),
+        // `background_is_no_fill_or_color_fill_with_alpha`.
+        varint(28, 0),
+        // `template_slide_id`.
+        nested(29, uuid_pair(seed, 9)),
+    ])
+}
+
+/// The master slide: a style, a transition, and the object placeholder every
+/// slide drawn from it inherits.
+#[allow(dead_code)]
+fn master_archive(style: u64, placeholders: &[u64]) -> Message {
+    message(vec![
+        reference(1, style),
+        nested(4, vec![nested(2, Vec::new())]),
+        // Title, body and object, at the fields that name each.
+        reference(5, placeholders[0]),
+        reference(6, placeholders[1]),
+        reference(30, placeholders[2]),
+        varint(19, 1),
+    ])
+}
+
+/// `KN.PlaceholderArchive` for the object placeholder: a shape covering the
+/// slide, and nothing in it.
+///
+/// Four archives deep — `KN.Placeholder` over `TSWP.ShapeInfo` over `TSD.Shape`
+/// over `TSD.Drawable` — because each one's `super` is `required` and the app
+/// says so by name when it is not there.
+#[allow(dead_code)]
+fn object_placeholder(slide: u64, size: (f32, f32), kind: u64) -> Message {
+    message(vec![
+        nested(
+            1,
+            vec![nested(
+                1,
+                vec![nested(
+                    1,
+                    vec![
+                        nested(
+                            1,
+                            vec![
+                                nested(1, vec![float(1, 0.0), float(2, 0.0)]),
+                                nested(2, vec![float(1, size.0), float(2, size.1)]),
+                                varint(3, 0),
+                                float(4, 0.0),
+                            ],
+                        ),
+                        reference(2, slide),
+                    ],
+                )],
+            )],
+        ),
+        // 2 title, 3 body, 4 object.
+        varint(2, kind),
+    ])
+}
+
+/// `KN.PlaceholderArchive`.
+#[allow(dead_code)]
+const TYPE_PLACEHOLDER: u32 = 7;
+
+/// `KN.SlideArchive` — the slide itself, with nothing on it.
+///
+/// `template_slide` is what makes it a slide rather than a master: a slide in
+/// the show names the master it is drawn from, and the master names none.
+#[allow(dead_code)]
+fn slide_archive(style: u64, template: Option<u64>) -> Message {
+    let mut fields = vec![
+        reference(1, style),
+        // A transition, which every slide has whether or not it does anything.
+        nested(4, vec![nested(2, Vec::new())]),
+        // `inDocument`, and it is true on a master as well — what tells the
+        // two apart is the component each lives in, `Slide-1031` against
+        // `TemplateSlide-1029`.
+        varint(19, 1),
+    ];
+    if let Some(template) = template {
+        fields.push(reference(17, template));
+    }
+    message(fields)
+}
 
 #[cfg(test)]
 mod tests {
