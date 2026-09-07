@@ -52,6 +52,7 @@
 //! ```
 
 pub mod annotations;
+pub mod calc;
 pub mod chart;
 pub mod create;
 pub mod document;

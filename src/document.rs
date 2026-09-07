@@ -160,6 +160,8 @@ struct CellSite {
     strings: Option<u64>,
     formats: Option<u64>,
     controls: Option<u64>,
+    /// The `FORMULA` list, which a filled formula takes another reference in.
+    formulas: Option<u64>,
     /// `TST.HeaderStorageBucket`s carrying the per-row and per-column cell
     /// counts, which change when a cell appears or disappears.
     row_bucket: Vec<u64>,
@@ -1576,6 +1578,7 @@ impl Document {
             strings: list(4),
             formats: list(22),
             controls: list(21),
+            formulas: list(6),
             row_bucket: store
                 .bytes(1)
                 .and_then(crate::pb::decode_nested)
@@ -2063,6 +2066,234 @@ impl Document {
             archive.fields.remove(at);
         }
         self.set_archive(list, &archive)
+    }
+
+    // -- filling a formula ---------------------------------------------------
+
+    /// Give a cell the formula another cell in the same table holds.
+    ///
+    /// This is *fill*, and it is the only way to write a formula here. A
+    /// formula lives in the table's `FORMULA` list and a cell holds its key;
+    /// the entry names no host cell, which is why one entry serves a whole
+    /// filled column and why giving another cell the same key is a real fill
+    /// rather than a trick — a **relative** reference in the formula is
+    /// relative to whichever cell holds it, so `=B2+1` in C2 is `=B3+1` in C3,
+    /// exactly as the app's own fill does.
+    ///
+    /// **The value is the caller's**, and it has to be: Numbers shows what is
+    /// written in the cell until something the formula reads changes, and this
+    /// crate evaluates nothing. `None` says "the source's value", which is
+    /// refused unless every reference in the formula is absolute — the one case
+    /// where the source's answer is the target's too.
+    ///
+    /// The formula is *live*: the cell is registered in the calculation
+    /// engine's dependency graph ([`crate::calc`]), so the app recalculates it
+    /// whenever a cell it reads changes. Watched, with `=B1+B2` filled from
+    /// `=A1+A2`: 0 on opening, 12 after `B1=5, B2=7`, 8 after `B1=1`.
+    ///
+    /// Refused by name: a source with no formula, a target that already holds
+    /// one, a formula that reads another table or a whole row or column (whose
+    /// dependency edges this crate does not write), an out-of-range cell, a
+    /// merge-covered target, a table with no formula list, and any object
+    /// carrying version patches.
+    pub fn fill_formula(
+        &mut self,
+        wanted: &str,
+        from: (usize, usize),
+        to: (usize, usize),
+        value: Option<CellValue>,
+    ) -> Result<(), Error> {
+        let table = self.table_for_write(wanted)?;
+        let where_ = format!("{} r{}c{} → r{}c{}", table.name, from.0, from.1, to.0, to.1);
+        for (row, column) in [from, to] {
+            if row >= table.rows || column >= table.columns {
+                return Err(Error::Format(format!(
+                    "{where_}: the table is {}×{}",
+                    table.rows, table.columns
+                )));
+            }
+        }
+        if from == to {
+            return Err(Error::Format(format!("{where_}: the same cell")));
+        }
+        if let Some(merge) = table.merge_covering(to.0, to.1) {
+            if (merge.row, merge.column) != to {
+                return Err(Error::Format(format!(
+                    "{where_}: the target is covered by a merge"
+                )));
+            }
+        }
+
+        let source = self.cell_site(&table, from.0, from.1)?;
+        let source_record = source
+            .record
+            .as_ref()
+            .ok_or_else(|| Error::Format(format!("{where_}: the source cell is empty")))?;
+        let source_record = crate::table::decode_cell(source_record)
+            .map_err(|e| Error::Format(format!("{where_}: {e}")))?;
+        let formula = source_record
+            .formula_id
+            .ok_or_else(|| Error::Format(format!("{where_}: the source holds no formula")))?;
+
+        // What the formula will read from where it is going. The engine has to
+        // be told, or the app never recalculates the cell — and if this crate
+        // cannot work out every cell it reads, registering half a graph would
+        // be worse than refusing.
+        let ast = table
+            .formula_cells()
+            .into_iter()
+            .find(|(row, column, _)| (*row, *column) == from)
+            .map(|(_, _, formula)| formula)
+            .ok_or_else(|| {
+                Error::Format(format!("{where_}: the source's formula does not decode"))
+            })?;
+        let precedents = crate::calc::precedents_of(ast, to.0, to.1).ok_or_else(|| {
+            Error::Format(format!(
+                "{where_}: the formula reads something this crate cannot resolve to cells of \
+                 this table — another table, a whole row or column, or a stored #REF! — and a \
+                 formula the engine only half knows about is one the app would recalculate \
+                 wrongly"
+            ))
+        })?;
+
+        let site = self.cell_site(&table, to.0, to.1)?;
+        let old = match &site.record {
+            Some(bytes) => crate::table::decode_cell(bytes)
+                .map_err(|e| Error::Format(format!("{where_}: {e}")))?,
+            None => crate::table::CellRecord {
+                version: 5,
+                ..crate::table::CellRecord::default()
+            },
+        };
+        if old.formula_id.is_some() {
+            return Err(Error::Format(format!(
+                "{where_}: the target already holds a formula, and taking one out means \
+                 editing the calculation engine"
+            )));
+        }
+        if old.cell_type == crate::table::cell_type::RICH_TEXT || old.rich_id.is_some() {
+            return Err(Error::Format(format!(
+                "{where_}: the target holds rich text"
+            )));
+        }
+        let list = site
+            .formulas
+            .ok_or_else(|| Error::Format(format!("{where_}: the table has no formula list")))?;
+        self.refuse_if_patched(&[site.tile, list], &where_)?;
+
+        // The value the target will *show*. Numbers shows whatever is written
+        // here until something the formula reads changes, so it is the
+        // caller's: `None` says "the source's", which is the right answer only
+        // when the formula cannot mean anything different where it is going.
+        let value = match value {
+            Some(value) => value,
+            None => {
+                self.refuse_if_the_answer_would_move(ast, &where_)?;
+                table.value(from.0, from.1)
+            }
+        };
+        match value {
+            CellValue::Empty
+            | CellValue::Text(_)
+            | CellValue::Number(_)
+            | CellValue::Bool(_)
+            | CellValue::Date(_)
+            | CellValue::Duration(_) => {}
+            other => {
+                return Err(Error::Format(format!(
+                    "{where_}: this crate does not write {} cells",
+                    other.kind()
+                )))
+            }
+        }
+
+        // The value goes in through the same planner every other write uses —
+        // string interning, format borrowing, reference counts and all — and
+        // the formula key is the one thing added on top.
+        let write = self.rewrite_record(&table, &site, old, &value, &where_)?;
+        let mut record = write
+            .record
+            .ok_or_else(|| Error::Format(format!("{where_}: a formula cell cannot be empty")))?;
+        record.formula_id = Some(formula);
+        let mut mutations = write.mutations;
+        mutations.push(ListMutation::Retain { list, key: formula });
+
+        let staged = self.stage_store(&site, &Some(record), &where_)?;
+        for mutation in &mutations {
+            self.apply_mutation(mutation)?;
+        }
+        self.write_store(&site, staged)?;
+        crate::calc::register_formula(
+            self,
+            &table,
+            &crate::calc::Dependency {
+                row: to.0,
+                column: to.1,
+                precedents,
+            },
+        )?;
+        Ok(())
+    }
+
+    /// Refuse a fill whose answer would differ from the value it copies.
+    ///
+    /// **Numbers does not recalculate a filled cell.** The value in the record
+    /// is what the app shows, on opening and after saving, and it goes on
+    /// showing it: a cell filled with a formula whose cached value belongs to
+    /// another row was watched reporting that other row's answer, and still
+    /// reporting it after Numbers had loaded the document and written it back.
+    /// Editing a cell the formula depends on does not help either — the
+    /// engine's dependency graph has no edge for a cell this crate added, so
+    /// the recalculation never reaches it.
+    ///
+    /// What follows is a rule, not a workaround: a fill is allowed exactly when
+    /// the formula's answer cannot depend on where the formula sits — every
+    /// reference **absolute** on both axes, and no whole-row or whole-column
+    /// reference. Then the value copied is the value the target computes, and
+    /// the document is right the moment it opens. A relative reference is
+    /// refused by name, because the alternative is a document showing a number
+    /// that is wrong.
+    fn refuse_if_the_answer_would_move(
+        &self,
+        formula: &crate::formula::Formula,
+        where_: &str,
+    ) -> Result<(), Error> {
+        use crate::formula::Axis;
+        for node in &formula.ast.nodes {
+            let Some(reference) = node.reference() else {
+                continue;
+            };
+            if reference.is_error {
+                return Err(Error::Format(format!(
+                    "{where_}: the source's formula holds a stored #REF!"
+                )));
+            }
+            for axis in [
+                reference.column,
+                reference.row,
+                reference.column_end,
+                reference.row_end,
+            ] {
+                match axis {
+                    Axis::Absolute(_) => {}
+                    Axis::Relative(_) => {
+                        return Err(Error::Format(format!(
+                            "{where_}: the source's formula has a relative reference, so its \
+                             answer moves with it — and Numbers shows the value this crate \
+                             writes rather than recalculating, so the filled cell would show \
+                             the source's answer for ever. FORMAT.md §9 has the measurement."
+                        )))
+                    }
+                    Axis::Unbounded => {
+                        return Err(Error::Format(format!(
+                            "{where_}: the source's formula names a whole row or column, whose \
+                             answer depends on where the formula sits"
+                        )))
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     // -- inserting a row -----------------------------------------------------

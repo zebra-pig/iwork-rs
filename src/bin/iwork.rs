@@ -106,6 +106,9 @@ tables
                                            add a table to a sheet that exists
   iwork add-sheet <file> <name> <table> <rows> <cols> <out>
                                            add a sheet with one table on it
+  iwork fill-formula <file> <table> <from> <to> [value] <out>
+                                           give a cell the formula another
+                                           holds, and the value it shows
 
 charts
 
@@ -270,6 +273,12 @@ fn main() -> ExitCode {
         ["annotations", file] => annotations(file),
         ["duplicate", file, out] => duplicate(file, out),
         ["new", template, out] => new_document(template, out),
+        ["fill-formula", file, table, from, to, out] => {
+            fill_formula(file, table, from, to, None, out)
+        }
+        ["fill-formula", file, table, from, to, value, out] => {
+            fill_formula(file, table, from, to, Some(value), out)
+        }
         ["add-sheet", file, name, table, rows, columns, out] => index(rows)
             .and_then(|rows| Ok((rows, index(columns)?)))
             .and_then(|(rows, columns)| add_sheet(file, name, table, rows, columns, out)),
@@ -676,6 +685,36 @@ fn create_document(kind: &str, out: &str, paper: Option<&str>) -> Result<(), Err
         doc.kind().as_str(),
         doc.objects().count()
     );
+    Ok(())
+}
+
+fn fill_formula(
+    path: &str,
+    table: &str,
+    from: &str,
+    to: &str,
+    value: Option<&str>,
+    out: &str,
+) -> Result<(), Error> {
+    let mut doc = Document::open(path)?;
+    let from = reference_position(from)?;
+    let to = reference_position(to)?;
+    let value = match value {
+        Some(text) => Some(parse_cell_value(text)?),
+        None => None,
+    };
+    doc.fill_formula(table, from, to, value)?;
+    let shown = doc
+        .table(table)
+        .map(|t| t.value(to.0, to.1).to_text())
+        .unwrap_or_default();
+    doc.save(out)?;
+    println!(
+        "filled r{}c{} into r{}c{}, showing {shown:?}",
+        from.0, from.1, to.0, to.1
+    );
+    println!("  the app recalculates it when a cell it reads changes");
+    report_streams(&doc, out);
     Ok(())
 }
 

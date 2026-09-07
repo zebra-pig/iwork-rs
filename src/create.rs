@@ -2417,6 +2417,14 @@ pub(crate) fn build_table(
     Ok((info, model, info_archive, model_archive))
 }
 
+/// A whole message as a length-delimited field.
+pub(crate) fn nested_message(number: u32, inner: Message) -> Field {
+    Field {
+        number,
+        value: Value::Bytes(inner.encode()),
+    }
+}
+
 /// A `TSP.Reference` to one object, encoded — for a caller appending one to a
 /// repeated field.
 pub(crate) fn reference_bytes(target: u64) -> Vec<u8> {
