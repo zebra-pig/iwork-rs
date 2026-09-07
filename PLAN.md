@@ -557,15 +557,26 @@ written formula has to be evaluated before it is saved (the cell caches the
 result), registered in the calculation engine's dependency graph (whose edge
 encoding nobody here has decoded), and — across tables — tracked by UID.
 
-- [ ] Decode the dependency graph: what `TSCE.FormulaOwnerDependenciesArchive`
+- [x] Decode the dependency graph: what `TSCE.FormulaOwnerDependenciesArchive`
       and the cell-record tiles actually hold, and what changes when Numbers is
-      made to add one formula to a document that has none.
-- [ ] Decide what "evaluated" can honestly mean here: a cached value the crate
-      computed, or a cell marked dirty for the app to recalculate. The second is
-      worth trying first — if a formula with no cached value recalculates on
-      open, the evaluator is not needed at all.
-- [ ] Write one formula into one cell, app-verified, and refuse everything the
-      probes do not reach.
+      made to add one formula to a document that has none. *(Exactly three
+      things, and 22 bytes: an expanded record on the owner, the same record in
+      a tile, and the engine's formula count. The edges are the precedents,
+      resolved against the host cell.)*
+- [x] Decide what "evaluated" can honestly mean here. *(Neither: the app never
+      recalculates on open, so no cached value the crate computes is needed —
+      the **caller** supplies the value, and `None` is refused unless the
+      formula's answer cannot move. `ReferencesToDirtyArchive` does nothing.)*
+- [x] Write one formula into one cell, app-verified, and refuse everything the
+      probes do not reach. *(`fill_formula`; Numbers recalculated the filled
+      cell through a chain — 8 on opening, then 21 after a cell two columns back
+      changed. Cross-table references, whole rows and columns and stored
+      `#REF!`s are refused: their edges carry an owner id this crate does not
+      write.)*
+
+*(Done for the fill. What is **not** here: building a formula from text or from
+an AST — there is no parser and no encoder — so every formula written is one the
+document already had somewhere.)*
 
 ## Phase 13 — Drawables from nothing
 
