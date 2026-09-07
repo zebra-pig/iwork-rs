@@ -215,12 +215,26 @@ struct StagedRow {
 
 /// A planned row insert: the objects it rewrites, each with its new archive, so
 /// the whole write is proven before any of it is applied.
+/// Every object a column insert rewrites, and its new form.
+struct ColumnInsertPlan {
+    touched: Vec<u64>,
+    model: u64,
+    model_archive: Message,
+    /// One entry per tile: the tile, and its rows with a gap opened.
+    tiles: Vec<(u64, Message)>,
+    column_bucket: u64,
+    bucket_archive: Message,
+    uid_map: u64,
+    uid_map_archive: Message,
+}
+
 struct RowInsertPlan {
     touched: Vec<u64>,
     model: u64,
     model_archive: Message,
-    tile: u64,
-    tile_archive: Message,
+    /// One entry per tile the insert rewrites — more than one when the shift
+    /// pushes a row over a tile boundary.
+    tiles: Vec<(u64, Message)>,
     row_bucket: u64,
     bucket_archive: Message,
     uid_map: u64,
@@ -2305,19 +2319,22 @@ impl Document {
     /// by name — before a single byte moves, so a refused insert leaves the
     /// document byte for byte as it was.
     ///
-    /// **What it supports.** A plain rectangular table held in a single tile:
-    /// the row count is bumped, the tile's `TileRowInfo`s at or below the
-    /// insertion have their `tile_row_index` shifted down, the row header
-    /// bucket's per-row entries are shifted and one is added for the new empty
-    /// row, and the `ColumnRowUIDMapArchive` gains a fresh per-table-unique row
-    /// UUID at the new index (rebuilt sorted by UUID, the way the app keeps it).
-    /// The new row has no `TileRowInfo` and no cells — an empty row has none —
-    /// so [`Document::set_cell`] is what fills it afterwards.
+    /// **What it supports.** A plain rectangular table, over any number of
+    /// tiles: the row count is bumped, every `TileRowInfo` at or below the
+    /// insertion is shifted down — **across tile boundaries where the shift
+    /// crosses one**, since a row's absolute index is
+    /// `tileid * tile_size + tile_row_index` — the row header bucket's per-row
+    /// entries are shifted and one is added for the new empty row, and the
+    /// `ColumnRowUIDMapArchive` gains a fresh per-table-unique row UUID at the
+    /// new index (rebuilt sorted by UUID, the way the app keeps it). The new
+    /// row has no `TileRowInfo` and no cells — an empty row has none — so
+    /// [`Document::set_cell`] is what fills it afterwards.
     ///
     /// **What it refuses, by name**, because no corpus fixture proves the
     /// bookkeeping and a wrong guess corrupts silently:
     ///
-    /// * a table spread over more than one tile (the tile math is unproven);
+    /// * a table that fills every tile it has — the row would need a tile of
+    ///   its own, which is a new object *and* a new component;
     /// * a categorised, pivoted or filtered table, or one with hidden or
     ///   collapsed rows — the group nodes address rows by index and the hidden
     ///   state by UUID, two schemes that must stay in step, and nothing here has
@@ -2398,10 +2415,438 @@ impl Document {
         // Commit: every object was decoded during planning, so nothing below
         // refuses a write already committed to.
         self.set_archive(plan.model, &plan.model_archive)?;
-        self.set_archive(plan.tile, &plan.tile_archive)?;
+        for (tile, archive) in &plan.tiles {
+            self.set_archive(*tile, archive)?;
+        }
         self.set_archive(plan.row_bucket, &plan.bucket_archive)?;
         self.set_archive(plan.uid_map, &plan.uid_map_archive)?;
         Ok(())
+    }
+
+    // -- inserting a column --------------------------------------------------
+
+    /// Insert an empty column before index `at`; `at == columns` appends.
+    ///
+    /// Transactional the same way [`Document::insert_row`] is: the whole write
+    /// is planned, and every case this crate cannot maintain safely is refused
+    /// by name, before a byte moves.
+    ///
+    /// **A column is not a row turned sideways.** A row is a `TileRowInfo` of
+    /// its own and inserting one shifts whole objects; a column exists only as
+    /// *one entry in every row's offset array*, so inserting one rewrites every
+    /// row of every tile — slice the row into its per-column records, open a
+    /// gap at `at`, lay them back out, and every offset after the gap moves.
+    /// That is also why a column insert is **not** limited to a single tile the
+    /// way a row insert is: the work is per row, and a tile boundary is a row
+    /// boundary, so a second tile is more of the same rather than something new.
+    ///
+    /// The offset array keeps the length it arrived with — Numbers pads it to
+    /// 255 entries whatever the table's width, and that padding is what a
+    /// reader steps through — so the last entry falls off the end as the gap
+    /// opens. A table already 255 columns wide is refused rather than losing a
+    /// column out of the back.
+    ///
+    /// **What it refuses, by name**, for the same reasons the row insert does:
+    /// a categorised, pivoted or filtered table; conditional highlighting;
+    /// hidden columns; a merge at or straddling the insertion; any formula
+    /// whose reference to this table names a column at or after it; and any
+    /// object the write would touch that carries version patches.
+    pub fn insert_column(&mut self, wanted: &str, at: usize) -> Result<(), Error> {
+        let table = self.table_for_write(wanted)?;
+        let where_ = format!("{}: insert column at {at}", table.name);
+
+        if at > table.columns {
+            return Err(Error::Format(format!(
+                "{where_}: the table has {} column(s), so a column goes in at 0..={}",
+                table.columns, table.columns
+            )));
+        }
+        if table.columns >= MAX_COLUMNS {
+            return Err(Error::Format(format!(
+                "{where_}: the table already has {} columns, which is what a row's offset array \
+                 holds — one more would fall off the end of every row",
+                table.columns
+            )));
+        }
+        if !table.categories.is_empty() {
+            return Err(Error::Format(format!(
+                "{where_}: the table is categorised, and a category is built on a column — \
+                 which column it is is stored by index"
+            )));
+        }
+        if table.pivot.is_some() {
+            return Err(Error::Format(format!(
+                "{where_}: the table is a pivot table, whose columns the app builds from its \
+                 source"
+            )));
+        }
+        if table.filter.is_some() {
+            return Err(Error::Format(format!(
+                "{where_}: the table is filtered, and a filter names the column it tests"
+            )));
+        }
+        if !table.conditional_styles.is_empty() {
+            return Err(Error::Format(format!(
+                "{where_}: the table carries conditional highlighting, whose rule ranges are \
+                 column addressed"
+            )));
+        }
+        if !table.column_states.user_hidden.is_empty()
+            || table.column_extents.iter().any(|extent| extent.hidden())
+        {
+            return Err(Error::Format(format!(
+                "{where_}: the table has hidden columns, addressed by UUID"
+            )));
+        }
+        if let Some(merge) = table.merges.iter().find(|m| m.column + m.columns > at) {
+            return Err(Error::Format(format!(
+                "{where_}: a merge at row {} column {} would shift or straddle the new column, \
+                 and a merge is stored as an absolute formula this crate does not rewrite",
+                merge.row, merge.column
+            )));
+        }
+        if let Some(reason) = self.column_insert_would_break_a_formula(&table, at) {
+            return Err(Error::Format(format!("{where_}: {reason}")));
+        }
+
+        let plan = self.plan_column_insert(&table, at, &where_)?;
+        self.refuse_if_patched(&plan.touched, &where_)?;
+
+        self.set_archive(plan.model, &plan.model_archive)?;
+        for (tile, archive) in &plan.tiles {
+            self.set_archive(*tile, archive)?;
+        }
+        self.set_archive(plan.column_bucket, &plan.bucket_archive)?;
+        self.set_archive(plan.uid_map, &plan.uid_map_archive)?;
+        Ok(())
+    }
+
+    /// Would inserting a column at `at` shift what a formula refers to?
+    ///
+    /// The column-axis twin of
+    /// [`Document::row_insert_would_break_a_formula`], and the reasoning is the
+    /// same: a whole-*row* reference (column axis `Unbounded`) is unaffected, an
+    /// absolute column is safe only left of the insertion, and a relative one is
+    /// safe only when host and referent fall on the same side of it.
+    fn column_insert_would_break_a_formula(
+        &self,
+        target: &crate::table::Table,
+        at: usize,
+    ) -> Option<String> {
+        use crate::formula::Axis;
+        let at = at as i64;
+        let target_base = target.base_uid;
+        for t in self.tables() {
+            let same_table = t.model == target.model;
+            for (_row, column, formula) in t.formula_cells() {
+                let host_column = column as i64;
+                for node in &formula.ast.nodes {
+                    if !is_reference_node(node.kind) {
+                        continue;
+                    }
+                    let Some(reference) = node.reference() else {
+                        if same_table || is_cross_table_node(node.kind) {
+                            return Some(format!(
+                                "table {} holds a formula with a reference this crate cannot \
+                                 analyse ({}), so an inserted column might silently break it",
+                                t.name,
+                                crate::formula::node::name(node.kind)
+                            ));
+                        }
+                        continue;
+                    };
+                    if reference.is_error {
+                        continue;
+                    }
+                    let (into_target, cross) = match reference.table {
+                        None => (same_table, false),
+                        Some(uid) => (
+                            uid == target_base && target_base != crate::table::Uuid::default(),
+                            true,
+                        ),
+                    };
+                    if !into_target {
+                        continue;
+                    }
+                    for axis in [reference.column, reference.column_end] {
+                        let unsafe_reason = match axis {
+                            Axis::Unbounded => None,
+                            Axis::Absolute(c) => {
+                                (c >= at).then_some("names a column at or after it")
+                            }
+                            Axis::Relative(_) if cross => {
+                                Some("is a relative cross-table reference")
+                            }
+                            Axis::Relative(offset) => {
+                                let referent = host_column + offset;
+                                ((host_column < at) != (referent < at))
+                                    .then_some("would shift relative to the column it names")
+                            }
+                        };
+                        if let Some(reason) = unsafe_reason {
+                            return Some(format!(
+                                "table {} has a formula whose reference to this table {reason}",
+                                t.name
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Locate every object a column insert rewrites and build each one's new
+    /// form. Pure, like [`Document::plan_row_insert`].
+    fn plan_column_insert(
+        &self,
+        table: &crate::table::Table,
+        at: usize,
+        where_: &str,
+    ) -> Result<ColumnInsertPlan, Error> {
+        use crate::pb::decode_nested;
+        let model = table.model;
+        let mut model_archive = self.archive_of(model)?;
+        let store = model_archive
+            .bytes(4)
+            .and_then(decode_nested)
+            .ok_or_else(|| Error::Format(format!("{where_}: the model has no data store")))?;
+
+        let tiles = store
+            .bytes(3)
+            .and_then(decode_nested)
+            .ok_or_else(|| Error::Format(format!("{where_}: the data store has no tiles")))?;
+        let tile_ids: Vec<u64> = tiles
+            .all(1)
+            .filter_map(|value| match value {
+                Value::Bytes(raw) => decode_nested(raw),
+                _ => None,
+            })
+            .filter_map(|entry| entry.bytes(2).and_then(crate::table::reference))
+            .collect();
+        if tile_ids.is_empty() {
+            return Err(Error::Format(format!("{where_}: the table has no tiles")));
+        }
+
+        // The column headers are **one bucket**, not a list of them: the
+        // row/column asymmetry at `DataStore` 1 and 2 is Apple's, not a
+        // simplification here.
+        let column_bucket = store
+            .bytes(2)
+            .and_then(crate::table::reference)
+            .ok_or_else(|| {
+                Error::Format(format!("{where_}: the data store has no column headers"))
+            })?;
+
+        let uid_map = model_archive
+            .bytes(46)
+            .and_then(crate::table::reference)
+            .ok_or_else(|| {
+                Error::Format(format!(
+                    "{where_}: the model has no ColumnRowUIDMap, so a new column cannot be \
+                     given a UUID"
+                ))
+            })?;
+
+        let mut plan_tiles = Vec::new();
+        for tile in &tile_ids {
+            plan_tiles.push((*tile, self.tile_with_inserted_column(*tile, at, where_)?));
+        }
+        let bucket_archive = self.bucket_with_inserted_column(column_bucket, at, where_)?;
+        let uid_map_archive = self.uid_map_with_inserted_column(uid_map, at, table, where_)?;
+        model_archive.set(7, Value::Varint((table.columns + 1) as u64));
+
+        let mut touched = vec![model, column_bucket, uid_map];
+        touched.extend(&tile_ids);
+        Ok(ColumnInsertPlan {
+            touched,
+            model,
+            model_archive,
+            tiles: plan_tiles,
+            column_bucket,
+            bucket_archive,
+            uid_map,
+            uid_map_archive,
+        })
+    }
+
+    /// Every row of one tile with a gap opened at column `at`.
+    ///
+    /// The row is sliced into its per-column records, a `None` is spliced in,
+    /// and the whole row is laid back out — which moves every offset after the
+    /// gap. The array is truncated back to the length it arrived with, because
+    /// its padding is what a reader steps through and lengthening it would say
+    /// the table is wider than it is.
+    fn tile_with_inserted_column(
+        &self,
+        tile: u64,
+        at: usize,
+        where_: &str,
+    ) -> Result<Message, Error> {
+        use crate::pb::decode_nested;
+        let mut archive = self.archive_of(tile)?;
+        for field in archive.fields.iter_mut() {
+            if field.number != 5 {
+                continue;
+            }
+            let Value::Bytes(raw) = &field.value else {
+                continue;
+            };
+            let mut info = decode_nested(raw)
+                .ok_or_else(|| Error::Format(format!("{where_}: a tile row does not decode")))?;
+            let buffer = info.bytes(6).unwrap_or(&[]).to_vec();
+            let offsets = info.bytes(7).unwrap_or(&[]).to_vec();
+            if offsets.is_empty() {
+                continue;
+            }
+            let wide = info.varint(8).unwrap_or(0) != 0;
+            let entries = offsets.len() / 2;
+            if at >= entries {
+                return Err(Error::Format(format!(
+                    "{where_}: a row's offset array holds {entries} column(s), so there is no \
+                     column {at} in it"
+                )));
+            }
+            let mut records: Vec<Option<Vec<u8>>> = vec![None; entries];
+            for (column, bytes) in crate::table::row_cells(&buffer, &offsets, wide)
+                .into_iter()
+                .flatten()
+            {
+                records[column] = Some(bytes.to_vec());
+            }
+            records.insert(at, None);
+            // The one that falls off the back must be empty, or a cell would be
+            // lost — which the width check above has already made impossible.
+            if records.pop().flatten().is_some() {
+                return Err(Error::Format(format!(
+                    "{where_}: the last column of a row holds a cell, so opening a gap would \
+                     push it off the end of the offset array"
+                )));
+            }
+            let (buffer, offsets) = crate::table::encode_row(&records, wide)
+                .map_err(|e| Error::Format(format!("{where_}: {e}")))?;
+            info.set(6, Value::Bytes(buffer));
+            info.set(7, Value::Bytes(offsets));
+            field.value = Value::Bytes(info.encode());
+        }
+        // `maxColumn` (1), `maxRow` (2) and `numCells` (3) are **dead**: all
+        // three are 0 on every tile in the corpus, including a tile holding
+        // 2411 cells across nine columns and 256 rows. A gap opened in the
+        // middle of a row changes none of them, and writing a number into a
+        // field the app writes as zero would be inventing one.
+        Ok(archive)
+    }
+
+    /// The column-header bucket with entries at or after `at` shifted right,
+    /// and a zero-cell entry added for the inserted column.
+    fn bucket_with_inserted_column(
+        &self,
+        bucket: u64,
+        at: usize,
+        where_: &str,
+    ) -> Result<Message, Error> {
+        use crate::pb::decode_nested;
+        let mut archive = self.archive_of(bucket)?;
+        for field in archive.fields.iter_mut() {
+            if field.number != 2 {
+                continue;
+            }
+            let Value::Bytes(raw) = &field.value else {
+                continue;
+            };
+            let mut entry = decode_nested(raw).ok_or_else(|| {
+                Error::Format(format!("{where_}: a column-header entry does not decode"))
+            })?;
+            let index = entry.varint(1).unwrap_or(0) as usize;
+            if index >= at {
+                entry.set(1, Value::Varint((index + 1) as u64));
+                field.value = Value::Bytes(entry.encode());
+            }
+        }
+        let mut entry = Message::default();
+        entry.set_in_order(1, Value::Varint(at as u64));
+        // A literal 0 is "still at the table's default width", which is what a
+        // column nobody has dragged carries.
+        entry.set_in_order(2, Value::Fixed32(0f32.to_le_bytes()));
+        entry.set_in_order(3, Value::Varint(0));
+        entry.set_in_order(4, Value::Varint(0));
+        archive.append_in_order(2, Value::Bytes(entry.encode()));
+        Ok(archive)
+    }
+
+    /// The `ColumnRowUIDMapArchive` with a fresh column UUID at index `at`.
+    ///
+    /// The column half is fields 1, 2 and 3 — the same three arrays as the row
+    /// half at 4, 5 and 6, and rebuilt the same way: shift, mint, sort by the
+    /// 128-bit value. The row half is untouched.
+    fn uid_map_with_inserted_column(
+        &self,
+        uid_map: u64,
+        at: usize,
+        table: &crate::table::Table,
+        where_: &str,
+    ) -> Result<Message, Error> {
+        use crate::table::Uuid;
+        let mut archive = self.archive_of(uid_map)?;
+
+        let uuids: Vec<Uuid> = archive
+            .all(1)
+            .filter_map(|value| match value {
+                Value::Bytes(raw) => crate::pb::decode_nested(raw).map(|m| Uuid::decode(&m)),
+                _ => None,
+            })
+            .collect();
+        let indices: Vec<u64> = archive
+            .all(2)
+            .filter_map(|value| match value {
+                Value::Varint(n) => Some(*n),
+                _ => None,
+            })
+            .collect();
+        if uuids.len() != indices.len() {
+            return Err(Error::Format(format!(
+                "{where_}: the UUID map has {} column UUID(s) and {} index(es); a shape this \
+                 crate did not write is not safe to rebuild",
+                uuids.len(),
+                indices.len()
+            )));
+        }
+
+        let mut pairs: Vec<(Uuid, usize)> = uuids
+            .iter()
+            .zip(&indices)
+            .map(|(&uuid, &index)| {
+                let index = index as usize;
+                (uuid, if index >= at { index + 1 } else { index })
+            })
+            .collect();
+        let existing: BTreeSet<Uuid> = pairs.iter().map(|(uuid, _)| *uuid).collect();
+        // The row minter, seeded by the same table and the same index — a
+        // column UUID has to be unique within the table, not unlike a row's,
+        // and the seed differs because the arrays it is checked against do.
+        let new_uuid = mint_row_uuid(&existing, table, at);
+        pairs.push((new_uuid, at));
+        pairs.sort_by_key(|(uuid, _)| (uuid.upper, uuid.lower));
+
+        let count = pairs.len();
+        let mut uid_for_index = vec![0u32; count];
+        for (position, (_, index)) in pairs.iter().enumerate() {
+            uid_for_index[*index] = position as u32;
+        }
+
+        archive.clear(1);
+        archive.clear(2);
+        archive.clear(3);
+        for (uuid, _) in &pairs {
+            archive.append_in_order(1, Value::Bytes(encode_uuid(*uuid)));
+        }
+        for (_, index) in &pairs {
+            archive.append_in_order(2, Value::Varint(*index as u64));
+        }
+        for &position in &uid_for_index {
+            archive.append_in_order(3, Value::Varint(u64::from(position)));
+        }
+        Ok(archive)
     }
 
     /// Would inserting a row at `at` shift what a formula refers to?
@@ -2492,7 +2937,8 @@ impl Document {
     ///
     /// Pure: it reads the document and returns the archives to store, so
     /// [`Document::insert_row`] can prove the whole write before applying any of
-    /// it. Every fallible step — a multi-tile table, a missing UUID map, a
+    /// it. Every fallible step — tiles that do not run 0, 1, 2…, a table that
+    /// fills them, a missing UUID map, a
     /// hidden-state extent that keys rows — refuses here.
     fn plan_row_insert(
         &self,
@@ -2526,23 +2972,28 @@ impl Document {
                 Some((id, reference))
             })
             .collect();
-        if tile_entries.len() != 1 {
+        if tile_entries.is_empty() {
+            return Err(Error::Format(format!("{where_}: the table has no tiles")));
+        }
+        // Tile *k* covers rows `k * tile_size ..`, so the tiles have to be the
+        // run 0, 1, 2… for an absolute row index to mean anything.
+        for (position, (tile_id, _)) in tile_entries.iter().enumerate() {
+            if *tile_id != position as u64 {
+                return Err(Error::Format(format!(
+                    "{where_}: tile {position} is numbered {tile_id}, and a row's absolute index \
+                     is its tile's number times {tile_size} plus its index within it"
+                )));
+            }
+        }
+        // The capacity the tiles that exist provide. A row pushed past it would
+        // need a tile of its own — a new object *and* a new component — which
+        // nothing in the corpus shows the app making mid-table.
+        let capacity = tile_entries.len() * tile_size;
+        if table.rows >= capacity {
             return Err(Error::Format(format!(
-                "{where_}: the table spans {} tiles, and rebalancing a row across tiles is \
-                 unverified here",
+                "{where_}: the table fills its {} tile(s) of {tile_size} rows, so a new row \
+                 would have to open another one",
                 tile_entries.len()
-            )));
-        }
-        let (tile_id, tile) = tile_entries[0];
-        if tile_id != 0 {
-            return Err(Error::Format(format!(
-                "{where_}: its one tile is numbered {tile_id}, not 0"
-            )));
-        }
-        if table.rows >= tile_size {
-            return Err(Error::Format(format!(
-                "{where_}: the table already fills its {tile_size}-row tile, so a new row would \
-                 have to open a second one"
             )));
         }
 
@@ -2577,17 +3028,18 @@ impl Document {
             })?;
         self.refuse_if_row_extent_keys_rows(&model_archive, where_)?;
 
-        let tile_archive = self.tile_with_inserted_row(tile, at, where_)?;
+        let tiles = self.tiles_with_inserted_row(&tile_entries, tile_size, at, where_)?;
         let bucket_archive = self.bucket_with_inserted_row(row_bucket, at, where_)?;
         let uid_map_archive = self.uid_map_with_inserted_row(uid_map, at, table, where_)?;
         model_archive.set(6, Value::Varint((table.rows + 1) as u64));
 
+        let mut touched = vec![model, row_bucket, uid_map];
+        touched.extend(tiles.iter().map(|(tile, _)| *tile));
         Ok(RowInsertPlan {
-            touched: vec![model, tile, row_bucket, uid_map],
+            touched,
             model,
             model_archive,
-            tile,
-            tile_archive,
+            tiles,
             row_bucket,
             bucket_archive,
             uid_map,
@@ -2628,25 +3080,78 @@ impl Document {
     ///
     /// The inserted row is empty, so it gets no `TileRowInfo` — and `numrows`
     /// (field 4), which counts them, does not change.
-    fn tile_with_inserted_row(&self, tile: u64, at: usize, where_: &str) -> Result<Message, Error> {
+    /// Every tile with the rows at or below `at` shifted down one.
+    ///
+    /// **A shift can cross a tile boundary.** A row's absolute index is
+    /// `tileid * tile_size + tile_row_index`, so the last row of tile 0 moving
+    /// down one becomes the first row of tile 1 — the `TileRowInfo` has to
+    /// leave one object and join another. So this does not edit tiles in
+    /// place: it gathers every row of every tile by absolute index, shifts the
+    /// indexes, and lays the rows back out into the tile each now belongs to.
+    ///
+    /// Only field 5 and field 4 are written. `maxColumn`, `maxRow` and
+    /// `numCells` (1, 2, 3) are dead — `0` on every tile in the corpus,
+    /// including one holding 2411 cells — and everything else in the tile is
+    /// left exactly as it was.
+    fn tiles_with_inserted_row(
+        &self,
+        tiles: &[(u64, u64)],
+        tile_size: usize,
+        at: usize,
+        where_: &str,
+    ) -> Result<Vec<(u64, Message)>, Error> {
         use crate::pb::decode_nested;
-        let mut archive = self.archive_of(tile)?;
-        for field in archive.fields.iter_mut() {
-            if field.number != 5 {
-                continue;
+
+        // Gather: every row of every tile, by the index it has in the table.
+        let mut rows: Vec<(usize, Message)> = Vec::new();
+        let mut archives: Vec<(u64, Message)> = Vec::new();
+        for (number, tile) in tiles {
+            let archive = self.archive_of(*tile)?;
+            for value in archive.all(5) {
+                let Value::Bytes(raw) = value else { continue };
+                let info = decode_nested(raw).ok_or_else(|| {
+                    Error::Format(format!("{where_}: a tile row does not decode"))
+                })?;
+                let within = info.varint(1).unwrap_or(0) as usize;
+                if within >= tile_size {
+                    return Err(Error::Format(format!(
+                        "{where_}: a row of tile {number} is at index {within}, past the \
+                         {tile_size} rows a tile holds"
+                    )));
+                }
+                rows.push((*number as usize * tile_size + within, info));
             }
-            let Value::Bytes(raw) = &field.value else {
-                continue;
-            };
-            let mut info = decode_nested(raw)
-                .ok_or_else(|| Error::Format(format!("{where_}: a tile row does not decode")))?;
-            let index = info.varint(1).unwrap_or(0) as usize;
-            if index >= at {
-                info.set(1, Value::Varint((index + 1) as u64));
-                field.value = Value::Bytes(info.encode());
-            }
+            archives.push((*tile, archive));
         }
-        Ok(archive)
+
+        // Shift, and lay back out into the tile each row now belongs to.
+        let mut per_tile: BTreeMap<usize, Vec<(usize, Message)>> = BTreeMap::new();
+        for (index, mut info) in rows {
+            let index = if index >= at { index + 1 } else { index };
+            let (tile, within) = (index / tile_size, index % tile_size);
+            if tile >= tiles.len() {
+                return Err(Error::Format(format!(
+                    "{where_}: the shift would push a row into tile {tile}, which does not exist"
+                )));
+            }
+            info.set(1, Value::Varint(within as u64));
+            per_tile.entry(tile).or_default().push((within, info));
+        }
+
+        let mut out = Vec::new();
+        for (position, (tile, mut archive)) in archives.into_iter().enumerate() {
+            let mut mine = per_tile.remove(&position).unwrap_or_default();
+            mine.sort_by_key(|(within, _)| *within);
+            archive.clear(5);
+            for (_, info) in &mine {
+                archive.append_in_order(5, Value::Bytes(info.encode()));
+            }
+            // Field 4 counts the `TileRowInfo`s, and a row that moved out of
+            // this tile is one it no longer counts.
+            archive.set(4, Value::Varint(mine.len() as u64));
+            out.push((tile, archive));
+        }
+        Ok(out)
     }
 
     /// The row-header bucket with entries at or below `at` shifted down, and a

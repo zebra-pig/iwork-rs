@@ -1066,8 +1066,9 @@ tile size and the wide-row flag. Corrected in Phase 2 and asserted by
 `tests/cells.rs::every_tile_says_it_was_last_saved_by_the_current_storage_engine`.)
 `TileRowInfo` field 5 says 5 as well.
 
-**Field 3, `numCells`, is dead**: it is `0` on a tile holding 2411 of them.
-Field 4 does count the `TileRowInfo`s. Field 8, `should_use_wide_rows`, is set
+**Fields 1, 2 and 3 — `maxColumn`, `maxRow` and `numCells` — are all dead**: every
+one of them is `0` on every tile in the corpus, including one holding 2411 cells
+across nine columns and 256 rows. Field 4 does count the `TileRowInfo`s. Field 8, `should_use_wide_rows`, is set
 on two tiles of the pivot fixture and nowhere else.
 
 `TST.TileRowInfo`:
@@ -1613,7 +1614,7 @@ back with one more row, the new one empty, and every row below it unmoved:
 | Object | What insertion does to it |
 |---|---|
 | `TableModelArchive` field 6 | `number_of_rows` **+ 1**. The dead hidden-count fields (14, 15, 40, 41, 42) stay as they are |
-| `TST.Tile` | every `TileRowInfo` whose `tile_row_index` is `≥ at` is bumped by one. **The new row gets no `TileRowInfo`** — a row with no cells has none — so `numrows` (field 4), which counts them, is unchanged |
+| `TST.Tile`, every one | every `TileRowInfo` whose absolute index is `≥ at` is bumped by one, and **a shift can cross a tile boundary**: a row's absolute index is `tileid * tile_size + tile_row_index`, so the last row of tile 0 moving down one becomes the *first* row of tile 1 and its `TileRowInfo` leaves one object for another. So the rows are gathered by absolute index, shifted, and laid back out into whichever tile each now belongs to; `numrows` (field 4) is then recounted per tile. **The new row gets no `TileRowInfo`** — a row with no cells has none |
 | `HeaderStorageBucket` (rows) | every entry whose index is `≥ at` is bumped, and one `{index: at, size: 0, hidingState: 0, numberOfCells: 0}` is added for the new empty row |
 | `ColumnRowUIDMapArchive` | the row half (fields 4/5/6) is rebuilt: every existing row's index shifts past `at`, a **fresh per-table-unique row UUID** is minted at index `at`, and the three arrays are re-emitted **sorted by UUID** (high 64 bits first — the order the app keeps them in). The column half (fields 1/2/3) is untouched |
 
@@ -1622,6 +1623,12 @@ gives any row that holds no cells (no `TileRowInfo`, and a zero-count bucket
 entry). It is also why `set_cell` cannot then fill it: giving a row its first
 cell needs a `TileRowInfo` built from nothing, which is a separate write this
 crate does not do yet.
+
+**A table with no `ColumnRowUIDMapArchive` cannot be given a row**, because the
+new row's identity has nowhere to go. Numbers writes an *empty* map for some
+tables and a full one for others; a table this crate makes now carries a full
+one — a UUID per row and per column, sorted by the 128-bit value — so a
+spreadsheet built from nothing can be grown afterwards.
 
 **The row UUID is minted, not copied** — it is the one thing an insert cannot
 take from an existing object, because the whole point of it is to differ from
@@ -1644,11 +1651,56 @@ axis is unbounded), and for a relative reference whose host and referent fall on
 the same side of the insertion (both shift together), but it silently breaks an
 absolute reference to a row at or below `at`, or a bounded range the insertion
 crosses — so any of those, in this table or in another table that references it,
-is refused. Multi-tile tables (the row would have to spill into the next tile),
-conditional highlighting, collapsed groups, pivots and footer rows are refused
-for the same reason: no fixture proves the write, and a wrong guess corrupts in
-silence. The refusal is by name, and — like `set_cell` — it is decided before a
+is refused. Conditional highlighting, collapsed groups, pivots and footer rows
+are refused for the same reason: no fixture proves the write, and a wrong guess
+corrupts in silence. A table that **fills every tile it has** is refused too —
+the row would need a tile of its own, which is a new object *and* a new
+component, and nothing in the corpus shows the app opening one mid-table. The refusal is by name, and — like `set_cell` — it is decided before a
 byte moves, so a refused insert leaves the document byte-identical.
+
+### Inserting a column, which is not a row turned sideways
+
+A row is an object: a `TileRowInfo` of its own, so inserting one shifts whole
+objects and the new row simply has none. **A column is not an object at all.**
+It exists as *one entry in every row's offset array*, so inserting one rewrites
+every row of every tile: slice the row into its per-column records at the
+`-1`-terminated offsets, splice a gap in at `at`, and lay the whole row back
+out — which moves every record and every offset after the gap.
+
+That asymmetry runs the other way too. A row insert is refused past one tile,
+because the last row of a full tile would have to spill into the next one. A
+column insert is **not**: the work is per row, and a tile boundary is a row
+boundary, so a second tile is more of the same. Verified on the 301-row fixture,
+which has two.
+
+| Object | What insertion does to it |
+|---|---|
+| `TableModelArchive` field 7 | `number_of_columns` **+ 1** |
+| `TST.Tile`, every one | each `TileRowInfo`'s `cell_storage_buffer` (6) and `cell_offsets` (7) rebuilt with a gap at `at`. Nothing else: `maxColumn` (1) and `maxRow` (2) are **dead** alongside `numCells` (3) — all three are `0` on every tile in the corpus, including one holding 2411 cells across nine columns and 256 rows — and the `TileRowInfo`'s pre-BNC pair (3, 4) is meaningless |
+| `HeaderStorageBucket` (columns) | every entry whose index is `≥ at` is bumped, and one `{index: at, size: 0, hidingState: 0, numberOfCells: 0}` is added. **One bucket, not a list of them** — the row/column asymmetry at `DataStore` 1 and 2 |
+| `ColumnRowUIDMapArchive` | the column half (fields 1/2/3) is rebuilt exactly as the row insert rebuilds 4/5/6: shift, mint a fresh table-unique UUID at `at`, re-emit sorted by UUID |
+
+**The offset array keeps the length it arrived with.** Numbers pads it to 255
+entries whatever the table's width, and that padding is what a reader steps
+through; lengthening it would claim the table is wider than it is. So the last
+entry falls off the back as the gap opens, and a table already 255 columns wide
+is refused rather than losing a column out of the end — as is the case, which
+cannot arise after that check, where the entry falling off holds a cell.
+
+The refusals are the row insert's read along the other axis: a categorised table
+(a category *is* a column, stored by index), a pivot, a filter (which names the
+column it tests), conditional highlighting, hidden columns, a merge at or
+straddling the insertion, and any formula whose reference to this table names a
+column at or after it — a whole-*row* reference is unaffected, an absolute
+column is safe only to the left, and a relative one only when host and referent
+fall on the same side.
+
+Measured against Numbers: told to open the widened `numbers-formats` fixture, it
+reported four columns, an empty B, and a C holding every value that had been in
+B — compared against **the app's own earlier reading**, not this crate's, since
+the app prints `1.2345678E+4` where `to_text` says `12345.678` and a comparison
+of the two would be a test of formatting. Every cell kept its data format too,
+and the app wrote the document back out unchanged.
 
 ### What a Numbers document does not have
 

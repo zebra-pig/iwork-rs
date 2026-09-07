@@ -650,6 +650,54 @@ pub(crate) fn pages(paper: Paper) -> Blueprint {
     blueprint
 }
 
+/// `TST.ColumnRowUIDMapArchive` — one UUID per column and one per row.
+///
+/// Three arrays per axis, and the third is the inverse of the second: entry
+/// *i* holds `uuid[i]` at `index[i]`, and `uid_for_index[index[i]] == i`. The
+/// app emits them **sorted by the 128-bit UUID**, high half first, which is
+/// why the indices read out of order in a document Numbers wrote.
+fn column_row_uid_map(rows: usize, columns: usize, seed: u64) -> Message {
+    let axis = |fields: &mut Vec<Field>, base: u32, count: usize, salt: u64| {
+        let mut pairs: Vec<((u64, u64), usize)> = (0..count)
+            .map(|index| {
+                let mut state = seed
+                    ^ salt.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                    ^ (index as u64).wrapping_mul(0xD1B5_4A32_D192_ED03);
+                let mut next = move || {
+                    state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                    let mut z = state;
+                    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                    z ^ (z >> 31)
+                };
+                ((next(), next()), index)
+            })
+            .collect();
+        // Sorted the way the app keeps them: by the 128-bit value, high first.
+        pairs.sort_by_key(|((lower, upper), _)| (*upper, *lower));
+        for ((lower, upper), _) in &pairs {
+            fields.push(nested(base, vec![varint(1, *lower), varint(2, *upper)]));
+        }
+        for (_, index) in &pairs {
+            fields.push(varint(base + 1, *index as u64));
+        }
+        let mut position_of = vec![0u64; count];
+        for (position, (_, index)) in pairs.iter().enumerate() {
+            position_of[*index] = position as u64;
+        }
+        for position in position_of {
+            fields.push(varint(base + 2, position));
+        }
+    };
+    let mut fields = Vec::new();
+    axis(&mut fields, 1, columns, 1);
+    axis(&mut fields, 4, rows, 2);
+    message(fields)
+}
+
+/// `TST.ColumnRowUIDMapArchive`.
+pub(crate) const TYPE_UID_MAP: u32 = 6267;
+
 /// `TSS.StylesheetArchive`: the styles a document offers by name.
 ///
 /// Field 5 is the pair of column styles the body's layout comes from; field 8 is
@@ -1138,6 +1186,11 @@ pub(crate) fn numbers(
 
     let sheet = blueprint.allocate();
     let model = blueprint.allocate();
+    let uid_map = blueprint.add(
+        engine_component,
+        TYPE_UID_MAP,
+        column_row_uid_map(rows, columns, seed),
+    );
     let info = blueprint.add(
         engine_component,
         TYPE_TABLE_INFO,
@@ -1165,6 +1218,7 @@ pub(crate) fn numbers(
             table_style,
             cell_styles: &table_cells,
             text_styles: &table_text,
+            uid_map,
             seed,
         }),
     );
@@ -1341,6 +1395,10 @@ struct TableParts<'a> {
     cell_styles: &'a [u64],
     /// Eight, in the order [`TEXT_AREAS`] names them.
     text_styles: &'a [u64],
+    /// `TST.ColumnRowUIDMapArchive` — the stable identity of every row and
+    /// column. A table without one is a table nothing can insert a row into,
+    /// because a new row's identity has nowhere to go.
+    uid_map: u64,
     /// Where the table's UIDs come from.
     seed: u64,
 }
@@ -1452,6 +1510,7 @@ fn table_model(parts: TableParts) -> Message {
         // to them, and the calculation engine that would is empty.
         nested(39, uid(parts.seed, 1)),
         reference(44, 0),
+        reference(46, parts.uid_map),
         nested(
             47,
             vec![nested(1, uid(parts.seed, 2)), nested(2, vec![varint(2, 0)])],
@@ -2458,7 +2517,7 @@ pub(crate) fn build_table(
     styles: &TableStyles,
     seed: u64,
     position: (f32, f32),
-) -> Result<(u64, u64, Message, Message), crate::Error> {
+) -> Result<BuiltTable, crate::Error> {
     let data_list_component =
         |site: &mut dyn Site, archive: Message| -> Result<u64, crate::Error> {
             let identifier = site.allocate();
@@ -2503,6 +2562,7 @@ pub(crate) fn build_table(
 
     let model = site.allocate();
     let info = site.allocate();
+    let uid_map = site.allocate();
     let model_archive = table_model(TableParts {
         name,
         rows,
@@ -2521,10 +2581,29 @@ pub(crate) fn build_table(
         table_style: styles.table,
         cell_styles: &styles.cells,
         text_styles: &styles.text,
+        uid_map,
         seed,
     });
     let info_archive = table_info(parent, model, rows, columns, position, seed);
-    Ok((info, model, info_archive, model_archive))
+    Ok(BuiltTable {
+        info,
+        model,
+        uid_map,
+        info_archive,
+        model_archive,
+        uid_map_archive: column_row_uid_map(rows, columns, seed),
+    })
+}
+
+/// What [`build_table`] makes: three objects, and the archives to store them
+/// with. The caller decides which stream they land in.
+pub(crate) struct BuiltTable {
+    pub(crate) info: u64,
+    pub(crate) model: u64,
+    pub(crate) uid_map: u64,
+    pub(crate) info_archive: Message,
+    pub(crate) model_archive: Message,
+    pub(crate) uid_map_archive: Message,
 }
 
 /// A whole message as a length-delimited field.

@@ -184,6 +184,7 @@ iwork formulas  Budget.numbers            # every formula: cell, text, cached va
 iwork set-cell  Budget.numbers Zellarten B3 n:43 out.numbers
 iwork set-cell  Budget.numbers Zellarten 2 1 n:43 out.numbers   # the same cell
 iwork insert-row Budget.numbers Zellarten 8 out.numbers   # an empty row before index 8
+iwork insert-column Budget.numbers Zellarten 1 out.numbers   # …and a column
 
 iwork charts    Budget.numbers            # every chart: type, placement, the data
                                           # it carries, and the table ranges it
@@ -413,8 +414,19 @@ UUID, the way the app keeps it. Numbers opens the result, shows one more row wit
 the new one empty, and reads every row below the insertion back with its value,
 its data format and its control (a checkbox, a rating, a slider…) intact. The
 new row is genuinely empty — it has no cell storage of its own — so filling it
-needs the *first-cell-in-a-row* write `set-cell` does not do yet. Everything the
-insert cannot maintain safely is refused **by name**: a multi-tile table, a
+needs the *first-cell-in-a-row* write `set-cell` does not do yet.
+
+**A shift can cross a tile boundary, and now does.** A row's absolute index is
+`tileid * 256 + tile_row_index`, so the last row of tile 0 moving down one
+becomes the *first* row of tile 1: its `TileRowInfo` has to leave one object and
+join another. The insert therefore gathers every row of every tile by absolute
+index, shifts, and lays them back out into whichever tile each now belongs to.
+Verified on a 300-row table this crate made — Numbers opened it, and wrote it
+back with row 255 in the second tile where the insert had put it. A table that
+*fills* every tile it has is still refused: that row would need a tile of its
+own, a new object and a new component both.
+
+Everything the insert cannot maintain safely is refused **by name**: a
 categorised, filtered or pivoted one, a table with conditional highlighting,
 hidden or collapsed rows or footer rows, a merge at or straddling the insertion,
 and — the subtle one — any table whose formulas reference it at or below the
@@ -422,6 +434,24 @@ insertion point, where an unshifted `TSCE` reference would silently compute the
 wrong answer. A whole-column reference is unaffected and allowed; a relative
 reference that moves together with its host is allowed; a bounded range the
 insertion would cross is refused.
+
+**A column can be inserted too, and it is not a row turned sideways.** A row is
+an object — a `TileRowInfo` of its own — so inserting one shifts whole objects
+and the new row has none. A column is not an object at all: it is one entry in
+*every row's* offset array, so `iwork insert-column` rewrites every row of every
+tile, slicing each into its per-column records, opening a gap and laying it back
+out. Which is also why it is not limited to a single tile the way the row insert
+is: the work is per row, and a tile boundary is a row boundary — verified on the
+301-row fixture, which has two. The offset array keeps the length it arrived
+with, because Numbers pads it to 255 entries and that padding is what a reader
+steps through, so a table already that wide is refused rather than losing a
+column out of the back. Numbers opens the widened table, reports one more
+column, reads every value back one column over — compared against *its own*
+earlier reading, since the app prints `1.2345678E+4` where this crate says
+`12345.678` — and writes the document out again. The refusals are the row
+insert's along the other axis: a categorised table (a category *is* a column), a
+pivot, a filter, conditional highlighting, hidden columns, a merge at or
+straddling the insertion, and any formula whose reference would shift.
 
 ### Drawables, geometry and media
 
@@ -610,6 +640,12 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | **The app reads back the written value** | ✅ | ✅ | — |
 | Insert an empty row into a plain single-tile table; refuse the rest by name | — | ✅ | — |
 | **The app reads back the extra row, empty, with the rows below unmoved** | — | ✅ | — |
+| Insert an empty column, into any number of tiles; refuse the rest by name | — | ✅ | — |
+| Every cell right of the insertion keeps its value *and* its data format | — | ✅ | — |
+| **The app reads back the extra column, empty, and the values one over** | — | ✅ | — |
+| A row inserted below a tile boundary crosses it; a full table is refused | — | ✅ | — |
+| **The app resaves a cross-tile insert with the row in its new tile** | — | ✅ | — |
+| A table made from nothing carries the UUID map an insert needs | — | ✅ | — |
 | Pages mode: word processing vs page layout, and the app agrees | ✅ | — | — |
 | Sections: name, text range, page numbering, background, switches | ✅ | — | — |
 | **Every section's text agrees with the app, character for character** | ✅ | — | — |

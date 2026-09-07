@@ -377,3 +377,142 @@ fn numbers_reads_back_an_inserted_row() {
     }
     let _ = std::fs::remove_file(&out);
 }
+
+/// A row inserted above a tile boundary crosses it.
+///
+/// A row's absolute index is `tileid * tile_size + tile_row_index`, so the last
+/// row of tile 0 shifting down one becomes the *first row of tile 1* — the
+/// `TileRowInfo` leaves one object and joins another. That is why the insert
+/// does not edit tiles in place: it gathers every row of every tile by absolute
+/// index, shifts, and lays them back out into whichever tile each now belongs
+/// to.
+///
+/// The fixtures cannot show this — the only multi-tile one has a formula over
+/// `C2:C301`, which any insert above row 300 rightly breaks — so the table is
+/// one this crate makes: 300 rows, three columns, no formulas.
+#[test]
+fn a_row_inserted_below_a_tile_boundary_crosses_it() {
+    let mut doc = Document::new_spreadsheet("Blatt", "Lang", 300, 3).unwrap();
+    for row in 0..300 {
+        doc.set_cell("Lang", row, 0, CellValue::Text(format!("Zeile {row}")))
+            .unwrap();
+    }
+
+    doc.insert_row("Lang", 100).unwrap();
+
+    let table = doc.table("Lang").unwrap();
+    assert_eq!(table.rows, 301);
+    assert_eq!(table.value(99, 0).to_text(), "Zeile 99");
+    assert_eq!(table.value(100, 0), CellValue::Empty, "the new row");
+    assert_eq!(table.value(101, 0).to_text(), "Zeile 100");
+    // The boundary itself: 255 was the last row of tile 0 and is now the first
+    // row of tile 1.
+    assert_eq!(table.value(255, 0).to_text(), "Zeile 254");
+    assert_eq!(table.value(256, 0).to_text(), "Zeile 255");
+    assert_eq!(table.value(300, 0).to_text(), "Zeile 299");
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+    assert!(table.audit().is_empty(), "{:?}", table.audit());
+}
+
+/// A table that fills every tile it has is refused: the row would need a tile
+/// of its own, which is a new object *and* a new component.
+#[test]
+fn a_table_that_fills_its_tiles_is_refused() {
+    let mut doc = Document::new_spreadsheet("Blatt", "Voll", 256, 2).unwrap();
+    let err = doc
+        .insert_row("Voll", 0)
+        .expect_err("256 rows is one full tile")
+        .to_string();
+    assert!(err.contains("open another one"), "{err}");
+    assert!(doc.changed_streams().is_empty());
+}
+
+/// A table this crate makes has the identities an insert needs.
+///
+/// A `TST.ColumnRowUIDMapArchive` is where a new row's UUID goes, and a table
+/// without one cannot be given a row at all. A new table gets a full map — one
+/// UUID per row and per column, sorted by the 128-bit value the way the app
+/// keeps them.
+#[test]
+fn a_new_table_carries_the_uid_map_an_insert_needs() {
+    let doc = Document::new_spreadsheet("Blatt", "Neu", 8, 4).unwrap();
+    let map = doc
+        .objects()
+        .find(|(_, object)| object.message_type() == 6267)
+        .map(|(_, object)| object.identifier)
+        .expect("a new table has a ColumnRowUIDMap");
+    let archive = doc.archive(map).unwrap();
+    let count = |number: u32| archive.fields.iter().filter(|f| f.number == number).count();
+    assert_eq!(count(1), 4, "one UUID per column");
+    assert_eq!(count(2), 4);
+    assert_eq!(count(3), 4);
+    assert_eq!(count(4), 8, "one UUID per row");
+    assert_eq!(count(5), 8);
+    assert_eq!(count(6), 8);
+
+    let uuids: Vec<Uuid> = archive
+        .fields
+        .iter()
+        .filter(|f| f.number == 4)
+        .filter_map(|f| match &f.value {
+            iwork::pb::Value::Bytes(raw) => iwork::pb::decode_nested(raw).map(|m| Uuid::decode(&m)),
+            _ => None,
+        })
+        .collect();
+    let mut sorted = uuids.clone();
+    sorted.sort_by_key(|u| (u.upper, u.lower));
+    assert_eq!(
+        uuids, sorted,
+        "the app keeps them sorted by the 128-bit value"
+    );
+    let unique: std::collections::BTreeSet<Uuid> = uuids.iter().copied().collect();
+    assert_eq!(unique.len(), uuids.len(), "a row UUID identifies one row");
+}
+
+/// Numbers opens the cross-tile insert and writes it back. Off unless
+/// `IWORK_APP_CHECK=1`.
+///
+/// The resave is the measure that matters here: the app loaded 301 rows spread
+/// over two tiles into its own model — including the row that changed tiles —
+/// and wrote them out again. A writer that left a `TileRowInfo` in the wrong
+/// tile would produce a document that opens and shows the wrong rows.
+#[test]
+fn numbers_resaves_a_row_inserted_across_a_tile_boundary() {
+    if std::env::var("IWORK_APP_CHECK").as_deref() != Ok("1") {
+        eprintln!("IWORK_APP_CHECK is not 1 — skipping the app round trip");
+        return;
+    }
+    let mut doc = Document::new_spreadsheet("Blatt", "Lang", 300, 3).unwrap();
+    for row in 0..300 {
+        doc.set_cell("Lang", row, 0, CellValue::Text(format!("Zeile {row}")))
+            .unwrap();
+    }
+    doc.insert_row("Lang", 100).unwrap();
+
+    let out = std::env::temp_dir().join("iwork-cross-tile.numbers");
+    let _ = std::fs::remove_dir_all(&out);
+    let _ = std::fs::remove_file(&out);
+    doc.save(&out).unwrap();
+
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/resave.sh");
+    let status = std::process::Command::new(&script)
+        .arg(&out)
+        .status()
+        .unwrap_or_else(|e| panic!("{}: {e}", script.display()));
+    assert!(status.success(), "Numbers would not resave the document");
+
+    let after = Document::open(&out).unwrap();
+    let table = after.table("Lang").unwrap();
+    assert_eq!(table.rows, 301);
+    assert_eq!(table.value(100, 0), CellValue::Empty);
+    assert_eq!(table.value(255, 0).to_text(), "Zeile 254");
+    assert_eq!(
+        table.value(256, 0).to_text(),
+        "Zeile 255",
+        "across the boundary"
+    );
+    assert_eq!(table.value(300, 0).to_text(), "Zeile 299");
+    assert!(after.problems().is_empty(), "{:?}", after.problems());
+    let _ = std::fs::remove_dir_all(&out);
+    let _ = std::fs::remove_file(&out);
+}

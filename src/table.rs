@@ -3729,7 +3729,7 @@ pub fn add_table(
     let seed = seed_from_uuid();
 
     let mut grow = crate::create::Grow::new(document);
-    let (info, model, info_archive, model_archive) = crate::create::build_table(
+    let built = crate::create::build_table(
         &mut grow,
         container.parent(),
         name,
@@ -3739,8 +3739,20 @@ pub fn add_table(
         seed,
         position,
     )?;
-    grow.beside(neighbour, model, TYPE_TABLE_MODEL, &model_archive)?;
-    grow.beside(neighbour, info, TYPE_TABLE_INFO, &info_archive)?;
+    let info = built.info;
+    grow.beside(
+        neighbour,
+        built.uid_map,
+        crate::create::TYPE_UID_MAP,
+        &built.uid_map_archive,
+    )?;
+    grow.beside(
+        neighbour,
+        built.model,
+        TYPE_TABLE_MODEL,
+        &built.model_archive,
+    )?;
+    grow.beside(neighbour, info, TYPE_TABLE_INFO, &built.info_archive)?;
     grow.finish()?;
 
     crate::drawable::hold(document, &container, info)?;

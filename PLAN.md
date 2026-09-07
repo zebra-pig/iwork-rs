@@ -670,6 +670,39 @@ the mediator that ties a Numbers chart to its table is the hard one.
 so are rows in categorised, filtered, multi-tile, merge-crossing and
 formula-crossing tables — every one a named refusal today.
 
+- [x] Insert a column. *(`Document::insert_column`. **A column is not a row
+      turned sideways**: a row is a `TileRowInfo` of its own, a column is one
+      entry in every row's offset array, so the insert rewrites every row of
+      every tile — slice at the offsets, splice a gap, lay it back out. That is
+      also why it is *not* limited to one tile the way the row insert is: the
+      work is per row and a tile boundary is a row boundary, verified on the
+      301-row fixture. The offset array keeps its arrival length, because
+      Numbers pads it to 255 and that padding is what a reader steps through,
+      so a 255-column table is refused rather than losing a column off the
+      back. Numbers reported four columns, an empty B and every value one
+      column over, each with its data format, and wrote the document back.)*
+- [x] Rows across a tile boundary. *(A row's absolute index is
+      `tileid * tile_size + tile_row_index`, so the last row of tile 0 shifting
+      down one becomes the *first* row of tile 1 — the `TileRowInfo` leaves one
+      object and joins another. The insert now gathers every row of every tile
+      by absolute index, shifts, and lays them back out into the tile each now
+      belongs to, recounting `numrows` per tile. Numbers resaved a 300-row
+      table with the crossing row in its new tile. A table that fills every
+      tile it has is still refused: that row needs a tile of its own, a new
+      object and a new component both.)*
+- [x] A table made from nothing can be grown. *(It had no
+      `TST.ColumnRowUIDMapArchive`, so a new row's identity had nowhere to go
+      and `insert_row` refused every table this crate built. A new table now
+      carries a full map — one UUID per row and per column, sorted by the
+      128-bit value the way the app keeps them.)*
+- [x] A finding, while inserting columns: **`maxColumn`, `maxRow` and
+      `numCells` are all dead** — `0` on every tile in the corpus, including
+      one holding 2411 cells across nine columns and 256 rows. FORMAT.md had
+      only `numCells` written down.
+- [ ] Rows in the harder tables: categorised, filtered, merge-crossing,
+      formula-crossing — every one of them a question about two addressing
+      schemes (index and UUID) that must stay in step.
+
 ## Phase 16 — The review layer, authored
 
 Comments, tracked changes, builds and transitions: all read, none written.
