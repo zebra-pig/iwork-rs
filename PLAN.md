@@ -519,6 +519,47 @@ demanding, and every field left out is one it was watched not needing.
 Filled in as phases complete: what was proven, by which test, against which
 fixture, and what the app accepted.
 
+- 2026-09-07 — **Phase 10, day two: ask the app.** The oracle had been binary
+  for three days — the app opens it or it does not — and it never had to be.
+  `log stream --predicate 'process == "Numbers"'` while the app opens a document
+  carries `TSPPersistenceLogCat` and `TSUAssertCat`, and between them they name
+  the message that would not parse, the field that was missing, the class the
+  app was holding and the method it could not send. `scripts/` has no tool for
+  it yet; the scratchpad's `why.sh` is fifteen lines and FORMAT.md §14 has the
+  recipe.
+
+  What it settled in an afternoon, having resisted two days of bisection:
+  - **`TSS.StylesheetArchive.is_locked` is field 4 and defaults to `true`.** The
+    apps *add* styles to a stylesheet at load — any the document is missing —
+    and a locked one stops them. Pages only ever worked because its blueprint
+    had copied `is_locked = 0` out of a document that worked.
+  - **A theme's style presets are load-bearing**, and are almost certainly what
+    Numbers wanted when it said "Adding style (TSDMediaStyle*) to locked
+    stylesheet": six line, six shape, one text-box, six image, six movie and one
+    drawing-line preset at `TSD.ThemePresetsArchive`, field 100.
+  - **A style archive's `super` chain is required all the way down** — "missing
+    required fields: super.super" is one level too few.
+  - **`TSP.PackageMetadata` field 7** (`[26, 3, 1]`, the same in all three apps)
+    is the difference between a document that opens and one that opens *empty*:
+    without it Numbers finds the sheet, finds the table, and answers `missing
+    value` for every cell. Found by rewriting the index of a document Numbers
+    wrote and bisecting what the rewrite had dropped — which also proved the
+    index rules here are sufficient and the objects are where the fault was.
+  - Numbers keeps a table's parts in components of their own and its table
+    info/model in the `CalculationEngine` component; Keynote keeps each slide in
+    a component of its own, because a slide node's reference to its slide is
+    lazy.
+
+  **Where each app stands.** Pages ships. Numbers parses every object without
+  complaint — the last thing the log said about it was nothing at all — and the
+  machine's Numbers wedged before the theme presets could be tried against it,
+  so **the first thing to do next is `iwork create numbers` and a probe**; it
+  may already work. Keynote parses too and then dies in a finalize handler on
+  `-[KNSlide generateObjectPlaceholderIfNecessary]: unrecognized selector`,
+  which is the app holding a show slide where it wanted a master. What makes a
+  slide archive a master is the open question: not the message type, not
+  `inDocument`, not the component name, not the placeholders.
+
 - 2026-09-06 — **Phase 10, Numbers and Keynote: measured, not landed.** The
   same reduction was run against both and neither can be written from nothing
   yet. `Document::new` refuses both by name; what is committed is the measuring
