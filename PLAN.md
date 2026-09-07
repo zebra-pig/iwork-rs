@@ -639,6 +639,31 @@ exists.
 Read thoroughly (§10) and written not at all. The private grid is the easy half;
 the mediator that ties a Numbers chart to its table is the hard one.
 
+- [x] Write the private grid. *(`Document::set_chart_data`. Field 7 and nothing
+      else: names, rows of `GridValue`, the id map. A row or column that stays
+      keeps its UUID — that is what makes it the same series through an edit —
+      and only a new one is minted; a blank is a present, zero-length message,
+      because leaving it out shifts the row. The shape may change: told to draw
+      three series over four categories where it had two over three, Keynote
+      and Pages both read the chart back and wrote it out unchanged.)*
+- [x] Put a chart where there was none. *(`Document::add_chart`, a **copy** of
+      a chart the document already has — a dozen objects of `TSCH.Generated.*`
+      properties stand behind one and this crate decodes none of them, so there
+      is no honest way to invent it. What is copied and what is shared is
+      decided by type: the *style* half of each pair is the theme's and shared,
+      the *non-style* half is this chart's own and is copied and renumbered.
+      Location will not serve — Keynote keeps non-styles in the slide's stream,
+      Pages in `ObjectContainer`.)*
+- [x] Refuse what cannot be honest. *(A chart with a mediator, both ways: its
+      grid is a cache of `TSCE` formulas nothing here evaluates, so writing
+      numbers into it would make the chart disagree with its table the moment
+      Numbers recalculates, and a copy of it would claim to follow a table
+      while holding numbers of its own. Names and values that do not line up
+      are refused too.)*
+- [ ] The mediator: a Numbers chart that follows a table, written. Needs the
+      `TSCE` half — formulas built from nothing, and function 175, which has no
+      published name.
+
 ## Phase 15 — Columns, and rows in harder tables
 
 `insert_row` handles a plain single-tile table. Columns are unimplemented, and

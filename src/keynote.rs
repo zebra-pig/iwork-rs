@@ -1912,7 +1912,7 @@ pub fn duplicate_slide(document: &mut crate::Document, slide: u64) -> Result<Sli
     })
 }
 
-const MAX_DEPTH: usize = 24;
+pub(crate) const MAX_DEPTH: usize = 24;
 
 /// Rewrite every `TSP.Reference` whose target is in `map`, at any depth.
 ///
@@ -1921,7 +1921,11 @@ const MAX_DEPTH: usize = 24;
 /// so a reference out of the stream, a `TSP.DataReference` and any one-field
 /// message that is not a reference at all are all left exactly as written.
 /// Returns whether anything changed, so an untouched object keeps its bytes.
-fn remap_references(message: &mut Message, map: &BTreeMap<u64, u64>, depth: usize) -> bool {
+pub(crate) fn remap_references(
+    message: &mut Message,
+    map: &BTreeMap<u64, u64>,
+    depth: usize,
+) -> bool {
     if depth == 0 {
         return false;
     }

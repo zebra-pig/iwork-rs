@@ -3087,6 +3087,38 @@ Three AppleScript findings came out of building it, each of which cost a run:
 blank grid cell**; the empty `GridValue` is exercised by a unit test built from
 bytes, and its behaviour in a real document is Inferred.
 
+### Writing a chart
+
+Two operations, and the line between them is the one the archive already draws.
+
+**Rewriting the grid** is a rewrite of field 7 and nothing else: names, rows of
+`GridValue`, and the id map. A row or column that stays keeps the UUID it had —
+that is what makes it the same series through an edit — and only a new one is
+minted. `contains_default_data` (6) goes false if it was there, because the
+numbers are now somebody's. The shape may change: told to draw three series
+over four categories where it had two over three, Keynote read the chart back
+and wrote it out unchanged. Extra series take their colour from the six theme
+series styles, which cycle.
+
+**A chart with a mediator is refused.** Its grid is a *cache* of what the
+`TSCE` formulas last evaluated to, and numbers written into it disagree with
+the table the chart claims to follow the moment Numbers recalculates. Nothing
+here evaluates those formulas, so nothing here writes that cache.
+
+**Adding a chart is a copy.** A chart's model points at a preset, a chart style
+and non-style, a legend pair, two axis pairs, six theme series styles and a
+list of paragraph styles — a dozen objects of `TSCH.Generated.*` properties
+this crate does not decode (below), so there is no honest way to invent one.
+The caller names a chart to copy.
+
+What is copied and what is shared is **decided by type, not by location**: the
+*style* half of each pair (5022, 5024, 5026, 5028, 5030) is the theme's and is
+shared, exactly as two charts made from one preset share it in the app, and the
+*non-style* half (5023, 5025, 5027, 5029, 5031) plus an `owned_preset` (5020)
+carries this chart's own state and is copied and renumbered. Location will not
+serve: in a Keynote deck the non-styles sit in the slide's own stream, and in
+Pages they sit in `Index/ObjectContainer.iwa`.
+
 ### What is not decoded
 
 * **Every `TSCH.Generated.*` property archive.** The six presets, and the axis,

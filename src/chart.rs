@@ -40,10 +40,15 @@
 //! node is dropped, its operands are printed, and the wrapper is reported as a
 //! count.
 //!
-//! Nothing in this module writes. A chart's grid is a cache of a calculation
-//! this crate does not perform, its series styles are a three-level fallback,
-//! and its mediator is registered with a dependency graph nothing here decodes;
-//! charts are read and passed through byte for byte.
+//! **What writes here, and what does not.** [`set_chart_data`] rewrites the
+//! private grid and [`add_chart`] puts a copy of an existing chart somewhere
+//! else with new numbers in it. Neither touches a chart that has a mediator:
+//! that grid is a cache of a calculation this crate does not perform, and
+//! numbers written into it disagree with the table the chart claims to follow
+//! the moment Numbers recalculates. Everything else — the presets, the series
+//! styles' three-level fallback, the `TSCH.Generated.*` properties — is read,
+//! counted and passed through byte for byte, which is also why a new chart is
+//! copied rather than invented.
 
 use std::collections::BTreeMap;
 
@@ -1125,5 +1130,443 @@ mod tests {
         assert_eq!(by_column.series()[2].name.as_deref(), Some("z"));
         assert_eq!(by_column.series()[2].values[0].number(), Some(3.0));
         assert_eq!(by_column.series()[2].values[1].number(), Some(13.0));
+    }
+}
+
+// -- writing the private grid -------------------------------------------------
+
+/// What a chart is to be made to draw: the same three lists [`Grid`] reads.
+///
+/// The row and column *ids* are not here. They are stable identities the app
+/// keeps across an edit, so [`set_chart_data`] carries over the ones the chart
+/// already has and mints a fresh UUID only for a row or column that did not
+/// exist before — which is what makes a rewritten chart the same chart rather
+/// than a new one that happens to sit in the same place.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ChartData {
+    pub row_names: Vec<String>,
+    pub column_names: Vec<String>,
+    /// One row per entry, each as long as the row is. A short row is left
+    /// short, the way the archive writes one.
+    pub rows: Vec<Vec<GridValue>>,
+}
+
+impl ChartData {
+    /// The common case: a rectangle of numbers, with names down the side and
+    /// along the top.
+    pub fn numbers(row_names: &[&str], column_names: &[&str], rows: &[&[f64]]) -> ChartData {
+        ChartData {
+            row_names: row_names.iter().map(|s| (*s).to_string()).collect(),
+            column_names: column_names.iter().map(|s| (*s).to_string()).collect(),
+            rows: rows
+                .iter()
+                .map(|row| row.iter().copied().map(GridValue::Number).collect())
+                .collect(),
+        }
+    }
+}
+
+/// Rewrite the private grid a chart draws.
+///
+/// This is the copy every chart has and a Pages or Keynote chart's only one.
+/// A Numbers chart fed by a table has a second layer — a
+/// `TN.ChartMediatorArchive` of `TSCE` formulas — and its grid is a *cache* of
+/// what those last evaluated to; writing numbers into that cache makes the
+/// chart disagree with the table it claims to follow the moment Numbers
+/// recalculates. So a chart with a mediator is refused by name.
+///
+/// What is written is the grid and nothing else: the chart keeps its type, its
+/// styles, its legend and its rectangle. A row beyond the ones the chart had
+/// takes its colour from the theme's series palette, which is a fixed six and
+/// cycles — the same thing the app does when a chart is given a seventh series.
+pub fn set_chart_data(
+    document: &mut crate::Document,
+    chart: u64,
+    data: &ChartData,
+) -> Result<(), crate::Error> {
+    if data.rows.len() != data.row_names.len() {
+        return Err(crate::Error::Format(format!(
+            "the chart has {} row(s) of values and {} row name(s), and the app draws them side \
+             by side",
+            data.rows.len(),
+            data.row_names.len()
+        )));
+    }
+    let widest = data.rows.iter().map(Vec::len).max().unwrap_or(0);
+    if widest > data.column_names.len() {
+        return Err(crate::Error::Format(format!(
+            "a row of the chart has {widest} value(s) and there are {} column name(s) to put \
+             them under",
+            data.column_names.len()
+        )));
+    }
+
+    let existing = charts(document)
+        .into_iter()
+        .find(|c| c.identifier == chart)
+        .ok_or_else(|| crate::Error::Format(format!("no chart {chart}")))?;
+    if let Some(mediator) = existing.mediator {
+        return Err(crate::Error::Format(format!(
+            "chart {chart} is fed by a table through mediator {mediator}, and its grid is a \
+             cache of what those formulas last evaluated to — writing numbers into it would \
+             make the chart disagree with the table the moment Numbers recalculates"
+        )));
+    }
+
+    // The ids the chart already has, by index, so a row that stays keeps its
+    // identity and only a new one is minted.
+    let carry = |had: &[(String, u32)], wanted: usize| -> Vec<(String, u32)> {
+        (0..wanted)
+            .map(|index| {
+                let id = had
+                    .iter()
+                    .find(|(_, at)| *at as usize == index)
+                    .map(|(id, _)| id.clone())
+                    .unwrap_or_else(crate::metadata::uuid);
+                (id, index as u32)
+            })
+            .collect()
+    };
+    let row_ids = carry(&existing.grid.row_ids, data.rows.len());
+    let column_ids = carry(&existing.grid.column_ids, data.column_names.len());
+
+    let mut archive = document.archive(chart)?;
+    let mut model = archive
+        .bytes(EXTENSION)
+        .and_then(decode_nested)
+        .ok_or_else(|| {
+            crate::Error::Format(format!(
+                "chart {chart} carries no chart archive at extension {EXTENSION}"
+            ))
+        })?;
+    model.set_in_order(
+        7,
+        Value::Bytes(encode_grid(data, &row_ids, &column_ids).encode()),
+    );
+    // Whatever the chart had before, it is not the app's placeholder data now.
+    if model.get(6).is_some() {
+        model.set_in_order(6, Value::Varint(0));
+    }
+    archive.set_in_order(EXTENSION, Value::Bytes(model.encode()));
+    document.set_archive_of(chart, &archive)?;
+    Ok(())
+}
+
+/// `TSCH.ChartGridArchive`, in the shape the apps write one: names, rows of
+/// `GridValue`, and the id map.
+fn encode_grid(
+    data: &ChartData,
+    row_ids: &[(String, u32)],
+    column_ids: &[(String, u32)],
+) -> Message {
+    let mut fields = Vec::new();
+    for name in &data.row_names {
+        fields.push(crate::pb::Field {
+            number: 1,
+            value: Value::Bytes(name.as_bytes().to_vec()),
+        });
+    }
+    for name in &data.column_names {
+        fields.push(crate::pb::Field {
+            number: 2,
+            value: Value::Bytes(name.as_bytes().to_vec()),
+        });
+    }
+    for row in &data.rows {
+        let mut cells = Message::default();
+        for value in row {
+            cells.fields.push(crate::pb::Field {
+                number: 1,
+                // A blank cell is a *present, zero-length* submessage: leaving
+                // it out shifts every value after it one column left.
+                value: Value::Bytes(encode_value(*value)),
+            });
+        }
+        fields.push(crate::pb::Field {
+            number: 3,
+            value: Value::Bytes(cells.encode()),
+        });
+    }
+    let entries = |number: u32, ids: &[(String, u32)]| -> Vec<crate::pb::Field> {
+        ids.iter()
+            .map(|(id, index)| {
+                let mut entry = Message::default();
+                entry.fields.push(crate::pb::Field {
+                    number: 1,
+                    value: Value::Bytes(id.as_bytes().to_vec()),
+                });
+                entry.fields.push(crate::pb::Field {
+                    number: 2,
+                    value: Value::Varint(u64::from(*index)),
+                });
+                crate::pb::Field {
+                    number,
+                    value: Value::Bytes(entry.encode()),
+                }
+            })
+            .collect()
+    };
+    let mut map = Message::default();
+    map.fields.extend(entries(1, row_ids));
+    map.fields.extend(entries(2, column_ids));
+    fields.push(crate::pb::Field {
+        number: 4,
+        value: Value::Bytes(map.encode()),
+    });
+    Message { fields }
+}
+
+/// One `TSCH.GridValue`: which field is set decides what it is, and an empty
+/// message is an empty cell.
+fn encode_value(value: GridValue) -> Vec<u8> {
+    let number = match value {
+        GridValue::Empty | GridValue::Unknown => return Vec::new(),
+        GridValue::Number(_) => 1,
+        GridValue::LegacyDate(_) => 2,
+        GridValue::Duration(_) => 3,
+        GridValue::Date(_) => 4,
+    };
+    let inner = match value {
+        GridValue::Number(v)
+        | GridValue::LegacyDate(v)
+        | GridValue::Duration(v)
+        | GridValue::Date(v) => v,
+        GridValue::Empty | GridValue::Unknown => 0.0,
+    };
+    Message {
+        fields: vec![crate::pb::Field {
+            number,
+            value: Value::Fixed64(inner.to_le_bytes()),
+        }],
+    }
+    .encode()
+}
+
+/// The archives a chart owns rather than shares: one per style archive, and
+/// the half of each pair that carries this chart's own state.
+const NON_STYLES: [u32; 6] = [
+    TYPE_CHART_NON_STYLE,
+    TYPE_LEGEND_NON_STYLE,
+    TYPE_AXIS_NON_STYLE,
+    TYPE_SERIES_NON_STYLE,
+    TYPE_REFERENCE_LINE_NON_STYLE,
+    TYPE_CHART_STYLE_PRESET,
+];
+
+/// Put a copy of a chart the document already has on a slide, a sheet or a
+/// page, drawing the data given.
+///
+/// **A chart is copied, not invented.** Its model points at a preset, a chart
+/// style and non-style, a legend style and non-style, styles and non-styles for
+/// both axes, six theme series styles and a list of paragraph styles — a dozen
+/// objects whose properties are a theme's, and none of which this crate can
+/// make up honestly. So the caller names a chart to copy, and gets one that
+/// looks like it with different numbers in it.
+///
+/// What is *shared* and what is *copied* follows the archive's own division:
+/// the theme's styles are shared, exactly as two charts made from one preset
+/// share them in the app, and everything the source chart keeps in its **own
+/// component** — its non-styles, which carry per-chart state like an axis
+/// title — is copied and renumbered, so editing one chart cannot change the
+/// other.
+pub fn add_chart(
+    document: &mut crate::Document,
+    container: &str,
+    from: u64,
+    data: &ChartData,
+    position: (f32, f32),
+    size: (f32, f32),
+) -> Result<u64, crate::Error> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    if size.0 <= 0.0 || size.1 <= 0.0 {
+        return Err(crate::Error::Format(format!(
+            "a chart needs a size, and {} × {} is not one",
+            size.0, size.1
+        )));
+    }
+    let source = charts(document)
+        .into_iter()
+        .find(|c| c.identifier == from)
+        .ok_or_else(|| {
+            crate::Error::Format(format!(
+                "no chart {from} to copy — `iwork charts` lists the ones there are"
+            ))
+        })?;
+    if source.mediator.is_some() {
+        return Err(crate::Error::Format(format!(
+            "chart {from} is fed by a table through its mediator, and a copy of it would claim \
+             to follow that table while holding numbers of its own"
+        )));
+    }
+    let container = crate::drawable::container_of(document, container)?;
+
+    // What the chart keeps to itself, and what it shares with every other
+    // chart made from the same preset. The archive draws the line itself: a
+    // *style* is the theme's and a *non-style* is this chart's, which is what
+    // the pairing of 5022/5023, 5024/5025, 5026/5027, 5028/5029 and 5030/5031
+    // is for. Location will not do it — in a Keynote deck the non-styles sit
+    // in the slide's own stream, in Pages they sit in `ObjectContainer`.
+    let mut private: BTreeSet<u64> = source
+        .chart_non_style
+        .into_iter()
+        .chain(source.legend_non_style)
+        .chain(source.owned_preset)
+        .chain(source.value_axis_non_styles.iter().copied())
+        .chain(source.category_axis_non_styles.iter().copied())
+        .chain(source.series_non_styles.entries.iter().map(|(_, id)| *id))
+        .filter(|id| *id != 0)
+        .collect();
+    // …and whatever those keep to themselves in turn, which is again decided
+    // by type rather than by where it happens to live.
+    let mut frontier: Vec<u64> = private.iter().copied().collect();
+    while let Some(identifier) = frontier.pop() {
+        let Ok(archive) = document.archive(identifier) else {
+            continue;
+        };
+        for target in crate::style::references(&archive) {
+            if target == 0 || private.contains(&target) || target == from {
+                continue;
+            }
+            let Some((_, object)) = document.object(target) else {
+                continue;
+            };
+            if !NON_STYLES.contains(&object.message_type()) {
+                continue;
+            }
+            private.insert(target);
+            frontier.push(target);
+        }
+    }
+    private.remove(&from);
+
+    // Every payload read out before anything is allocated, so the copy is
+    // assembled from a document nobody is halfway through changing.
+    let mut sources: Vec<(u64, u32, Message)> = Vec::new();
+    for identifier in std::iter::once(from).chain(private.iter().copied()) {
+        let (_, object) = document
+            .object(identifier)
+            .ok_or(crate::Error::NoSuchObject(identifier))?;
+        let archive = Message::decode(object.payload())
+            .map_err(|e| crate::Error::Format(format!("object {identifier}: {e}")))?;
+        sources.push((identifier, object.message_type(), archive));
+    }
+
+    let mut grow = crate::create::Grow::new(document);
+    let chart = grow.allocate();
+    let mut map: BTreeMap<u64, u64> = BTreeMap::new();
+    map.insert(from, chart);
+    for identifier in &private {
+        map.insert(*identifier, grow.allocate());
+    }
+
+    let neighbour = container.neighbour();
+    for (old, message_type, archive) in &mut sources {
+        let (old, message_type) = (*old, *message_type);
+        let new = map[&old];
+        crate::keynote::remap_references(archive, &map, crate::keynote::MAX_DEPTH);
+        if old == from {
+            place(archive, container.parent(), position, size);
+            let mut model = archive
+                .bytes(EXTENSION)
+                .and_then(decode_nested)
+                .ok_or_else(|| {
+                    crate::Error::Format(format!("chart {from} carries no chart archive"))
+                })?;
+            let ids = |count: usize| -> Vec<(String, u32)> {
+                (0..count)
+                    .map(|index| (crate::metadata::uuid(), index as u32))
+                    .collect()
+            };
+            model.set_in_order(
+                7,
+                Value::Bytes(
+                    encode_grid(data, &ids(data.rows.len()), &ids(data.column_names.len()))
+                        .encode(),
+                ),
+            );
+            if model.get(6).is_some() {
+                model.set_in_order(6, Value::Varint(0));
+            }
+            archive.set_in_order(EXTENSION, Value::Bytes(model.encode()));
+        }
+        grow.beside(neighbour, new, message_type, archive)?;
+    }
+    grow.finish()?;
+
+    crate::drawable::hold(document, &container, chart)?;
+    document.declare_external_references();
+    Ok(chart)
+}
+
+/// Put a copied drawable where it was asked for: its rectangle, and the parent
+/// its new container does or does not give it.
+///
+/// The geometry is `super.super.geometry` for a chart drawable, which is one
+/// level of nesting — but nothing here counts levels: it walks field 1 the way
+/// [`crate::drawable::drawable_path`] does, because that is the only thing that
+/// holds for every archive in `TSD`.
+fn place(archive: &mut Message, parent: Option<u64>, position: (f32, f32), size: (f32, f32)) {
+    let Some(path) = crate::drawable::drawable_path(archive) else {
+        return;
+    };
+    let mut body = archive.clone();
+    for step in &path {
+        body = match body.bytes(*step).and_then(decode_nested) {
+            Some(next) => next,
+            None => return,
+        };
+    }
+    let point = |x: f32, y: f32| {
+        Value::Bytes(
+            Message {
+                fields: vec![
+                    crate::pb::Field {
+                        number: 1,
+                        value: Value::Fixed32(x.to_le_bytes()),
+                    },
+                    crate::pb::Field {
+                        number: 2,
+                        value: Value::Fixed32(y.to_le_bytes()),
+                    },
+                ],
+            }
+            .encode(),
+        )
+    };
+    let mut geometry = body
+        .bytes(crate::drawable::field::GEOMETRY)
+        .and_then(decode_nested)
+        .unwrap_or_default();
+    geometry.set_in_order(1, point(position.0, position.1));
+    geometry.set_in_order(2, point(size.0, size.1));
+    body.set_in_order(
+        crate::drawable::field::GEOMETRY,
+        Value::Bytes(geometry.encode()),
+    );
+    match parent {
+        Some(parent) => body.set_in_order(
+            crate::drawable::field::PARENT,
+            Value::Bytes(crate::create::reference_bytes(parent)),
+        ),
+        None => body
+            .fields
+            .retain(|field| field.number != crate::drawable::field::PARENT),
+    }
+    // Back up the path, rebuilding each level around the one below it.
+    let mut payload = body.encode();
+    for step in path.iter().rev() {
+        let mut level = archive.clone();
+        for above in &path[..path.iter().position(|s| s == step).unwrap_or(0)] {
+            level = match level.bytes(*above).and_then(decode_nested) {
+                Some(next) => next,
+                None => return,
+            };
+        }
+        level.set_in_order(*step, Value::Bytes(payload));
+        payload = level.encode();
+    }
+    if let Ok(rebuilt) = Message::decode(&payload) {
+        *archive = rebuilt;
     }
 }

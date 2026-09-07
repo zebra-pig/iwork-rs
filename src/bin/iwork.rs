@@ -133,12 +133,25 @@ charts
   iwork charts    <file>                   every chart: type, placement, the
                                            data it carries and the table
                                            references it follows
+  iwork set-chart-data <file> <chart> <csv> <out>
+                                           rewrite the numbers a chart draws
+  iwork add-chart <file> <where> <from> <csv> <x> <y> <w> <h> <out>
+                                           copy chart <from> onto a slide, a
+                                           sheet or a page, drawing <csv>
+
+A <csv> is a small table: the first row names the categories, the first cell of
+each row after it names the series. Blank cells are blank; anything that is not
+a number is refused rather than plotted as zero.
 
 A chart holds its data twice. The grid printed as a small table is the chart's
 own private copy — the thing it draws, and all a Pages or Keynote chart has. A
 Numbers chart also has a mediator holding formulas back into tables, printed as
-`fed by …`; the grid is then a cache of what those last evaluated to. Nothing
-here writes to a chart.
+`fed by …`; the grid is then a cache of what those last evaluated to — so a
+chart that says `fed by` is refused by both set-chart-data and add-chart, since
+numbers written into that cache disagree with the table the moment Numbers
+recalculates. add-chart copies a chart the document already has: a dozen
+objects of theme properties stand behind one, and none of them can be invented
+honestly.
 
 A <table> is an object id, as printed by `iwork tables`, or a table name. A
 <cell> is an A1 reference; <row> and <col> are the 0-based indices the API
@@ -265,6 +278,12 @@ fn main() -> ExitCode {
         }
         ["drawables", file] => drawables(file),
         ["charts", file] => charts(file),
+        ["set-chart-data", file, chart, csv, out] => {
+            identifier(chart).and_then(|chart| set_chart_data(file, chart, csv, out))
+        }
+        ["add-chart", file, place, from, csv, x, y, w, h, out] => {
+            identifier(from).and_then(|from| add_chart(file, place, from, csv, x, y, w, h, out))
+        }
         ["media", file] => media(file),
         ["set-geometry", file, id, x, y, out] => set_geometry(file, id, x, y, None, out),
         ["set-geometry", file, id, x, y, w, h, out] => {
@@ -2887,6 +2906,118 @@ fn csv(path: &str, wanted: &str) -> Result<(), Error> {
         let fields: Vec<String> = row.iter().map(|field| csv_field(field)).collect();
         println!("{}", fields.join(","));
     }
+    Ok(())
+}
+
+/// A small CSV as a chart's data: the first row names the categories, the
+/// first cell of every row after it names the series.
+///
+/// Deliberately strict. A cell that is neither blank nor a number is refused by
+/// name rather than plotted as zero, because a chart drawing a zero nobody
+/// wrote is exactly the kind of plausible wrong answer this crate is built to
+/// avoid.
+fn chart_data(path: &str) -> Result<iwork::chart::ChartData, Error> {
+    let text = std::fs::read_to_string(path).map_err(|e| Error::Format(format!("{path}: {e}")))?;
+    let mut lines = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(split_csv);
+    let heading = lines
+        .next()
+        .ok_or_else(|| Error::Format(format!("{path} is empty")))?;
+    let mut data = iwork::chart::ChartData {
+        // The first cell of the heading sits above the series names and names
+        // nothing, so it is dropped.
+        column_names: heading.into_iter().skip(1).collect(),
+        ..Default::default()
+    };
+    for (number, line) in lines.enumerate() {
+        let mut cells = line.into_iter();
+        data.row_names.push(cells.next().unwrap_or_default());
+        let mut row = Vec::new();
+        for cell in cells {
+            let cell = cell.trim().to_string();
+            if cell.is_empty() {
+                row.push(iwork::chart::GridValue::Empty);
+                continue;
+            }
+            let value = cell.parse::<f64>().map_err(|_| {
+                Error::Format(format!(
+                    "{path} row {}: {cell:?} is not a number, and a chart plots numbers",
+                    number + 2
+                ))
+            })?;
+            row.push(iwork::chart::GridValue::Number(value));
+        }
+        data.rows.push(row);
+    }
+    Ok(data)
+}
+
+/// One CSV line: commas separate, double quotes group, `""` is a quote.
+fn split_csv(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut field = String::new();
+    let mut quoted = false;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' if quoted && chars.peek() == Some(&'"') => {
+                field.push('"');
+                chars.next();
+            }
+            '"' => quoted = !quoted,
+            ',' if !quoted => out.push(std::mem::take(&mut field)),
+            _ => field.push(c),
+        }
+    }
+    out.push(field);
+    out
+}
+
+/// `iwork set-chart-data` — new numbers in a chart that is already there.
+fn set_chart_data(path: &str, chart: u64, csv: &str, out: &str) -> Result<(), Error> {
+    let data = chart_data(csv)?;
+    let mut doc = Document::open(path)?;
+    doc.set_chart_data(chart, &data)?;
+    doc.save(out)?;
+    println!(
+        "chart {chart} now draws {} series over {} categories",
+        data.rows.len(),
+        data.column_names.len()
+    );
+    report_streams(&doc, out);
+    Ok(())
+}
+
+/// `iwork add-chart` — a copy of a chart the document has, somewhere else.
+#[allow(clippy::too_many_arguments)]
+fn add_chart(
+    path: &str,
+    where_: &str,
+    from: u64,
+    csv: &str,
+    x: &str,
+    y: &str,
+    w: &str,
+    h: &str,
+    out: &str,
+) -> Result<(), Error> {
+    let number = |what: &str, raw: &str| {
+        raw.parse::<f32>()
+            .map_err(|_| Error::Format(format!("{raw}: {what} is a number of points")))
+    };
+    let position = (number("a position", x)?, number("a position", y)?);
+    let size = (number("a size", w)?, number("a size", h)?);
+    let data = chart_data(csv)?;
+    let mut doc = Document::open(path)?;
+    let chart = doc.add_chart(where_, from, &data, position, size)?;
+    doc.save(out)?;
+    println!(
+        "added chart {chart}, copied from {from}, at {},{} — {} × {}",
+        position.0, position.1, size.0, size.1
+    );
+    report_streams(&doc, out);
     Ok(())
 }
 

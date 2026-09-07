@@ -120,6 +120,30 @@ for chart in doc.charts() {
 }
 ```
 
+**The private copy can be written, and a chart can be put where there was
+none.** `Document::set_chart_data` rewrites the grid — new names, new numbers,
+and a shape the chart did not have before, extra series taking their colour
+from the theme's six, which cycle. A row that stays keeps the UUID that makes
+it the same series through the edit; only a new one is minted, and a blank
+stays a blank rather than shifting its row. Told to draw three series over four
+categories where it had two over three, Keynote read the chart back and wrote
+it out unchanged, and so did Pages.
+
+`Document::add_chart` puts a **copy** of a chart the document already has on a
+slide, a sheet or a page — a copy rather than an invention, because a dozen
+objects of theme properties stand behind a chart and this crate decodes none of
+them. What is copied and what is shared follows the archive's own distinction:
+the *style* half of each pair is the theme's and is shared, the *non-style*
+half carries this chart's own state and is copied and renumbered. Location
+would not serve — a Keynote deck keeps its non-styles in the slide's stream and
+Pages keeps them in `ObjectContainer`.
+
+**A chart fed by a table is refused, both ways.** Writing numbers into a cache
+of formulas makes the chart disagree with its table the moment Numbers
+recalculates, and a copy of such a chart would claim to follow a table while
+holding numbers of its own. Nothing here evaluates a `TSCE` formula, so nothing
+here writes that cache.
+
 ## CLI
 
 ```
@@ -164,6 +188,8 @@ iwork insert-row Budget.numbers Zellarten 8 out.numbers   # an empty row before 
 iwork charts    Budget.numbers            # every chart: type, placement, the data
                                           # it carries, and the table ranges it
                                           # follows — the two are not the same
+iwork set-chart-data Talk.key 2654690 sales.csv out.key
+iwork add-chart Report.pages "page 1" 3493939 sales.csv 100 100 400 300 out.pages
 
 iwork slides    Talk.key                  # every slide: layout, placeholders and
                                           # their text, presenter notes, the
@@ -638,6 +664,12 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | The chart model found at extension 10000 of every chart drawable | ✅ | ✅ | ✅ |
 | The private grid: row and column names, series, blank ≠ zero | ✅ | ✅ | ✅ |
 | **Every value of an 18-chart zoo is the number the app was told to plot** | — | — | ✅ |
+| Rewrite a chart's private grid, including its shape | ✅ | — | ✅ |
+| A row that stays keeps its identity; a new one gets a new one | ✅ | — | ✅ |
+| A blank stays blank, and does not shift the row | ✅ | — | ✅ |
+| Copy a chart: theme styles shared, non-styles copied and renumbered | ✅ | — | ✅ |
+| A chart fed by a table is refused, written and copied | — | ✅ | — |
+| **The app resaves a rewritten and a copied chart, data intact** | ✅ | — | ✅ |
 | Which table and which ranges feed a chart, through function 175 | — | ✅ | — |
 | A chart with no mediator has private data and nothing to follow | ✅ | — | ✅ |
 | Interactive chart: the data set it is showing, in the model not the view state | — | ✅ | — |

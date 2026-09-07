@@ -2791,6 +2791,36 @@ impl Document {
         crate::chart::charts(self)
     }
 
+    /// Rewrite the private grid a chart draws.
+    ///
+    /// See [`crate::chart::set_chart_data`]: a Numbers chart fed by a table is
+    /// refused, because its grid is a cache of formulas this crate does not
+    /// evaluate.
+    pub fn set_chart_data(
+        &mut self,
+        chart: u64,
+        data: &crate::chart::ChartData,
+    ) -> Result<(), Error> {
+        crate::chart::set_chart_data(self, chart, data)
+    }
+
+    /// Put a copy of a chart the document already has somewhere else, drawing
+    /// the data given.
+    ///
+    /// See [`crate::chart::add_chart`]: a chart is copied rather than invented,
+    /// because a dozen theme styles stand behind it and none of them can be
+    /// made up honestly.
+    pub fn add_chart(
+        &mut self,
+        container: &str,
+        from: u64,
+        data: &crate::chart::ChartData,
+        position: (f32, f32),
+        size: (f32, f32),
+    ) -> Result<u64, Error> {
+        crate::chart::add_chart(self, container, from, data, position, size)
+    }
+
     /// One drawable by object identifier.
     pub fn drawable(&self, identifier: u64) -> Option<crate::drawable::Drawable> {
         self.drawables()

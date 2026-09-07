@@ -1822,7 +1822,7 @@ impl Container {
 
     /// The object a new drawable is written beside, so it lands in the stream
     /// the app expects to read it from.
-    fn neighbour(&self) -> u64 {
+    pub(crate) fn neighbour(&self) -> u64 {
         match self {
             Container::Slide { identifier } | Container::Sheet { identifier } => *identifier,
             Container::Page { floating, .. } => *floating,
