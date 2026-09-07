@@ -527,20 +527,28 @@ which is the difference between a library that *makes* a document and one that
 `duplicate_slide` knows how to add a component to a document that exists — and
 what is missing is the join between them.
 
-- [ ] **`create::Grow`**: allocate identifiers in an existing document, add a
+- [x] **`create::Grow`**: allocate identifiers in an existing document, add a
       component with its `ComponentInfo` (including the object-UUID map Numbers
       insists on), add objects to a component that already exists, and declare
       what the new objects point at. Shared with `Blueprint` so a component is
       written the same way whether the document is new or not.
-- [ ] **`Document::add_slide`** (Keynote): a slide in its own component, a node,
+- [x] **`Document::add_slide`** (Keynote): a slide in its own component, a node,
       and an entry at the end of the show's slide tree. The master is the deck's
       own, not a new one.
-- [ ] **`Document::add_table`** (Numbers): a table on a sheet that exists,
+- [x] **`Document::add_table`** (Numbers): a table on a sheet that exists,
       borrowing the styles a table already there uses.
-- [ ] **`Document::add_sheet`** (Numbers): a sheet with a table on it, appended
+- [x] **`Document::add_sheet`** (Numbers): a sheet with a table on it, appended
       to the document's sheet list.
-- [ ] CLI, tests, and the app round-trip for each: the app opens the document,
+- [x] CLI, tests, and the app round-trip for each: the app opens the document,
       counts one more sheet/table/slide, and saves it back.
+
+*(Done. `create::Site` is the trait `Blueprint` and `Grow` share, so a table
+built into a new package and one added to somebody's spreadsheet come from the
+same function. A table **borrows the styles a table already in the document
+uses** — a document with no table is refused rather than given a style it never
+defined — and two tables of one name are refused because the app's formulas
+cannot tell them apart. Verified against documents the apps wrote as well as
+ones this crate made, resave included.)*
 
 ## Phase 12 — Formulas, written
 
