@@ -925,7 +925,16 @@ pub(crate) fn numbers(
     // The interning tables every cell refers into. A new table has interned
     // nothing, so each is a list type and a next key of 1 — keys start at 1
     // because a stored key of 0 means "none".
+    // Eight of them, which is what a table Numbers made carries: one per kind
+    // of thing a cell can point at. A new table has interned nothing, so each
+    // is a list type and a next key of 1 — keys start at 1 because a stored key
+    // of 0 means "none".
     let strings = blueprint.in_own_component("Tables/DataList", TYPE_DATA_LIST, data_list(1));
+    let formulas = blueprint.in_own_component("Tables/DataList", TYPE_DATA_LIST, data_list(3));
+    let conditional = blueprint.in_own_component("Tables/DataList", TYPE_DATA_LIST, data_list(2));
+    let list_10 = blueprint.in_own_component("Tables/DataList", TYPE_DATA_LIST, data_list(10));
+    let list_11 = blueprint.in_own_component("Tables/DataList", TYPE_DATA_LIST, data_list(11));
+    let controls = blueprint.in_own_component("Tables/DataList", TYPE_DATA_LIST, data_list(12));
     // The format list starts with one entry rather than none: the automatic
     // format, which every slot can point at. `set_cell` gives a cell its format
     // by borrowing one the table already uses, and a table with no cells has
@@ -1007,10 +1016,16 @@ pub(crate) fn numbers(
         named_style("table-0-tableStyle", stylesheet),
     );
     named.push(("table-0-tableStyle".to_string(), table_style));
-    let cell_styles: Vec<u64> = ["body", "headerRow", "headerColumn", "footerRow"]
+
+    // Seventeen cell styles and eight paragraph styles, because that is how
+    // many a `TST.TableModelArchive` names: one per area of the table (body,
+    // header row, header column, footer, the category levels) and one per area
+    // of text in it. They are made in a loop because what they are *for* is the
+    // field that points at them; the archives themselves differ only in name.
+    let table_cells: Vec<u64> = CELL_AREAS
         .iter()
         .map(|area| {
-            let identifier = format!("tableCell-0-{area}Style");
+            let identifier = format!("tableCell-0-{area}");
             let style = blueprint.add(
                 style_component,
                 TYPE_CELL_STYLE,
@@ -1020,18 +1035,19 @@ pub(crate) fn numbers(
             style
         })
         .collect();
-    let cell_text = blueprint.add(
-        style_component,
-        crate::style::TYPE_PARAGRAPH_STYLE,
-        paragraph_style(stylesheet, list),
-    );
-    named.push((BODY_IDENTIFIER.to_string(), cell_text));
-    let shape_style = blueprint.add(
-        style_component,
-        TYPE_SHAPE_STYLE,
-        named_style("shape-0-tableStyle", stylesheet),
-    );
-    named.push(("shape-0-tableStyle".to_string(), shape_style));
+    let table_text: Vec<u64> = TEXT_AREAS
+        .iter()
+        .map(|area| {
+            let identifier = format!("text-0-paragraphstyle-{area}");
+            let style = blueprint.add(
+                style_component,
+                crate::style::TYPE_PARAGRAPH_STYLE,
+                table_text_style(&identifier, area, stylesheet, list),
+            );
+            named.push((identifier, style));
+            style
+        })
+        .collect();
     blueprint.put(
         style_component,
         stylesheet,
@@ -1043,13 +1059,24 @@ pub(crate) fn numbers(
     // storages and three footer storages for printing, and a guide storage,
     // exactly as a Pages section template does. A sheet Numbers wrote has all
     // seven.
+
+    // One number the whole table's identities come from, so that two documents
+    // made in the same second are still two documents.
+    let seed = {
+        let hex = crate::metadata::uuid().replace('-', "");
+        u64::from_str_radix(&hex[0..16], 16).unwrap_or(0x9E37_79B9_7F4A_7C15)
+    };
+
+    // A Numbers sheet is a page as well as a container: three header storages,
+    // three footer storages and a guide storage, exactly as a Pages section
+    // template has.
     let guides = blueprint.add(document, TYPE_GUIDE_STORAGE, message(Vec::new()));
     let headers: Vec<u64> = (0..6)
         .map(|_| {
             blueprint.add(
                 document,
                 TYPE_STORAGE,
-                page_storage(stylesheet, cell_text, list),
+                page_storage(stylesheet, table_text[1], list),
             )
         })
         .collect();
@@ -1059,7 +1086,7 @@ pub(crate) fn numbers(
     let info = blueprint.add(
         engine_component,
         TYPE_TABLE_INFO,
-        table_info(sheet, model, rows, columns),
+        table_info(sheet, model, rows, columns, seed),
     );
     blueprint.put(
         engine_component,
@@ -1075,10 +1102,15 @@ pub(crate) fn numbers(
             strings,
             formats,
             styles,
+            formulas,
+            conditional,
+            list_10,
+            list_11,
+            controls,
             table_style,
-            cell_styles: &cell_styles,
-            cell_text,
-            shape_style,
+            cell_styles: &table_cells,
+            text_styles: &table_text,
+            seed,
         }),
     );
     blueprint.put(
@@ -1200,7 +1232,7 @@ const OFFSET_SLOTS: usize = 255;
 /// Field 1 is the `TSD.DrawableArchive` every placed object begins with: a
 /// geometry and the thing it hangs off, which for a Numbers table is the sheet.
 #[allow(dead_code)]
-fn table_info(sheet: u64, model: u64, rows: usize, columns: usize) -> Message {
+fn table_info(sheet: u64, model: u64, rows: usize, columns: usize, seed: u64) -> Message {
     let width = columns as f32 * DEFAULT_COLUMN_WIDTH as f32;
     let height = rows as f32 * DEFAULT_ROW_HEIGHT as f32;
     message(vec![
@@ -1220,6 +1252,15 @@ fn table_info(sheet: u64, model: u64, rows: usize, columns: usize) -> Message {
             ],
         ),
         reference(2, model),
+        // `group_by_uuid` and `hidden_states_uuid`: the identities a category
+        // or a filter would hang off. A table that has neither still names
+        // them, and a table info without them is one the app tries to *upgrade*
+        // while reading — which it then complains about, the document being
+        // written in the current format already.
+        nested(7, uuid_pair(seed, 7)),
+        nested(8, uuid_pair(seed, 8)),
+        // `formula_coord_space`.
+        varint(10, 0),
     ])
 }
 
@@ -1235,12 +1276,55 @@ struct TableParts<'a> {
     strings: u64,
     formats: u64,
     styles: u64,
+    formulas: u64,
+    conditional: u64,
+    list_10: u64,
+    list_11: u64,
+    controls: u64,
     table_style: u64,
-    /// Body, header row, header column, footer row — in that order.
+    /// Seventeen, in the order [`CELL_AREAS`] names them.
     cell_styles: &'a [u64],
-    cell_text: u64,
-    shape_style: u64,
+    /// Eight, in the order [`TEXT_AREAS`] names them.
+    text_styles: &'a [u64],
+    /// Where the table's UIDs come from.
+    seed: u64,
 }
+
+/// The areas of a table that carry a cell style of their own, in the order the
+/// model's fields name them.
+#[allow(dead_code)]
+const CELL_AREAS: &[&str] = &[
+    "bodyStyle",
+    "headerRowStyle",
+    "headerColumnStyle",
+    "footerRowStyle",
+    "categoryLevel1Row",
+    "categoryLevel2Row",
+    "categoryLevel3Row",
+    "categoryLevel4Row",
+    "categoryLevel5Row",
+    "groupLevel1Style",
+    "groupLevel2Style",
+    "groupLevel3Style",
+    "groupLevel4Style",
+    "groupLevel5Style",
+    "pivotHeaderStyle",
+    "pivotValueStyle",
+    "pivotTotalStyle",
+];
+
+/// The same for the text in those areas.
+#[allow(dead_code)]
+const TEXT_AREAS: &[&str] = &[
+    "Table Header",
+    "Table Body",
+    "Table Footer",
+    "Table Group 1",
+    "Table Group 2",
+    "Table Group 3",
+    "Table Group 4",
+    "Table Group 5",
+];
 
 /// `TST.TableModelArchive` — the table, with its `TST.DataStore` inline.
 ///
@@ -1268,6 +1352,16 @@ fn table_model(parts: TableParts) -> Message {
                 }),
                 reference(4, parts.strings),
                 reference(5, parts.styles),
+                reference(6, parts.formulas),
+                varint(7, 1),
+                varint(8, 0),
+                nested(9, vec![nested(1, vec![varint(1, 0), varint(2, 0)])]),
+                bytes(10, Vec::new()),
+                reference(11, parts.conditional),
+                varint(14, 4),
+                reference(19, parts.list_10),
+                reference(20, parts.list_11),
+                reference(21, parts.controls),
                 reference(22, parts.formats),
             ],
         ),
@@ -1284,16 +1378,148 @@ fn table_model(parts: TableParts) -> Message {
         double(16, DEFAULT_ROW_HEIGHT),
         double(17, DEFAULT_COLUMN_WIDTH),
         reference(3, parts.table_style),
+        // The style of every area of the table, in the order the app names
+        // them: four for the table proper, five per category level, five per
+        // group level, three for a pivot.
         reference(18, parts.cell_styles[0]),
         reference(19, parts.cell_styles[1]),
         reference(20, parts.cell_styles[2]),
         reference(21, parts.cell_styles[3]),
-        reference(24, parts.cell_text),
-        reference(25, parts.cell_text),
-        reference(26, parts.cell_text),
-        reference(27, parts.cell_text),
-        reference(30, parts.cell_text),
-        reference(36, parts.shape_style),
+        varint(22, 1),
+        reference(24, parts.text_styles[0]),
+        reference(25, parts.text_styles[1]),
+        reference(26, parts.text_styles[1]),
+        reference(27, parts.text_styles[1]),
+        varint(29, 1),
+        reference(30, parts.text_styles[1]),
+        varint(31, 0),
+        varint(32, 1),
+        double(33, 0.0),
+        // The table's own identity, and the identity of the thing that owns its
+        // formulas. Both are minted here: nothing outside this document refers
+        // to them, and the calculation engine that would is empty.
+        nested(39, uid(parts.seed, 1)),
+        reference(44, 0),
+        nested(
+            47,
+            vec![nested(1, uid(parts.seed, 2)), nested(2, vec![varint(2, 0)])],
+        ),
+        reference(60, parts.cell_styles[4]),
+        reference(61, parts.cell_styles[5]),
+        reference(62, parts.cell_styles[6]),
+        reference(63, parts.cell_styles[7]),
+        reference(64, parts.cell_styles[8]),
+        reference(65, parts.text_styles[1]),
+        reference(66, parts.text_styles[1]),
+        reference(67, parts.text_styles[1]),
+        reference(68, parts.text_styles[1]),
+        reference(69, parts.text_styles[1]),
+        reference(71, parts.cell_styles[9]),
+        reference(72, parts.cell_styles[10]),
+        reference(73, parts.cell_styles[11]),
+        reference(74, parts.cell_styles[12]),
+        reference(75, parts.cell_styles[13]),
+        reference(76, parts.text_styles[3]),
+        reference(77, parts.text_styles[4]),
+        reference(78, parts.text_styles[5]),
+        reference(79, parts.text_styles[6]),
+        reference(80, parts.text_styles[7]),
+        nested(
+            81,
+            vec![
+                // `CategoryOwnerArchive.owner_uid`, a `TSP.UUID` whose `lower`
+                // and `upper` are **required** — the app says so by name in
+                // the unified log when they are not there.
+                nested(1, vec![varint(1, 0), varint(2, 0)]),
+                nested(
+                    2,
+                    vec![
+                        nested(1, uuid_pair(parts.seed, 3)),
+                        nested(
+                            3,
+                            vec![nested(1, vec![varint(1, 1), varint(2, 0)]), string(6, "")],
+                        ),
+                        varint(6, 0),
+                        nested(7, vec![varint(2, 0), varint(3, 0)]),
+                        nested(8, vec![varint(2, 1), varint(3, 0)]),
+                        nested(9, vec![varint(2, 3), varint(3, 0)]),
+                        nested(10, vec![varint(2, 2), varint(3, 0)]),
+                        nested(11, vec![varint(2, 4), varint(3, 0)]),
+                        nested(12, vec![varint(2, 5), varint(3, 0)]),
+                        nested(13, vec![varint(2, 6), varint(3, 0)]),
+                        varint(14, 8),
+                        nested(16, vec![varint(2, 7), varint(3, 0)]),
+                    ],
+                ),
+            ],
+        ),
+        nested(
+            82,
+            vec![nested(1, uid(parts.seed, 4)), nested(2, vec![varint(2, 0)])],
+        ),
+        nested(84, vec![nested(1, uuid_pair(parts.seed, 5))]),
+        reference(87, parts.cell_styles[14]),
+        reference(88, parts.cell_styles[15]),
+        reference(89, parts.cell_styles[16]),
+        nested(93, vec![nested(1, uuid_pair(parts.seed, 6))]),
+    ])
+}
+
+/// A four-word `TSCE` UID, derived from the table's seed so that a document is
+/// internally consistent and two documents do not share one.
+#[allow(dead_code)]
+fn uid(seed: u64, which: u64) -> Vec<Field> {
+    let word = |n: u64| ((seed.wrapping_mul(0x9E37_79B9) ^ (which << 8) ^ n) & 0xFFFF_FFFF) + 1;
+    vec![
+        varint(2, word(1)),
+        varint(3, word(2)),
+        varint(4, word(3)),
+        varint(5, word(4)),
+    ]
+}
+
+/// A two-word `TSP.UUID`, from the same seed.
+#[allow(dead_code)]
+fn uuid_pair(seed: u64, which: u64) -> Vec<Field> {
+    let word = |n: u64| seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (which << 32) ^ n;
+    vec![varint(1, word(1)), varint(2, word(2))]
+}
+
+/// A paragraph style for one area of a table: bold in a header, plain in the
+/// body, 10 pt throughout, which is what the app's own table styles carry.
+#[allow(dead_code)]
+fn table_text_style(identifier: &str, name: &str, stylesheet: u64, list: u64) -> Message {
+    use crate::style::property;
+    message(vec![
+        nested(
+            1,
+            vec![
+                string(1, name),
+                string(2, identifier),
+                reference(5, stylesheet),
+            ],
+        ),
+        nested(
+            property::FONT_SIZE[0],
+            vec![
+                float(property::FONT_SIZE[1], 10.0),
+                string(
+                    property::FONT_NAME[1],
+                    match name.contains("Header") {
+                        true => "HelveticaNeue-Bold",
+                        false => "HelveticaNeue",
+                    },
+                ),
+                nested(property::FONT_COLOR[1], black()),
+            ],
+        ),
+        nested(
+            property::ALIGNMENT[0],
+            vec![
+                varint(property::ALIGNMENT[1], 4),
+                reference(property::LIST_STYLE[1], list),
+            ],
+        ),
     ])
 }
 
@@ -1473,6 +1699,12 @@ fn numbers_stylesheet(named: &[(String, u64)]) -> Message {
     for (identifier, style) in named {
         fields.push(nested(2, vec![string(1, identifier), reference(2, *style)]));
     }
+    // `is_locked`, and its default is **true**. A document whose stylesheet
+    // does not say otherwise is one the app cannot add a style to, and it needs
+    // to: opening this document without the field, Numbers got as far as
+    // "Adding style (TSDMediaStyle*) to locked stylesheet" and stopped. Nothing
+    // in the file says that; the app's own log does.
+    fields.push(varint(4, 0));
     message(fields)
 }
 

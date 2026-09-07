@@ -509,6 +509,10 @@ impl Document {
             // [`crate::create::numbers`] — and Numbers does not open what it
             // writes, so it is not offered. A document the app refuses is worse
             // than no document at all.
+            // The Numbers blueprint is written and measured — see
+            // [`crate::create::numbers`] — and Numbers does not open what it
+            // writes, so it is not offered. A document the app refuses is worse
+            // than no document at all.
             Kind::Numbers | Kind::Keynote => {
                 return Err(Error::Format(format!(
                     "{} documents cannot be created from nothing yet — \
