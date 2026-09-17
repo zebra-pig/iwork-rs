@@ -1194,3 +1194,189 @@ fn every_cell_agrees_with_numbers() {
     eprintln!("{compared} cells compared against Numbers");
     assert!(compared > 0, "nothing was compared");
 }
+
+// -- merging cells -----------------------------------------------------------
+
+/// The measurement this write rests on: the node array this crate builds for a
+/// range is **byte for byte the one the app wrote** for the same merge. All
+/// four of `numbers-formats.numbers`'s merges are reproduced from nothing but
+/// their row, column and size.
+#[test]
+fn a_merge_is_written_the_way_the_app_wrote_it() {
+    fixture!("numbers-formats.numbers");
+    let doc = open("numbers-formats.numbers").unwrap();
+    let table = table(&doc, "Verbunden");
+    assert_eq!(table.merges.len(), 4);
+
+    // What the app has, as bytes: the node array of every merge formula.
+    let model = doc.archive(table.model).unwrap();
+    let owner = model
+        .bytes(47)
+        .and_then(decode_nested)
+        .expect("merge owner");
+    let store = owner
+        .bytes(2)
+        .and_then(decode_nested)
+        .expect("formula store");
+    let theirs: Vec<Vec<u8>> = store
+        .all(3)
+        .filter_map(|value| match value {
+            Value::Bytes(raw) => decode_nested(raw),
+            _ => None,
+        })
+        .filter_map(|pair| pair.bytes(2).and_then(decode_nested))
+        .filter_map(|formula| formula.bytes(1).map(<[u8]>::to_vec))
+        .collect();
+    assert_eq!(theirs.len(), 4);
+
+    for merge in &table.merges {
+        let mine = iwork::document::merge_range_node_for_test(
+            &table,
+            merge.row,
+            merge.column,
+            merge.rows,
+            merge.columns,
+        )
+        .unwrap();
+        assert!(
+            theirs.contains(&mine),
+            "the range node for r{}c{} {}×{} is not one the app wrote",
+            merge.row,
+            merge.column,
+            merge.rows,
+            merge.columns
+        );
+    }
+}
+
+/// Merging: the range appears, the covered cells are emptied through the
+/// ordinary writer so their references go back, and every count still adds up.
+#[test]
+fn cells_can_be_merged_and_unmerged() {
+    fixture!("numbers-formats.numbers");
+    let mut doc = open("numbers-formats.numbers").unwrap();
+    doc.set_cell("Spaltenformat", 0, 1, CellValue::Text("weg".into()))
+        .unwrap();
+    assert!(table(&doc, "Spaltenformat").merges.is_empty());
+
+    doc.merge_cells("Spaltenformat", 0, 0, 1, 2).unwrap();
+
+    let merged = table(&doc, "Spaltenformat");
+    assert_eq!(
+        merged.merges,
+        vec![Merge {
+            row: 0,
+            column: 0,
+            rows: 1,
+            columns: 2
+        }]
+    );
+    assert_eq!(
+        merged.value(0, 0),
+        CellValue::Text("Betrag".into()),
+        "the merge lost the cell it began in"
+    );
+    assert_eq!(
+        merged.value(0, 1),
+        CellValue::Empty,
+        "the covered cell kept its value"
+    );
+    assert!(merged.audit().is_empty(), "{:?}", merged.audit());
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+
+    // …and apart again. The cells stay empty, which is what the merge left.
+    doc.unmerge_cells("Spaltenformat", 0, 0).unwrap();
+    let apart = table(&doc, "Spaltenformat");
+    assert!(apart.merges.is_empty(), "{:?}", apart.merges);
+    assert_eq!(apart.value(0, 0), CellValue::Text("Betrag".into()));
+    assert!(apart.audit().is_empty(), "{:?}", apart.audit());
+}
+
+/// What a merge will not do.
+#[test]
+fn merging_refuses_what_it_cannot_do_honestly() {
+    fixture!("numbers-formats.numbers");
+    let mut doc = open("numbers-formats.numbers").unwrap();
+    for (name, row, column, rows, columns, expected) in [
+        ("Spaltenformat", 0, 0, 1, 1, "one cell is not a merge"),
+        ("Spaltenformat", 0, 0, 9, 1, "the table is 4×2"),
+        ("Verbunden", 1, 1, 2, 2, "overlaps the merge"),
+        ("Verbunden", 0, 0, 2, 2, "overlaps the merge"),
+    ] {
+        let error = doc
+            .merge_cells(name, row, column, rows, columns)
+            .expect_err(&format!("{name} r{row}c{column} was not refused"))
+            .to_string();
+        assert!(error.contains(expected), "{name}: {error:?}");
+    }
+    // A covered cell holding a formula: the cell writer refuses it by name.
+    if let Some(mut doc) = open("numbers-values.numbers") {
+        let error = doc
+            .merge_cells("Zellarten", 2, 1, 1, 2)
+            .expect_err("C3 holds a formula")
+            .to_string();
+        assert!(error.contains("formula"), "{error}");
+        assert!(doc.changed_streams().is_empty());
+    }
+    assert!(
+        doc.changed_streams().is_empty(),
+        "a refused merge changed {:?}",
+        doc.changed_streams()
+    );
+    // Unmerging where there is no merge.
+    assert!(doc.unmerge_cells("Spaltenformat", 3, 1).is_err());
+}
+
+/// The app is the oracle, and it has no merge property to ask about: a
+/// merged-away cell is reported under the *name and value of the cell the merge
+/// began in*, so `A1 A1` across the first row is a 1×2 merge at A1.
+///
+/// Off unless `IWORK_APP_CHECK=1`.
+#[test]
+fn numbers_reports_a_written_merge() {
+    if std::env::var("IWORK_APP_CHECK").as_deref() != Ok("1") {
+        eprintln!("IWORK_APP_CHECK is not 1 — skipping the app round trip");
+        return;
+    }
+    let _ = fixture!("numbers-formats.numbers");
+    let mut doc = open("numbers-formats.numbers").unwrap();
+    doc.merge_cells("Spaltenformat", 0, 0, 1, 2).unwrap();
+    let out = std::env::temp_dir().join("iwork-merge.numbers");
+    let _ = std::fs::remove_file(&out);
+    doc.save(&out).unwrap();
+
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/table-oracle.sh");
+    let output = std::process::Command::new(&script)
+        .arg(&out)
+        .output()
+        .unwrap_or_else(|e| panic!("{}: {e}", script.display()));
+    assert!(
+        output.status.success(),
+        "Numbers would not open a document with a written merge:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+    // The first row of Spaltenformat: two cells, both reported as A1.
+    let mut in_table = false;
+    let first_row: Vec<&str> = text
+        .lines()
+        .filter(|line| {
+            let field: Vec<&str> = line.split('\t').collect();
+            if field.first() == Some(&"table") {
+                in_table = field.get(1) == Some(&"Spaltenformat");
+            }
+            in_table && field.first() == Some(&"cell")
+        })
+        .take(2)
+        .collect();
+    assert_eq!(first_row.len(), 2);
+    for line in &first_row {
+        let field: Vec<&str> = line.split('\t').collect();
+        assert_eq!(
+            field.get(1),
+            Some(&"A1"),
+            "the app does not see the two cells as one: {line}"
+        );
+    }
+    let _ = std::fs::remove_file(&out);
+}

@@ -509,6 +509,79 @@ struct StagedRow {
 
 /// A planned row insert: the objects it rewrites, each with its new archive, so
 /// the whole write is proven before any of it is applied.
+/// Reproduce a merge's node array, for the test that compares it with the app's.
+#[doc(hidden)]
+pub fn merge_range_node_for_test(
+    table: &crate::table::Table,
+    row: usize,
+    column: usize,
+    rows: usize,
+    columns: usize,
+) -> Result<Vec<u8>, Error> {
+    merge_range_node(table, row, column, rows, columns)
+}
+
+/// The node array a merge is stored as: an absolute range, wrapped in `SUM`.
+///
+/// Built through the formula parser, so the colon tract's two encodings — plain
+/// `int32` in the tract's lists, against the zigzag of a single cell — are the
+/// ones [`crate::formula_parse`] was measured into. What the parser does not
+/// write is the cross-table reference the app puts on a merge's range: field 28
+/// naming **this table's own** `base_owner_uid`, which is what the four merges
+/// of `numbers-formats.numbers` carry.
+fn merge_range_node(
+    table: &crate::table::Table,
+    row: usize,
+    column: usize,
+    rows: usize,
+    columns: usize,
+) -> Result<Vec<u8>, Error> {
+    let cell = |row: usize, column: usize| {
+        format!(
+            "${}${}",
+            crate::formula::column_letters(column as i64),
+            row + 1
+        )
+    };
+    let text = format!(
+        "=SUM({}:{})",
+        cell(row, column),
+        cell(row + rows - 1, column + columns - 1)
+    );
+    let ast = crate::formula_parse::parse(&text, (0, 0))
+        .map_err(|e| Error::Format(format!("{}: {text}: {e}", table.name)))?;
+    let mut nodes = ast.nodes;
+    let mut tract = nodes
+        .first()
+        .ok_or_else(|| Error::Format(format!("{}: {text} parsed to nothing", table.name)))?
+        .message()
+        .clone();
+    let mut uuid = Message::default();
+    uuid.set_in_order(2, Value::Varint(table.base_uid.lower & 0xffff_ffff));
+    uuid.set_in_order(3, Value::Varint(table.base_uid.lower >> 32));
+    uuid.set_in_order(4, Value::Varint(table.base_uid.upper & 0xffff_ffff));
+    uuid.set_in_order(5, Value::Varint(table.base_uid.upper >> 32));
+    let mut extra = Message::default();
+    extra.set_in_order(1, Value::Bytes(uuid.encode()));
+    tract.set_in_order(28, Value::Bytes(extra.encode()));
+    nodes[0] = crate::formula::Node::decode(tract)
+        .ok_or_else(|| Error::Format(format!("{}: the range node is not a node", table.name)))?;
+    Ok(crate::formula::Ast { nodes }.encode())
+}
+
+/// Every object a row or column delete rewrites, and its new form.
+struct DeletePlan {
+    touched: Vec<u64>,
+    model: u64,
+    model_archive: Message,
+    tiles: Vec<(u64, Message)>,
+    /// The row bucket holding the deleted row, or the single column bucket.
+    bucket: u64,
+    bucket_archive: Message,
+    uid_map: u64,
+    uid_map_archive: Message,
+}
+
 /// Every object a column insert rewrites, and its new form.
 struct ColumnInsertPlan {
     touched: Vec<u64>,
@@ -3529,6 +3602,866 @@ impl Document {
         self.set_archive(plan.row_bucket, &plan.bucket_archive)?;
         self.set_archive(plan.uid_map, &plan.uid_map_archive)?;
         Ok(())
+    }
+
+    /// Locate every object a row delete rewrites and build each one's new form.
+    fn plan_row_delete(
+        &self,
+        table: &crate::table::Table,
+        at: usize,
+        where_: &str,
+    ) -> Result<DeletePlan, Error> {
+        use crate::pb::decode_nested;
+        let model = table.model;
+        let mut model_archive = self.archive_of(model)?;
+        let store = model_archive
+            .bytes(4)
+            .and_then(decode_nested)
+            .ok_or_else(|| Error::Format(format!("{where_}: the model has no data store")))?;
+
+        let tiles = store
+            .bytes(3)
+            .and_then(decode_nested)
+            .ok_or_else(|| Error::Format(format!("{where_}: the data store has no tiles")))?;
+        let tile_size = tiles.varint(2).unwrap_or(256) as usize;
+        let tile_entries: Vec<(u64, u64)> = tiles
+            .all(1)
+            .filter_map(|value| match value {
+                Value::Bytes(raw) => decode_nested(raw),
+                _ => None,
+            })
+            .filter_map(|entry| {
+                let id = entry.varint(1)?;
+                let reference = entry.bytes(2).and_then(crate::table::reference)?;
+                Some((id, reference))
+            })
+            .collect();
+        if tile_entries.is_empty() {
+            return Err(Error::Format(format!("{where_}: the table has no tiles")));
+        }
+        for (position, (tile_id, _)) in tile_entries.iter().enumerate() {
+            if *tile_id != position as u64 {
+                return Err(Error::Format(format!(
+                    "{where_}: tile {position} is numbered {tile_id}, and a row's absolute \
+                     index is its tile's number times {tile_size} plus its index within it"
+                )));
+            }
+        }
+
+        let header_storage = store
+            .bytes(1)
+            .and_then(decode_nested)
+            .ok_or_else(|| Error::Format(format!("{where_}: the data store has no row headers")))?;
+        let buckets: Vec<u64> = header_storage
+            .all(2)
+            .filter_map(|value| match value {
+                Value::Bytes(raw) => crate::table::reference(raw),
+                _ => None,
+            })
+            .collect();
+        if buckets.len() != 1 {
+            return Err(Error::Format(format!(
+                "{where_}: the row headers span {} buckets, not one",
+                buckets.len()
+            )));
+        }
+        let bucket = buckets[0];
+        let uid_map = model_archive
+            .bytes(46)
+            .and_then(crate::table::reference)
+            .ok_or_else(|| {
+                Error::Format(format!(
+                    "{where_}: the model has no ColumnRowUIDMap, so the row's identity has \
+                     nowhere to be taken from"
+                ))
+            })?;
+        self.refuse_if_row_extent_keys_rows(&model_archive, where_)?;
+
+        let tiles = self.tiles_with_deleted_row(&tile_entries, tile_size, at, where_)?;
+        let bucket_archive = self.bucket_without(bucket, at, where_)?;
+        let uid_map_archive = self.uid_map_without(uid_map, at, true, where_)?;
+        model_archive.set(6, Value::Varint((table.rows - 1) as u64));
+
+        let mut touched = vec![model, bucket, uid_map];
+        touched.extend(tiles.iter().map(|(tile, _)| *tile));
+        Ok(DeletePlan {
+            touched,
+            model,
+            model_archive,
+            tiles,
+            bucket,
+            bucket_archive,
+            uid_map,
+            uid_map_archive,
+        })
+    }
+
+    /// Every tile with row `at` gone and the rows below it shifted up one.
+    ///
+    /// The insert's mirror, and it crosses tile boundaries the same way: the
+    /// rows are gathered by absolute index, the one at `at` is dropped, the
+    /// rest shift, and each is laid back out into the tile it now belongs to.
+    /// `numrows` (field 4) is recounted per tile, because it counts the
+    /// `TileRowInfo`s a tile holds and one of them has gone.
+    fn tiles_with_deleted_row(
+        &self,
+        tiles: &[(u64, u64)],
+        tile_size: usize,
+        at: usize,
+        where_: &str,
+    ) -> Result<Vec<(u64, Message)>, Error> {
+        use crate::pb::decode_nested;
+        let mut rows: Vec<(usize, Message)> = Vec::new();
+        let mut archives: Vec<(u64, Message)> = Vec::new();
+        for (number, tile) in tiles {
+            let archive = self.archive_of(*tile)?;
+            for value in archive.all(5) {
+                let Value::Bytes(raw) = value else { continue };
+                let info = decode_nested(raw).ok_or_else(|| {
+                    Error::Format(format!("{where_}: a tile row does not decode"))
+                })?;
+                let within = info.varint(1).unwrap_or(0) as usize;
+                if within >= tile_size {
+                    return Err(Error::Format(format!(
+                        "{where_}: a row of tile {number} is at index {within}, past the \
+                         {tile_size} rows a tile holds"
+                    )));
+                }
+                rows.push((*number as usize * tile_size + within, info));
+            }
+            archives.push((*tile, archive));
+        }
+
+        let mut per_tile: BTreeMap<usize, Vec<(usize, Message)>> = BTreeMap::new();
+        for (index, mut info) in rows {
+            let index = match index.cmp(&at) {
+                std::cmp::Ordering::Equal => continue, // the row that goes
+                std::cmp::Ordering::Greater => index - 1,
+                std::cmp::Ordering::Less => index,
+            };
+            let (tile, within) = (index / tile_size, index % tile_size);
+            info.set(1, Value::Varint(within as u64));
+            per_tile.entry(tile).or_default().push((within, info));
+        }
+
+        let mut out = Vec::new();
+        for (position, (tile, mut archive)) in archives.into_iter().enumerate() {
+            let mut mine = per_tile.remove(&position).unwrap_or_default();
+            mine.sort_by_key(|(within, _)| *within);
+            archive.clear(5);
+            for (_, info) in &mine {
+                archive.append_in_order(5, Value::Bytes(info.encode()));
+            }
+            archive.set(4, Value::Varint(mine.len() as u64));
+            out.push((tile, archive));
+        }
+        Ok(out)
+    }
+
+    /// Locate every object a column delete rewrites and build its new form.
+    fn plan_column_delete(
+        &self,
+        table: &crate::table::Table,
+        at: usize,
+        where_: &str,
+    ) -> Result<DeletePlan, Error> {
+        use crate::pb::decode_nested;
+        let model = table.model;
+        let mut model_archive = self.archive_of(model)?;
+        let store = model_archive
+            .bytes(4)
+            .and_then(decode_nested)
+            .ok_or_else(|| Error::Format(format!("{where_}: the model has no data store")))?;
+        let tiles = store
+            .bytes(3)
+            .and_then(decode_nested)
+            .ok_or_else(|| Error::Format(format!("{where_}: the data store has no tiles")))?;
+        let tile_ids: Vec<u64> = tiles
+            .all(1)
+            .filter_map(|value| match value {
+                Value::Bytes(raw) => decode_nested(raw),
+                _ => None,
+            })
+            .filter_map(|entry| entry.bytes(2).and_then(crate::table::reference))
+            .collect();
+        if tile_ids.is_empty() {
+            return Err(Error::Format(format!("{where_}: the table has no tiles")));
+        }
+        let bucket = store
+            .bytes(2)
+            .and_then(crate::table::reference)
+            .ok_or_else(|| {
+                Error::Format(format!("{where_}: the data store has no column headers"))
+            })?;
+        let uid_map = model_archive
+            .bytes(46)
+            .and_then(crate::table::reference)
+            .ok_or_else(|| Error::Format(format!("{where_}: the model has no ColumnRowUIDMap")))?;
+
+        let mut plan_tiles = Vec::new();
+        for tile in &tile_ids {
+            plan_tiles.push((*tile, self.tile_with_deleted_column(*tile, at, where_)?));
+        }
+        let bucket_archive = self.bucket_without(bucket, at, where_)?;
+        let uid_map_archive = self.uid_map_without(uid_map, at, false, where_)?;
+        model_archive.set(7, Value::Varint((table.columns - 1) as u64));
+
+        let mut touched = vec![model, bucket, uid_map];
+        touched.extend(&tile_ids);
+        Ok(DeletePlan {
+            touched,
+            model,
+            model_archive,
+            tiles: plan_tiles,
+            bucket,
+            bucket_archive,
+            uid_map,
+            uid_map_archive,
+        })
+    }
+
+    /// Every row of one tile with column `at` taken out.
+    ///
+    /// A `-1` takes its place at the end of the offset array, so the array
+    /// keeps the length it arrived with: its padding is what a reader steps
+    /// through, and shortening it would say the table is narrower than it is.
+    fn tile_with_deleted_column(
+        &self,
+        tile: u64,
+        at: usize,
+        where_: &str,
+    ) -> Result<Message, Error> {
+        use crate::pb::decode_nested;
+        let mut archive = self.archive_of(tile)?;
+        for field in archive.fields.iter_mut() {
+            if field.number != 5 {
+                continue;
+            }
+            let Value::Bytes(raw) = &field.value else {
+                continue;
+            };
+            let mut info = decode_nested(raw)
+                .ok_or_else(|| Error::Format(format!("{where_}: a tile row does not decode")))?;
+            let buffer = info.bytes(6).unwrap_or(&[]).to_vec();
+            let offsets = info.bytes(7).unwrap_or(&[]).to_vec();
+            if offsets.is_empty() {
+                continue;
+            }
+            let wide = info.varint(8).unwrap_or(0) != 0;
+            let entries = offsets.len() / 2;
+            if at >= entries {
+                return Err(Error::Format(format!(
+                    "{where_}: a row's offset array holds {entries} column(s), so there is no \
+                     column {at} in it"
+                )));
+            }
+            let mut records: Vec<Option<Vec<u8>>> = vec![None; entries];
+            for (column, bytes) in crate::table::row_cells(&buffer, &offsets, wide)
+                .into_iter()
+                .flatten()
+            {
+                records[column] = Some(bytes.to_vec());
+            }
+            records.remove(at);
+            records.push(None);
+            let cells = records.iter().filter(|record| record.is_some()).count() as u64;
+            let (buffer, offsets) = crate::table::encode_row(&records, wide)
+                .map_err(|e| Error::Format(format!("{where_}: {e}")))?;
+            info.set(2, Value::Varint(cells));
+            info.set(6, Value::Bytes(buffer));
+            info.set(7, Value::Bytes(offsets));
+            field.value = Value::Bytes(info.encode());
+        }
+        Ok(archive)
+    }
+
+    /// A header bucket with the entry at `at` gone and those after it shifted.
+    fn bucket_without(&self, bucket: u64, at: usize, where_: &str) -> Result<Message, Error> {
+        use crate::pb::decode_nested;
+        let mut archive = self.archive_of(bucket)?;
+        let mut drop = None;
+        for (position, field) in archive.fields.iter_mut().enumerate() {
+            if field.number != 2 {
+                continue;
+            }
+            let Value::Bytes(raw) = &field.value else {
+                continue;
+            };
+            let mut entry = decode_nested(raw).ok_or_else(|| {
+                Error::Format(format!("{where_}: a header entry does not decode"))
+            })?;
+            let index = entry.varint(1).unwrap_or(0) as usize;
+            match index.cmp(&at) {
+                std::cmp::Ordering::Equal => drop = Some(position),
+                std::cmp::Ordering::Greater => {
+                    entry.set(1, Value::Varint((index - 1) as u64));
+                    field.value = Value::Bytes(entry.encode());
+                }
+                std::cmp::Ordering::Less => {}
+            }
+        }
+        if let Some(position) = drop {
+            archive.fields.remove(position);
+        }
+        Ok(archive)
+    }
+
+    /// The `ColumnRowUIDMapArchive` with one line's UUID taken out.
+    ///
+    /// The three arrays are rebuilt and re-sorted by the 128-bit value, the
+    /// order the app keeps them in — the same rebuild an insert does, with a
+    /// UUID removed instead of minted. `row` picks the half: fields 4/5/6 for
+    /// rows, 1/2/3 for columns.
+    fn uid_map_without(
+        &self,
+        uid_map: u64,
+        at: usize,
+        row: bool,
+        where_: &str,
+    ) -> Result<Message, Error> {
+        use crate::table::Uuid;
+        let (uuids_field, index_field, position_field) = if row { (4, 5, 6) } else { (1, 2, 3) };
+        let mut archive = self.archive_of(uid_map)?;
+
+        let uuids: Vec<Uuid> = archive
+            .all(uuids_field)
+            .filter_map(|value| match value {
+                Value::Bytes(raw) => crate::pb::decode_nested(raw).map(|m| Uuid::decode(&m)),
+                _ => None,
+            })
+            .collect();
+        let indices: Vec<u64> = archive
+            .all(index_field)
+            .filter_map(|value| match value {
+                Value::Varint(n) => Some(*n),
+                _ => None,
+            })
+            .collect();
+        if uuids.len() != indices.len() {
+            return Err(Error::Format(format!(
+                "{where_}: the UUID map has {} UUID(s) and {} index(es); a shape this crate \
+                 did not write is not safe to rebuild",
+                uuids.len(),
+                indices.len()
+            )));
+        }
+
+        let mut pairs: Vec<(Uuid, usize)> = Vec::new();
+        for (&uuid, &index) in uuids.iter().zip(&indices) {
+            let index = index as usize;
+            match index.cmp(&at) {
+                std::cmp::Ordering::Equal => continue,
+                std::cmp::Ordering::Greater => pairs.push((uuid, index - 1)),
+                std::cmp::Ordering::Less => pairs.push((uuid, index)),
+            }
+        }
+        pairs.sort_by_key(|(uuid, _)| (uuid.upper, uuid.lower));
+
+        let count = pairs.len();
+        let mut uid_for_index = vec![0u32; count];
+        for (position, (_, index)) in pairs.iter().enumerate() {
+            if *index >= count {
+                return Err(Error::Format(format!(
+                    "{where_}: the UUID map names index {index} of {count}"
+                )));
+            }
+            uid_for_index[*index] = position as u32;
+        }
+
+        archive.clear(uuids_field);
+        archive.clear(index_field);
+        archive.clear(position_field);
+        for (uuid, _) in &pairs {
+            archive.append_in_order(uuids_field, Value::Bytes(encode_uuid(*uuid)));
+        }
+        for (_, index) in &pairs {
+            archive.append_in_order(index_field, Value::Varint(*index as u64));
+        }
+        for &position in &uid_for_index {
+            archive.append_in_order(position_field, Value::Varint(u64::from(position)));
+        }
+        Ok(archive)
+    }
+
+    // -- merging cells -------------------------------------------------------
+
+    /// Merge a rectangle of cells into one.
+    ///
+    /// **A merge is stored nowhere near the cells it covers.** The covered
+    /// cells simply stop having records — not even a `spanCellType` one — and
+    /// what says they are merged is a *formula*, one per range, in the formula
+    /// store of the table's `merge_owner` (`TableModelArchive` field 47). This
+    /// writes the shape the app writes, taken from the four merges of
+    /// `numbers-formats.numbers`:
+    ///
+    /// ```text
+    /// FormulaStorePair { 1: index, 2: FormulaArchive { 1: nodes } }
+    ///   COLON_TRACT { 28: {1: CFUUID(the table's base_owner_uid)},
+    ///                 33: {1,1,1,1}, 40: {3: columns, 4: rows, 5: 1} }
+    ///   FUNCTION    { 2: 168 (SUM), 3: 1 }
+    /// ```
+    ///
+    /// The range is written **absolute** on both axes, which is what the four
+    /// sticky bits say, and the covered cells are emptied through the ordinary
+    /// cell writer — so every string, format and control key they held is given
+    /// back and the lists' reference counts still match.
+    ///
+    /// Refused by name: a range off the table, a range of one cell, a range
+    /// overlapping a merge the table already has, a covered cell holding a
+    /// formula, a categorised, filtered, pivoted or conditionally highlighted
+    /// table, and any object carrying version patches. **Not** refused, and
+    /// worth knowing: a formula elsewhere that reads a covered cell keeps its
+    /// cached value and reads an empty cell the next time the app
+    /// recalculates — the same staleness any cell write causes.
+    pub fn merge_cells(
+        &mut self,
+        wanted: &str,
+        row: usize,
+        column: usize,
+        rows: usize,
+        columns: usize,
+    ) -> Result<(), Error> {
+        let table = self.table_for_write(wanted)?;
+        let where_ = format!("{}: merge r{row}c{column} {rows}×{columns}", table.name);
+        if rows == 0 || columns == 0 {
+            return Err(Error::Format(format!("{where_}: an empty range")));
+        }
+        if rows * columns == 1 {
+            return Err(Error::Format(format!(
+                "{where_}: one cell is not a merge to make — the app writes such a range only \
+                 when a merge is being taken apart"
+            )));
+        }
+        if row + rows > table.rows || column + columns > table.columns {
+            return Err(Error::Format(format!(
+                "{where_}: the table is {}×{}",
+                table.rows, table.columns
+            )));
+        }
+        // A merge spans both axes, so both axes' hidden states are its
+        // business — unlike a delete, which only ever moves one.
+        self.refuse_if_organised(&table, true, &where_)?;
+        self.refuse_if_organised(&table, false, &where_)?;
+        for merge in &table.merges {
+            let overlaps = row < merge.row + merge.rows
+                && merge.row < row + rows
+                && column < merge.column + merge.columns
+                && merge.column < column + columns;
+            if overlaps {
+                return Err(Error::Format(format!(
+                    "{where_}: it overlaps the merge at row {} column {}",
+                    merge.row, merge.column
+                )));
+            }
+        }
+
+        let model = table.model;
+        self.refuse_if_patched(&[model], &where_)?;
+        let mut model_archive = self.archive_of(model)?;
+        let mut owner = model_archive
+            .bytes(47)
+            .and_then(crate::pb::decode_nested)
+            .ok_or_else(|| {
+                Error::Format(format!(
+                    "{where_}: the table has no merge owner, and one made from nothing would \
+                     need an owner UUID this crate cannot derive"
+                ))
+            })?;
+        let node = merge_range_node(&table, row, column, rows, columns)?;
+
+        // Everything under the merge but its own top-left cell loses its value,
+        // which is what the app leaves behind — and goes through the ordinary
+        // writer, so the lists' reference counts follow.
+        let covered: Vec<(usize, usize, CellValue)> = (row..row + rows)
+            .flat_map(|r| (column..column + columns).map(move |c| (r, c)))
+            .filter(|&(r, c)| (r, c) != (row, column))
+            .map(|(r, c)| (r, c, CellValue::Empty))
+            .collect();
+        let restore = self.streams.clone();
+        if let Err(e) = self.write_cells(&table, covered) {
+            self.streams = restore;
+            return Err(e);
+        }
+
+        let mut store = owner
+            .bytes(2)
+            .and_then(crate::pb::decode_nested)
+            .unwrap_or_default();
+        let index = store.varint(2).unwrap_or(0);
+        let mut formula = Message::default();
+        formula.set_in_order(1, Value::Bytes(node));
+        let mut pair = Message::default();
+        pair.set_in_order(1, Value::Varint(index));
+        pair.set_in_order(2, Value::Bytes(formula.encode()));
+        store.set_in_order(2, Value::Varint(index + 1));
+        store.append_in_order(3, Value::Bytes(pair.encode()));
+        owner.set_in_order(2, Value::Bytes(store.encode()));
+        model_archive.set(47, Value::Bytes(owner.encode()));
+        if let Err(e) = self.set_archive(model, &model_archive) {
+            self.streams = restore;
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Take a merge apart, leaving its cells where they are — which is empty,
+    /// the merge having emptied them.
+    ///
+    /// The formula naming the range goes out of the merge owner's store;
+    /// `next_formula_index` is left alone, because it is a high-water mark and
+    /// the app only ever raises it.
+    pub fn unmerge_cells(&mut self, wanted: &str, row: usize, column: usize) -> Result<(), Error> {
+        let table = self.table_for_write(wanted)?;
+        let where_ = format!("{}: unmerge r{row}c{column}", table.name);
+        let merge = table
+            .merges
+            .iter()
+            .find(|merge| merge.row == row && merge.column == column)
+            .ok_or_else(|| Error::Format(format!("{where_}: no merge begins there")))?;
+        let node = merge_range_node(&table, merge.row, merge.column, merge.rows, merge.columns)?;
+
+        let model = table.model;
+        self.refuse_if_patched(&[model], &where_)?;
+        let mut model_archive = self.archive_of(model)?;
+        let mut owner = model_archive
+            .bytes(47)
+            .and_then(crate::pb::decode_nested)
+            .ok_or_else(|| Error::Format(format!("{where_}: the table has no merge owner")))?;
+        let mut store = owner
+            .bytes(2)
+            .and_then(crate::pb::decode_nested)
+            .ok_or_else(|| Error::Format(format!("{where_}: the merge owner has no store")))?;
+
+        // The pair whose formula holds this range, found by the bytes of the
+        // range node rather than by index — the indices are the app's and this
+        // crate does not renumber them.
+        let position = store.fields.iter().position(|field| {
+            let Value::Bytes(raw) = &field.value else {
+                return false;
+            };
+            field.number == 3
+                && crate::pb::decode_nested(raw)
+                    .and_then(|pair| pair.bytes(2).and_then(crate::pb::decode_nested))
+                    .and_then(|formula| formula.bytes(1).map(<[u8]>::to_vec))
+                    .is_some_and(|nodes| nodes == node)
+        });
+        let Some(position) = position else {
+            return Err(Error::Format(format!(
+                "{where_}: the merge owner holds no formula for that range in the shape this \
+                 crate writes, so removing one would be guesswork"
+            )));
+        };
+        store.fields.remove(position);
+        owner.set_in_order(2, Value::Bytes(store.encode()));
+        model_archive.set(47, Value::Bytes(owner.encode()));
+        self.set_archive(model, &model_archive)
+    }
+
+    // -- deleting a row or a column ------------------------------------------
+
+    /// Delete row `at`, with everything in it.
+    ///
+    /// The mirror of [`Document::insert_row`] and then some: a deleted row
+    /// takes its cells with it, and a cell's **references have to be given
+    /// back** — every string, format and control key it held — or the list's
+    /// reference counts stop matching the cells that point at them, which is
+    /// exactly what [`crate::table::Table::audit`] reports.
+    ///
+    /// What moves is what an insert moves, backwards: `number_of_rows`, every
+    /// `TileRowInfo` below `at` (across tile boundaries, so a row can change
+    /// tiles), the row header bucket, and the row half of the
+    /// `ColumnRowUIDMapArchive` — rebuilt and re-sorted by UUID, the order the
+    /// app keeps it in.
+    ///
+    /// Refused by name, each before a byte moves: the table's last row, a
+    /// header or footer row (whose count would have to change with it), a
+    /// categorised, filtered, pivoted or conditionally highlighted table, a
+    /// table with hidden or collapsed rows, a merge at or below the row, a row
+    /// holding a formula, any formula anywhere that names the row or a range
+    /// across it, and any object carrying version patches.
+    pub fn delete_row(&mut self, wanted: &str, at: usize) -> Result<(), Error> {
+        self.delete_line(wanted, at, true)
+    }
+
+    /// Delete column `at`, with everything in it.
+    ///
+    /// The column half of [`Document::delete_row`], and the same asymmetry an
+    /// insert has: a row is an object and a column is one entry in every row's
+    /// offset array, so this rewrites every row of every tile — slice at the
+    /// offsets, drop the slot, lay the row back out. The array keeps the length
+    /// it arrived with, a `-1` taking the place at the end, because the padding
+    /// is what a reader steps through.
+    pub fn delete_column(&mut self, wanted: &str, at: usize) -> Result<(), Error> {
+        self.delete_line(wanted, at, false)
+    }
+
+    /// Both deletes: the refusals, the plan, and the commit.
+    fn delete_line(&mut self, wanted: &str, at: usize, row: bool) -> Result<(), Error> {
+        let table = self.table_for_write(wanted)?;
+        let what = if row { "row" } else { "column" };
+        let where_ = format!("{}: delete {what} {at}", table.name);
+        let (count, headers, footers) = match row {
+            true => (table.rows, table.header_rows, table.footer_rows),
+            false => (table.columns, table.header_columns, 0),
+        };
+
+        if at >= count {
+            return Err(Error::Format(format!(
+                "{where_}: the table has {count} {what}(s)"
+            )));
+        }
+        if count == 1 {
+            return Err(Error::Format(format!(
+                "{where_}: it is the table's only {what}, and a table with none is not \
+                 something the app makes"
+            )));
+        }
+        if at < headers as usize {
+            return Err(Error::Format(format!(
+                "{where_}: it is one of the table's {headers} header {what}(s), and whether \
+                 the count follows the {what} or the next one becomes a header is not \
+                 something any fixture here can settle"
+            )));
+        }
+        if footers > 0 && at >= count - footers as usize {
+            return Err(Error::Format(format!(
+                "{where_}: it is one of the table's {footers} footer row(s)"
+            )));
+        }
+        self.refuse_if_organised(&table, row, &where_)?;
+        if let Some(merge) = table.merges.iter().find(|m| {
+            if row {
+                m.row + m.rows > at
+            } else {
+                m.column + m.columns > at
+            }
+        }) {
+            return Err(Error::Format(format!(
+                "{where_}: a merge at row {} column {} would shift or straddle it, and a merge \
+                 is stored as an absolute formula this crate does not rewrite",
+                merge.row, merge.column
+            )));
+        }
+        if let Some((formula_row, formula_column, _)) = table
+            .formula_cells()
+            .into_iter()
+            .find(|(r, c, _)| if row { *r == at } else { *c == at })
+        {
+            return Err(Error::Format(format!(
+                "{where_}: r{formula_row}c{formula_column} holds a formula, and removing one \
+                 means taking its dependency edges out of the calculation engine"
+            )));
+        }
+        if let Some(reason) = self.delete_would_break_a_formula(&table, at, row) {
+            return Err(Error::Format(format!("{where_}: {reason}")));
+        }
+
+        // The references the deleted cells hold, which have to be given back —
+        // and the cell counts the *other* axis keeps, one per cell that goes.
+        let site = self.table_site(&table)?;
+        let mut released: Vec<(u64, u32)> = Vec::new();
+        let mut across: std::collections::BTreeMap<usize, i64> = Default::default();
+        for cell in table.cells() {
+            if if row {
+                cell.row != at
+            } else {
+                cell.column != at
+            } {
+                continue;
+            }
+            *across
+                .entry(if row { cell.column } else { cell.row })
+                .or_default() -= 1;
+            for (list, key) in [
+                (site.strings, cell.record.string_id),
+                (site.controls, cell.record.control_id),
+            ]
+            .into_iter()
+            .chain(
+                ALL_SLOTS
+                    .iter()
+                    .map(|slot| (site.formats, cell.record.format_id_in(*slot))),
+            ) {
+                if let (Some(list), Some(key)) = (list, key) {
+                    released.push((list, key));
+                }
+            }
+        }
+
+        let plan = match row {
+            true => self.plan_row_delete(&table, at, &where_)?,
+            false => self.plan_column_delete(&table, at, &where_)?,
+        };
+        let mut touched = plan.touched.clone();
+        touched.extend(released.iter().map(|(list, _)| *list));
+        self.refuse_if_patched(&touched, &where_)?;
+
+        // Commit: every object was decoded during planning.
+        let mut cache = ListCache::default();
+        for (list, key) in &released {
+            self.step_list_entry(&mut cache, *list, *key, -1)?;
+        }
+        cache.flush(self)?;
+        self.set_archive(plan.model, &plan.model_archive)?;
+        for (tile, archive) in &plan.tiles {
+            self.set_archive(*tile, archive)?;
+        }
+        self.set_archive(plan.bucket, &plan.bucket_archive)?;
+        self.set_archive(plan.uid_map, &plan.uid_map_archive)?;
+        // A deleted row takes one cell out of each column that had one, and a
+        // deleted column one out of each row — the counts the *other* axis's
+        // header keeps, which `Table::audit` checks against the cells present.
+        if row {
+            if let Some(bucket) = site.column_bucket {
+                self.step_bucket_counts(bucket, &across)?;
+            }
+        } else {
+            self.step_row_counts(&site, &across)?;
+        }
+        Ok(())
+    }
+
+    /// The organisation a row or column delete cannot maintain.
+    ///
+    /// The same list an insert refuses, and for the same reasons: a category's
+    /// group nodes address rows by index, a filter's hidden state by UUID, a
+    /// pivot's rows are the app's own, a conditional rule's range is addressed
+    /// either way — and no fixture here proves any of them across a delete.
+    fn refuse_if_organised(
+        &self,
+        table: &crate::table::Table,
+        row: bool,
+        where_: &str,
+    ) -> Result<(), Error> {
+        if !table.categories.is_empty() {
+            return Err(Error::Format(format!(
+                "{where_}: the table is categorised, and a category's groups are addressed by \
+                 row index"
+            )));
+        }
+        if table.pivot.is_some() {
+            return Err(Error::Format(format!(
+                "{where_}: the table is a pivot table, whose shape the app builds from its \
+                 source"
+            )));
+        }
+        if table.filter.is_some() {
+            return Err(Error::Format(format!(
+                "{where_}: the table is filtered, and a filter names the column it tests and \
+                 the rows it hides"
+            )));
+        }
+        if !table.conditional_styles.is_empty() {
+            return Err(Error::Format(format!(
+                "{where_}: the table carries conditional highlighting, whose rule ranges are \
+                 row and column addressed"
+            )));
+        }
+        let (states, extents) = match row {
+            true => (&table.row_states, &table.row_extents),
+            false => (&table.column_states, &table.column_extents),
+        };
+        if !states.user_hidden.is_empty()
+            || !states.filtered.is_empty()
+            || !states.collapsed_groups.is_empty()
+            || extents.iter().any(|extent| extent.hidden())
+        {
+            return Err(Error::Format(format!(
+                "{where_}: the table has hidden or collapsed rows or columns, addressed by UUID"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Whether any formula anywhere would be broken by the delete.
+    ///
+    /// Stricter than the insert's check, and it has to be: an insert leaves
+    /// every referenced cell in existence, while a delete **takes cells away**,
+    /// so a reference to the deleted line becomes a `#REF!` however it was
+    /// written. Refused: a bounded reference that names the line, a range that
+    /// spans it, a relative reference whose host and referent fall on opposite
+    /// sides of it, and any reference this crate cannot read.
+    fn delete_would_break_a_formula(
+        &self,
+        target: &crate::table::Table,
+        at: usize,
+        row: bool,
+    ) -> Option<String> {
+        use crate::formula::Axis;
+        let at = at as i64;
+        let target_base = target.base_uid;
+        for t in self.tables() {
+            let same_table = t.model == target.model;
+            for (host_row, host_column, formula) in t.formula_cells() {
+                let host = if row { host_row } else { host_column } as i64;
+                for node in &formula.ast.nodes {
+                    if !is_reference_node(node.kind) {
+                        continue;
+                    }
+                    let Some(reference) = node.reference() else {
+                        if same_table || is_cross_table_node(node.kind) {
+                            return Some(format!(
+                                "table {} holds a formula with a reference this crate cannot \
+                                 analyse ({}), so the delete might silently break it",
+                                t.name,
+                                crate::formula::node::name(node.kind)
+                            ));
+                        }
+                        continue;
+                    };
+                    if reference.is_error {
+                        continue;
+                    }
+                    let into_target = match reference.table {
+                        None => same_table,
+                        Some(uid) => {
+                            uid == target_base && target_base != crate::table::Uuid::default()
+                        }
+                    };
+                    if !into_target {
+                        continue;
+                    }
+                    let cross = reference.table.is_some();
+                    let (begin, end) = match row {
+                        true => (reference.row, reference.row_end),
+                        false => (reference.column, reference.column_end),
+                    };
+                    // Resolve both ends against the host, where they are bounded.
+                    let resolve = |axis: Axis| match axis {
+                        Axis::Unbounded => None,
+                        Axis::Absolute(index) => Some(index),
+                        Axis::Relative(_) if cross => Some(at), // unresolvable: refuse
+                        Axis::Relative(offset) => Some(host + offset),
+                    };
+                    let (Some(first), Some(last)) = (resolve(begin), resolve(end)) else {
+                        // A whole row or column: the axis is unbounded and the
+                        // app keeps it whatever leaves the table.
+                        continue;
+                    };
+                    let (low, high) = (first.min(last), first.max(last));
+                    if (low..=high).contains(&at) {
+                        return Some(format!(
+                            "table {} has a formula whose reference names this {} or a range \
+                             across it",
+                            t.name,
+                            if row { "row" } else { "column" }
+                        ));
+                    }
+                    // Both ends outside, but a relative reference that crosses
+                    // the line shifts by one and its host may not.
+                    for index in [first, last] {
+                        if (host < at) != (index < at) {
+                            return Some(format!(
+                                "table {} has a formula whose reference would shift relative \
+                                 to what it names",
+                                t.name
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        None
     }
 
     // -- inserting a column --------------------------------------------------

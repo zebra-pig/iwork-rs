@@ -1754,6 +1754,69 @@ the row would need a tile of its own, which is a new object *and* a new
 component, and nothing in the corpus shows the app opening one mid-table. The refusal is by name, and — like `set_cell` — it is decided before a
 byte moves, so a refused insert leaves the document byte-identical.
 
+### Deleting a row or a column
+
+The insert run backwards, plus the one thing an insert never has to do: **the
+cells that go take their references with them.** A deleted cell's string,
+format and control keys have to be given back to their `TableDataList`s or the
+counts stop matching the cells that point at them — which is exactly what
+`Table::audit` reports, and it caught the first attempt.
+
+| Object | What deletion does to it |
+|---|---|
+| `TableModelArchive` field 6/7 | `number_of_rows` / `number_of_columns` **− 1** |
+| `TST.Tile` | *rows*: the `TileRowInfo` at the index goes and those below shift up — across tile boundaries, so the first row of tile 1 becomes the last of tile 0 — and `numrows` (4) is recounted per tile. *columns*: every row is sliced, the slot removed, and a `-1` takes its place at the end, so the offset array keeps the length it arrived with |
+| `HeaderStorageBucket` | the entry at the index goes; those after it shift by one |
+| the *other* axis's bucket | **one cell fewer per line that had one** — a deleted row takes a cell out of each column it filled, and `numberOfCells` follows |
+| `ColumnRowUIDMapArchive` | the half for that axis is rebuilt without the line's UUID, re-sorted by the 128-bit value |
+| the `TableDataList`s | one reference given back per key each deleted cell held |
+
+**Refused by name:** the table's only row or column; a header or footer line,
+because whether the count follows the line or the next one becomes a header is
+not something any fixture here settles; a categorised, filtered, pivoted or
+conditionally highlighted table; hidden or collapsed lines; a merge at or after
+the line; a cell in it holding a formula; and **any formula anywhere that names
+the line or a range across it** — stricter than the insert's check, and it has
+to be, because an insert leaves every referenced cell in existence while a
+delete takes cells away, so a reference to the deleted line becomes a `#REF!`
+however it was written.
+
+Verified by Numbers: a 17×3 table with row 9 and column C deleted comes back
+from the app as 16×2, every remaining cell holding its value, its data format
+and its control.
+
+### Writing a merge
+
+A merge is a formula in the merge owner's store (§Merged ranges), and the node
+array this crate writes for a range is **byte for byte the one the app wrote**
+for the same merge — all four of `numbers-formats.numbers`'s, reproduced from
+nothing but their row, column and size:
+
+```text
+FormulaStorePair { 1: index, 2: FormulaArchive { 1: nodes } }
+  COLON_TRACT { 28: {1: CFUUID(the table's base_owner_uid)},
+                33: {1, 1, 1, 1},
+                40: {3: {1: col, 2: col_end?}, 4: {1: row, 2: row_end?}, 5: 1} }
+  FUNCTION    { 2: 168 (SUM), 3: 1 }
+```
+
+Three things about it are not guesses. The range is **absolute on both axes**,
+which is what the four sticky bits say. Field 28 is a *cross-table* reference
+whose UUID is **the table's own** `base_owner_uid` — the same UUID
+`crate::calc` matches an owner by, written in the four-word `CFUUIDArchive`
+form. And `next_formula_index` (store field 2) is a high-water mark: a merge
+takes the next one and raises it, and unmerging does not lower it.
+
+The covered cells are **emptied**, which is what the app leaves behind, and they
+are emptied through the ordinary cell writer so their references go back. A
+formula elsewhere that reads a covered cell is *not* refused: it keeps its
+cached value and reads an empty cell the next time the app recalculates, which
+is the staleness any cell write causes.
+
+Verified by Numbers, which has no merge property to ask about: a merged-away
+cell is reported under the name and value of the cell the merge began in, so a
+written 1×2 merge at A1 comes back as `A1 A1` across the first row.
+
 ### Inserting a column, which is not a row turned sideways
 
 A row is an object: a `TileRowInfo` of its own, so inserting one shifts whole

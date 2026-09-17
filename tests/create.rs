@@ -404,3 +404,25 @@ fn pages_opens_a_document_this_crate_made_from_nothing() {
     );
     let _ = std::fs::remove_file(&out);
 }
+
+/// The same document saved twice is the same file, byte for byte.
+///
+/// It was not: the ZIP writer stamped every entry with the clock, so two saves
+/// a second apart differed in every local header while every entry's contents
+/// matched. Nothing in iWork reads an entry's time, so the stamp is now the ZIP
+/// epoch and a save is reproducible.
+#[test]
+fn saving_the_same_document_twice_gives_the_same_bytes() {
+    let one = scratch("iwork-deterministic-1.numbers");
+    let two = scratch("iwork-deterministic-2.numbers");
+    let doc = Document::new_spreadsheet("Blatt", "T", 3, 2).unwrap();
+    doc.save(&one).unwrap();
+    doc.save(&two).unwrap();
+    assert_eq!(
+        std::fs::read(&one).unwrap(),
+        std::fs::read(&two).unwrap(),
+        "two saves of one document produced different files"
+    );
+    let _ = std::fs::remove_file(&one);
+    let _ = std::fs::remove_file(&two);
+}

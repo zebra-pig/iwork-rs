@@ -283,3 +283,101 @@ fn numbers_reads_back_an_inserted_column() {
     }
     let _ = std::fs::remove_file(&out);
 }
+
+// -- deleting a column -------------------------------------------------------
+
+/// The mirror: the column goes, every column right of it moves left keeping its
+/// value and its format, and a `-1` takes the vacated place at the end of every
+/// row's offset array — so the array keeps the length it arrived with.
+#[test]
+fn deleting_a_column_from_a_plain_table() {
+    fixture!("numbers-formats.numbers");
+    let mut doc = open("numbers-formats.numbers").unwrap();
+    let before = doc.table("Formate").unwrap();
+    let right: Vec<CellValue> = (0..before.rows).map(|row| before.value(row, 2)).collect();
+
+    doc.delete_column("Formate", 1).unwrap();
+
+    let after = doc.table("Formate").unwrap();
+    assert_eq!(after.columns, 2, "the table did not shrink");
+    assert_eq!(after.value(0, 0), CellValue::Text("Format".into()));
+    for (row, value) in right.into_iter().enumerate() {
+        assert_eq!(
+            after.value(row, 1),
+            value,
+            "row {row}: column C did not move to B"
+        );
+    }
+    assert!(after.audit().is_empty(), "{:?}", after.audit());
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+}
+
+/// Deleting a column takes one cell out of every row that had one there, and
+/// the row header's counts have to follow.
+#[test]
+fn a_deleted_column_leaves_every_count_adding_up() {
+    fixture!("numbers-formats.numbers");
+    let mut doc = open("numbers-formats.numbers").unwrap();
+    doc.delete_column("Formate", 1).unwrap();
+    let table = doc.table("Formate").unwrap();
+    for (index, extent) in table.row_extents.iter().enumerate() {
+        let actual = (0..table.columns)
+            .filter(|column| table.cell(index, *column).is_some())
+            .count() as u32;
+        assert_eq!(
+            extent.cell_count, actual,
+            "row {index} says {} cell(s) and holds {actual}",
+            extent.cell_count
+        );
+    }
+    assert!(table.audit().is_empty(), "{:?}", table.audit());
+}
+
+/// What a column delete will not do.
+#[test]
+fn delete_column_refuses_what_it_cannot_verify() {
+    fixture!("numbers-formats.numbers");
+    let mut doc = open("numbers-formats.numbers").unwrap();
+    for (table, at, expected) in [
+        ("Formate", 9, "the table has 3 column(s)"),
+        ("Formate", 0, "header"),
+        ("Verbunden", 1, "merge"),
+    ] {
+        let error = doc
+            .delete_column(table, at)
+            .expect_err(&format!("{table} column {at} was not refused"))
+            .to_string();
+        assert!(error.contains(expected), "{table} {at}: {error:?}");
+    }
+    assert!(doc.changed_streams().is_empty());
+}
+
+/// A column delete is not limited to one tile, for the same reason an insert is
+/// not: the work is per row, and a tile boundary is a row boundary.
+#[test]
+fn a_column_is_deleted_across_every_tile() {
+    let mut doc = Document::new_spreadsheet("Blatt", "Lang", 300, 3).unwrap();
+    let block: Vec<Vec<CellValue>> = (0..300)
+        .map(|row| {
+            (0..3)
+                .map(|column| CellValue::Text(format!("r{row}c{column}")))
+                .collect()
+        })
+        .collect();
+    doc.set_block("Lang", (0, 0), &block).unwrap();
+
+    doc.delete_column("Lang", 1).unwrap();
+
+    let table = doc.table("Lang").unwrap();
+    assert_eq!(table.columns, 2);
+    for row in [0, 255, 256, 299] {
+        assert_eq!(table.value(row, 0).to_text(), format!("r{row}c0"));
+        assert_eq!(
+            table.value(row, 1).to_text(),
+            format!("r{row}c2"),
+            "row {row}: the third column did not move to the second"
+        );
+    }
+    assert!(table.audit().is_empty(), "{:?}", table.audit());
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+}

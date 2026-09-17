@@ -141,6 +141,14 @@ tables
                                            <at> (<at> == row count appends)
   iwork insert-column <file> <table> <at> <out>
                                            the same for a column
+  iwork delete-row <file> <table> <at> <out>
+  iwork delete-column <file> <table> <at> <out>
+                                           delete a row or a column, with
+                                           everything in it
+  iwork merge   <file> <table> <cell> <rows> <cols> <out>
+                                           merge a rectangle into one cell
+  iwork unmerge <file> <table> <cell> <out>
+                                           take that merge apart
   iwork add-table <file> <where> <name> <rows> <cols> [<x> <y>] <out>
                                            add a table to a sheet, a slide or a
                                            Pages page, at <x>,<y> if given
@@ -346,6 +354,19 @@ fn main() -> ExitCode {
         ["set-height", file, table, row, points, out] => {
             index(row).and_then(|row| set_size(file, table, row, points, false, out))
         }
+        ["delete-row", file, table, at, out] => {
+            index(at).and_then(|at| delete_line(file, table, at, true, out))
+        }
+        ["delete-column", file, table, at, out] => {
+            index(at).and_then(|at| delete_line(file, table, at, false, out))
+        }
+        ["merge", file, table, cell, rows, columns, out] => reference_position(cell)
+            .and_then(|(row, column)| Ok((row, column, index(rows)?, index(columns)?)))
+            .and_then(|(row, column, rows, columns)| {
+                merge(file, table, row, column, rows, columns, out)
+            }),
+        ["unmerge", file, table, cell, out] => reference_position(cell)
+            .and_then(|(row, column)| unmerge(file, table, row, column, out)),
         ["insert-column", file, table, at, out] => {
             index(at).and_then(|at| insert_column(file, table, at, out))
         }
@@ -3189,6 +3210,56 @@ fn set_size(
             Some(points) => format!("{points} pt"),
             None => "the table default".to_string(),
         }
+    );
+    save(&doc, out)
+}
+
+/// Delete a row or a column, with everything in it.
+fn delete_line(path: &str, table: &str, at: usize, row: bool, out: &str) -> Result<(), Error> {
+    let mut doc = Document::open(path)?;
+    let (rows, columns) = find_table_size(&doc, table)?;
+    if row {
+        doc.delete_row(table, at)?;
+    } else {
+        doc.delete_column(table, at)?;
+    }
+    println!(
+        "table {table}: deleted {} {at} ({}×{} -> {}×{}); rewrote {}",
+        if row { "row" } else { "column" },
+        rows,
+        columns,
+        if row { rows - 1 } else { rows },
+        if row { columns } else { columns - 1 },
+        doc.changed_streams().join(", ")
+    );
+    save(&doc, out)
+}
+
+/// Merge a rectangle of cells into one.
+fn merge(
+    path: &str,
+    table: &str,
+    row: usize,
+    column: usize,
+    rows: usize,
+    columns: usize,
+    out: &str,
+) -> Result<(), Error> {
+    let mut doc = Document::open(path)?;
+    doc.merge_cells(table, row, column, rows, columns)?;
+    println!(
+        "table {table}: {} spans {rows} row(s) × {columns} column(s)",
+        reference_name(row, column)
+    );
+    save(&doc, out)
+}
+
+fn unmerge(path: &str, table: &str, row: usize, column: usize, out: &str) -> Result<(), Error> {
+    let mut doc = Document::open(path)?;
+    doc.unmerge_cells(table, row, column)?;
+    println!(
+        "table {table}: the merge at {} is gone; its cells stay empty",
+        reference_name(row, column)
     );
     save(&doc, out)
 }

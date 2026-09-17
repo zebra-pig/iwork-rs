@@ -611,3 +611,170 @@ fn numbers_resaves_a_row_inserted_across_a_tile_boundary() {
     let _ = std::fs::remove_dir_all(&out);
     let _ = std::fs::remove_file(&out);
 }
+
+// -- deleting a row ----------------------------------------------------------
+
+/// The supported case, and the mirror of the insert: the table shrinks by one,
+/// every row below moves up keeping its value *and* its format, and every count
+/// in the document still adds up — including the per-column cell counts, which
+/// a deleted row takes one out of each of.
+#[test]
+fn deleting_a_row_from_a_plain_table() {
+    fixture!("numbers-formats.numbers");
+    let mut doc = open("numbers-formats.numbers").unwrap();
+    let before = doc.table("Formate").unwrap();
+    let below: Vec<CellValue> = (9..17).map(|r| before.value(r, 0)).collect();
+    let formats: Vec<String> = (9..17)
+        .map(|r| {
+            before
+                .cell(r, 1)
+                .map(|cell| cell.format.as_str().to_string())
+                .unwrap_or_default()
+        })
+        .collect();
+
+    doc.delete_row("Formate", 8).unwrap();
+
+    let after = doc.table("Formate").unwrap();
+    assert_eq!(after.rows, 16, "the table did not shrink");
+    assert_eq!(after.value(7, 0), CellValue::Text("Text".into()));
+    for (offset, value) in below.into_iter().enumerate() {
+        assert_eq!(
+            after.value(8 + offset, 0),
+            value,
+            "the row that was at {} did not move up to {}",
+            9 + offset,
+            8 + offset
+        );
+    }
+    for (offset, format) in formats.into_iter().enumerate() {
+        assert_eq!(
+            after
+                .cell(8 + offset, 1)
+                .map(|cell| cell.format.as_str().to_string())
+                .unwrap_or_default(),
+            format,
+            "the format at row {} did not move with its value",
+            8 + offset
+        );
+    }
+    assert!(after.audit().is_empty(), "{:?}", after.audit());
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+}
+
+/// The deleted row's cells give their references back, or the lists' counts and
+/// the cells that point at them stop agreeing — which is exactly what `audit`
+/// reports and what a document this crate wrote must never show.
+#[test]
+fn a_deleted_row_gives_its_references_back() {
+    fixture!("numbers-formats.numbers");
+    let mut doc = open("numbers-formats.numbers").unwrap();
+    // Row 8 holds "Zahlensystem" and a number in its own format.
+    let before = doc.table("Formate").unwrap();
+    let text = before.value(8, 0).to_text();
+    assert!(!text.is_empty());
+    let strings = |doc: &Document| {
+        doc.table("Formate")
+            .unwrap()
+            .to_rows()
+            .concat()
+            .iter()
+            .filter(|value| **value == text)
+            .count()
+    };
+    assert_eq!(strings(&doc), 1);
+    doc.delete_row("Formate", 8).unwrap();
+    assert_eq!(strings(&doc), 0, "the text survived its row");
+    assert!(doc.table("Formate").unwrap().audit().is_empty());
+}
+
+/// A row whose deletion cannot be maintained is refused, and the document is
+/// left byte for byte as it was.
+#[test]
+fn delete_row_refuses_what_it_cannot_verify() {
+    fixture!("numbers-formats.numbers");
+    let mut doc = open("numbers-formats.numbers").unwrap();
+    for (table, at, expected) in [
+        ("Formate", 99, "the table has 17 row(s)"),
+        ("Formate", 0, "header"),
+        ("Verbunden", 1, "merge"),
+    ] {
+        let error = doc
+            .delete_row(table, at)
+            .expect_err(&format!("{table} row {at} was not refused"))
+            .to_string();
+        assert!(error.contains(expected), "{table} {at}: {error:?}");
+    }
+    assert!(doc.changed_streams().is_empty());
+
+    // A formula that names the row, from another table.
+    if let Some(mut doc) = open("numbers-values.numbers") {
+        let error = doc
+            .delete_row("Zweite Tabelle", 1)
+            .expect_err("a formula sums that row")
+            .to_string();
+        assert!(error.contains("formula"), "{error}");
+        assert!(doc.changed_streams().is_empty());
+    }
+}
+
+/// A delete across a tile boundary: the first row of tile 1 becomes the last
+/// row of tile 0, which is the insert's crossing in reverse.
+#[test]
+fn a_deleted_row_moves_one_across_a_tile_boundary() {
+    let mut doc = Document::new_spreadsheet("Blatt", "Lang", 300, 2).unwrap();
+    let block: Vec<Vec<CellValue>> = (0..300)
+        .map(|row| vec![CellValue::Text(format!("Zeile {row}"))])
+        .collect();
+    doc.set_block("Lang", (0, 0), &block).unwrap();
+
+    doc.delete_row("Lang", 100).unwrap();
+
+    let table = doc.table("Lang").unwrap();
+    assert_eq!(table.rows, 299);
+    assert_eq!(table.value(99, 0).to_text(), "Zeile 99");
+    assert_eq!(table.value(100, 0).to_text(), "Zeile 101");
+    // 256 was the first row of tile 1 and is now the last of tile 0.
+    assert_eq!(table.value(255, 0).to_text(), "Zeile 256");
+    assert_eq!(table.value(298, 0).to_text(), "Zeile 299");
+    assert!(table.audit().is_empty(), "{:?}", table.audit());
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+}
+
+/// The app is the oracle. Off unless `IWORK_APP_CHECK=1`.
+#[test]
+fn numbers_reads_back_a_table_with_a_row_deleted() {
+    if std::env::var("IWORK_APP_CHECK").as_deref() != Ok("1") {
+        eprintln!("IWORK_APP_CHECK is not 1 — skipping the app round trip");
+        return;
+    }
+    let _ = fixture!("numbers-formats.numbers");
+    let mut doc = open("numbers-formats.numbers").unwrap();
+    doc.delete_row("Formate", 8).unwrap();
+    let out = std::env::temp_dir().join("iwork-delete-row.numbers");
+    let _ = std::fs::remove_file(&out);
+    doc.save(&out).unwrap();
+
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/table-oracle.sh");
+    let output = std::process::Command::new(&script)
+        .arg(&out)
+        .output()
+        .unwrap_or_else(|e| panic!("{}: {e}", script.display()));
+    assert!(
+        output.status.success(),
+        "Numbers would not open the document:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(
+        text.contains("table\tFormate\t16\t3"),
+        "the app did not see 16 rows:\n{text}"
+    );
+    assert!(
+        !text.contains("Zahlensystem"),
+        "the deleted row's text is still there"
+    );
+    // The row that moved up keeps its value and its control.
+    assert!(text.contains("\tA9\ttext\tAnkreuzfeld\t"), "{text}");
+    let _ = std::fs::remove_file(&out);
+}

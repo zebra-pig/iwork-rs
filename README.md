@@ -190,6 +190,10 @@ iwork set-width  Budget.numbers Zellarten 0 210 out.numbers
 iwork set-height Budget.numbers Zellarten 3 33  out.numbers
 iwork insert-row Budget.numbers Zellarten 8 out.numbers   # an empty row before index 8
 iwork insert-column Budget.numbers Zellarten 1 out.numbers   # …and a column
+iwork delete-row Budget.numbers Zellarten 8 out.numbers      # and back out
+iwork delete-column Budget.numbers Zellarten 1 out.numbers
+iwork merge   Budget.numbers Zellarten B2 1 3 out.numbers    # B2:D2 as one cell
+iwork unmerge Budget.numbers Zellarten B2 out.numbers
 
 iwork charts    Budget.numbers            # every chart: type, placement, the data
                                           # it carries, and the table ranges it
@@ -666,6 +670,13 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | A row inserted below a tile boundary crosses it; a full table is refused | — | ✅ | — |
 | **The app resaves a cross-tile insert with the row in its new tile** | — | ✅ | — |
 | A table made from nothing carries the UUID map an insert needs | — | ✅ | — |
+| Delete a row or a column, with every reference it held given back | — | ✅ | — |
+| A deleted line's cells leave every count in the document adding up | — | ✅ | — |
+| A formula that names the line, or a range across it, refuses the delete | — | ✅ | — |
+| **The app reads back the table with a row and a column gone** | — | ✅ | — |
+| Merge cells: the range node is **byte for byte the app's own**, all four | — | ✅ | — |
+| The covered cells are emptied through the cell writer, references and all | — | ✅ | — |
+| **The app reports the two merged cells under one name** | — | ✅ | — |
 | Pages mode: word processing vs page layout, and the app agrees | ✅ | — | — |
 | Sections: name, text range, page numbering, background, switches | ✅ | — | — |
 | **Every section's text agrees with the app, character for character** | ✅ | — | — |
@@ -1109,6 +1120,23 @@ fuzzing story rather than half of it.
   or column, a header name, a function this crate does not know, and any table
   with no cell owner in the engine — which is every table this crate built from
   nothing.
+- **A row or column can be deleted, and the refusal list is longer than the
+  insert's.** What goes takes its cells' references with it, which is the part an
+  insert never has to do. Refused: the table's only row or column, a header or
+  footer line, a merge at or after it, a cell in it holding a formula, and any
+  formula anywhere that names the line or a range across it — stricter than the
+  insert's check, because a delete takes cells away and a reference to a deleted
+  line is a `#REF!` however it was written. The organised tables — categorised,
+  filtered, pivoted, conditionally highlighted, hidden — are refused as they are
+  for an insert.
+- **Cells can be merged, and the app has no merge property to check it with.**
+  A merge is a formula in the table's merge owner, and the node array this crate
+  writes for a range is byte for byte the one the app wrote for the same merge —
+  all four in the fixture, reproduced from nothing but their row, column and
+  size. The covered cells are emptied, which is what the app leaves behind. What
+  cannot be asked of the app is "is this merged": a merged-away cell is reported
+  under the *name and value of the cell the merge began in*, and that is the
+  check — `A1 A1` across a row is a 1×2 merge at A1.
 - **A data format is written into the slot the value uses, and nowhere else.**
   `set_format` gives a cell a number, percent, scientific, currency or date
   format — the archive being the one the app wrote for the same format, down to

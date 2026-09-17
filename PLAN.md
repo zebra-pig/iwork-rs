@@ -752,6 +752,61 @@ three of the four written now. What is left is the one that should be left.
 Filled in as phases complete: what was proven, by which test, against which
 fixture, and what the app accepted.
 
+- 2026-09-17 — **A clock in the output** (and a false lead).
+  `SimpleFileOptions::default()` stamps every ZIP entry with **the current
+  time**, so the same document saved twice a second apart came out as two
+  different files — every entry's contents matching, every local header
+  differing. Entries are now stamped with the ZIP epoch: nothing in iWork reads
+  an entry's time (the archives name entries by name, and the app re-stamps the
+  package when it saves), so the deterministic answer is the right one, and
+  `tests/create.rs::saving_the_same_document_twice_gives_the_same_bytes` pins
+  it.
+
+  **What it was not** is the cause of the intermittent test failures that led
+  here, and the distinction is worth recording. Three tests went red in loaded
+  full runs and passed alone every time; the clock looked like an excellent
+  suspect. It was not the culprit: those runs had *two* `cargo test` invocations
+  going at once, and the suite's tests write to fixed paths under the temp
+  directory, so the two runs were overwriting each other's files. Two
+  consecutive full runs with nothing else going are green. The clock was a real
+  defect found while chasing a failure it did not cause.
+
+- 2026-09-17 — **Taking away: a row, a column, and cells merged into one.**
+  The fifth of the five, and the first writes in this crate that *remove*
+  something.
+
+  **A delete is not an insert run backwards, quite.** Everything the insert
+  moves it moves the other way — `number_of_rows`, the `TileRowInfo`s (across
+  tile boundaries, so the first row of tile 1 becomes the last of tile 0), the
+  header bucket, the UUID map half, re-sorted by UUID. What an insert never has
+  to do is give references back: a deleted cell's string, format and control
+  keys have to be released or the lists' counts stop matching the cells that
+  point at them. `Table::audit` caught the first attempt — and caught a second
+  thing the insert never meets, that a deleted row takes one cell out of *every
+  column* it filled, so the other axis's `numberOfCells` has to follow.
+
+  The formula check is **stricter than the insert's**, and it has to be: an
+  insert leaves every referenced cell in existence, while a delete takes cells
+  away, so a reference to the deleted line becomes a `#REF!` however it was
+  written. Any bounded reference that names the line, any range across it, and
+  any relative reference whose host and referent straddle it, all refuse.
+
+  **A merge is a formula, and this crate now writes the app's own bytes.** The
+  node array built for a range — an absolute colon tract carrying field 28 with
+  the table's own `base_owner_uid`, wrapped in `SUM` — is **byte for byte the
+  one Numbers wrote** for all four merges of `numbers-formats.numbers`,
+  reproduced from nothing but each merge's row, column and size. That is as
+  close to proof as this format offers, and it came almost free: the range node
+  is what [`formula_parse`] already builds for `=SUM($B$2:$D$2)`, with the
+  cross-table UUID added.
+
+  The app cannot be asked whether something is merged — there is no such
+  property — but it answers anyway: a merged-away cell is reported under the
+  name and value of the cell the merge began in, so a written 1×2 merge at A1
+  comes back as `A1 A1`. Numbers also read back the 16×2 table left by deleting
+  a row and a column from a 17×3 one, every remaining cell keeping its value,
+  its format and its control.
+
 - 2026-09-17 — **A formula from its text, and the app prints it back.**
   `Document::set_formula` parses `=SUM($B$2:$B$3)*2` and writes the `TSCE` node
   stream for it — the first AST this crate builds from nothing.

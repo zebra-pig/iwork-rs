@@ -170,8 +170,20 @@ impl Package {
         let file = std::fs::File::create(path)?;
         let mut zip = zip::ZipWriter::new(file);
         // Stored, never deflated — see the module comment.
+        //
+        // And stamped with a **fixed** time rather than the clock. The default
+        // is "now", which makes the same document saved twice two different
+        // files: the entry contents match byte for byte and the local headers
+        // do not, because a second ticked over between the saves. That is a
+        // promise this crate makes and was quietly breaking — and it broke two
+        // tests that compare two identical saves, but only when the machine was
+        // loaded enough to straddle a second. Nothing in iWork reads an entry's
+        // time: the archives refer to entries by name, and the app re-stamps
+        // the whole package when it saves. So the deterministic answer is the
+        // right one, and the ZIP epoch is the obviously synthetic value.
         let options = SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Stored)
+            .last_modified_time(zip::DateTime::default())
             .large_file(true);
         for (name, data) in &self.entries {
             zip.start_file(name.as_str(), options)?;
