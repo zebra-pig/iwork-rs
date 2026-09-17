@@ -884,6 +884,24 @@ impl Formula {
         })
     }
 
+    /// A formula from a node stream and nothing else.
+    ///
+    /// Which is exactly what a stored formula is: **every** `TSCE.FormulaArchive`
+    /// in a table's FORMULA list in this corpus carries field 1 and no other
+    /// field — no host cell, no translation flags, no host UUIDs. The host is
+    /// the cell that holds the key, which is why one entry can serve a whole
+    /// filled column.
+    pub fn from_ast(ast: Ast) -> Formula {
+        let mut raw = Message::default();
+        raw.set_in_order(1, Value::Bytes(ast.encode()));
+        Formula {
+            ast,
+            host: None,
+            flags: None,
+            raw,
+        }
+    }
+
     pub fn message(&self) -> &Message {
         &self.raw
     }
@@ -1173,6 +1191,17 @@ pub fn function_name(index: u32) -> Option<&'static str> {
         .binary_search_by_key(&index, |(id, _)| *id)
         .ok()
         .map(|at| FUNCTIONS[at].1)
+}
+
+/// The index of a built-in function by name, for writing one.
+///
+/// The inverse of [`function_name`], and case-insensitive because a caller
+/// types `sum(` as readily as `SUM(`. Names are not localised — see above.
+pub fn function_index(name: &str) -> Option<u32> {
+    FUNCTIONS
+        .iter()
+        .find(|(_, known)| known.eq_ignore_ascii_case(name))
+        .map(|(index, _)| *index)
 }
 
 // -- rendering ---------------------------------------------------------------

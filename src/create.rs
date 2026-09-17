@@ -1328,7 +1328,7 @@ fn empty_offsets(columns: usize) -> Vec<u8> {
 }
 
 /// How many offsets a row carries whatever its width, as Numbers writes them.
-const OFFSET_SLOTS: usize = 255;
+pub(crate) const OFFSET_SLOTS: usize = 255;
 
 /// `TST.TableInfoArchive` — the drawable the table is drawn as.
 ///

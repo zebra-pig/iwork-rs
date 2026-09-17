@@ -587,7 +587,6 @@ fn set_cell_refuses_what_it_cannot_do_honestly() {
         (2, 2, one(), "formula"),
         (8, 4, one(), "merge"),
         (2, 9, one(), "10×5"),
-        (9, 0, one(), "no stored cells"),
         (0, 0, CellValue::Error, "does not write"),
     ] {
         let error = doc
@@ -977,4 +976,163 @@ fn numbers_reads_back_an_edited_cell() {
         "D9:E9 is no longer merged"
     );
     let _ = std::fs::remove_file(&out);
+}
+
+// -- writing many cells at once ---------------------------------------------
+
+/// The batch and the single write are the same write: `set_cell` is one cell
+/// handed to `set_cells`, so what one does the other does.
+#[test]
+fn a_batch_writes_what_the_same_single_writes_would() {
+    fixture!("numbers-formats.numbers");
+    let mut one = open("numbers-formats.numbers").unwrap();
+    let mut many = open("numbers-formats.numbers").unwrap();
+
+    let cells = [
+        (1, 2, CellValue::Text("Erste".into())),
+        (2, 2, CellValue::Number(Decimal::parse("42").unwrap())),
+        (3, 2, CellValue::Bool(true)),
+    ];
+    for (row, column, value) in cells.clone() {
+        one.set_cell("Formate", row, column, value).unwrap();
+    }
+    assert_eq!(many.set_cells("Formate", cells).unwrap(), 3);
+
+    for row in 0..one.table("Formate").unwrap().rows {
+        for column in 0..one.table("Formate").unwrap().columns {
+            assert_eq!(
+                one.table("Formate").unwrap().value(row, column),
+                many.table("Formate").unwrap().value(row, column),
+                "r{row}c{column}"
+            );
+        }
+    }
+    // And byte for byte, which is the stronger claim: the same streams, with
+    // the same contents.
+    let out = |doc: &Document, name: &str| {
+        let path = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_file(&path);
+        doc.save(&path).unwrap();
+        let package = iwork::Package::read(&path).unwrap();
+        let bytes: Vec<(String, Vec<u8>)> = package
+            .names()
+            .map(|n| (n.to_string(), package.get(n).unwrap().to_vec()))
+            .collect();
+        let _ = std::fs::remove_file(&path);
+        bytes
+    };
+    assert_eq!(
+        out(&one, "iwork-batch-one.numbers"),
+        out(&many, "iwork-batch-many.numbers"),
+        "the batch and the loop wrote different documents"
+    );
+}
+
+/// A refused cell leaves the whole batch unwritten — including the cells before
+/// it, which a loop of single writes would have applied already.
+#[test]
+fn a_refused_cell_rolls_the_whole_batch_back() {
+    fixture!("numbers-values.numbers");
+    let mut doc = open("numbers-values.numbers").unwrap();
+    // The first two are writable; the third holds a formula.
+    let err = doc
+        .set_cells(
+            "Zellarten",
+            [
+                (1, 0, CellValue::Text("Eins".into())),
+                (1, 1, CellValue::Text("Zwei".into())),
+                (2, 2, CellValue::Number(Decimal::parse("1").unwrap())),
+            ],
+        )
+        .expect_err("the formula cell is refused")
+        .to_string();
+    assert!(err.contains("formula"), "{err}");
+    assert!(
+        doc.changed_streams().is_empty(),
+        "a refused batch left {:?} rewritten",
+        doc.changed_streams()
+    );
+}
+
+/// Naming one cell twice is refused: which of the two values was meant is not
+/// something this crate decides for the caller.
+#[test]
+fn a_cell_named_twice_is_refused() {
+    fixture!("numbers-formats.numbers");
+    let mut doc = open("numbers-formats.numbers").unwrap();
+    let err = doc
+        .set_cells(
+            "Formate",
+            [
+                (1, 2, CellValue::Text("a".into())),
+                (1, 2, CellValue::Text("b".into())),
+            ],
+        )
+        .expect_err("the same cell twice")
+        .to_string();
+    assert!(err.contains("named twice"), "{err}");
+    assert!(doc.changed_streams().is_empty());
+}
+
+/// A block goes in at a corner, and a short row leaves the rest of its row
+/// alone rather than emptying it.
+#[test]
+fn a_block_lands_at_its_corner() {
+    let mut doc = Document::new_spreadsheet("Blatt", "T", 4, 4).unwrap();
+    doc.set_cell("T", 3, 3, CellValue::Text("Ecke".into()))
+        .unwrap();
+    let written = doc
+        .set_block(
+            "T",
+            (1, 1),
+            &[
+                vec![CellValue::Text("a".into()), CellValue::Text("b".into())],
+                vec![CellValue::Text("c".into())],
+            ],
+        )
+        .unwrap();
+    assert_eq!(written, 3);
+
+    let table = doc.table("T").unwrap();
+    assert_eq!(table.value(1, 1), CellValue::Text("a".into()));
+    assert_eq!(table.value(1, 2), CellValue::Text("b".into()));
+    assert_eq!(table.value(2, 1), CellValue::Text("c".into()));
+    assert_eq!(table.value(2, 2), CellValue::Empty, "a short row spills");
+    assert_eq!(
+        table.value(3, 3),
+        CellValue::Text("Ecke".into()),
+        "the block reached past itself"
+    );
+    assert!(table.audit().is_empty(), "{:?}", table.audit());
+}
+
+/// A batch spanning tiles, filling rows that have no storage at all, and every
+/// count still adding up. This is the shape a caller with a table of data has,
+/// and the one the single-cell path is too slow to serve: 100 000 cells go in
+/// in a quarter of a second, where a cell at a time takes minutes.
+#[test]
+fn a_batch_crosses_tiles_and_fills_empty_rows() {
+    let rows = 300;
+    let mut doc = Document::new_spreadsheet("Blatt", "Lang", rows, 3).unwrap();
+    let block: Vec<Vec<CellValue>> = (0..rows)
+        .map(|row| {
+            (0..3)
+                .map(|column| CellValue::Text(format!("r{row}c{column}")))
+                .collect()
+        })
+        .collect();
+    assert_eq!(doc.set_block("Lang", (0, 0), &block).unwrap(), rows * 3);
+
+    let table = doc.table("Lang").unwrap();
+    for row in [0, 1, 255, 256, 257, 299] {
+        for column in 0..3 {
+            assert_eq!(
+                table.value(row, column),
+                CellValue::Text(format!("r{row}c{column}")),
+                "r{row}c{column}"
+            );
+        }
+    }
+    assert!(table.audit().is_empty(), "{:?}", table.audit());
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
 }

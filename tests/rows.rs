@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
-use iwork::table::{CellValue, Uuid};
+use iwork::table::{CellValue, Decimal, Uuid};
 use iwork::Document;
 
 fn generated(name: &str) -> Option<PathBuf> {
@@ -209,26 +209,121 @@ fn a_row_can_be_appended() {
 }
 
 /// The inserted row is genuinely empty — it has no `TileRowInfo` at all, the
-/// same shape the app gives a row with no cells. Filling it therefore needs the
-/// "first cell in a row" path `set_cell` does not implement yet (Phase 2's own
-/// documented boundary), so writing into it is refused rather than silently
-/// half-done. Inserting the row and filling one that already has cells compose;
-/// filling the brand-new one is left for the write that grows a row.
+/// same shape the app gives a row with no cells. Filling it is what brings the
+/// row into being: `set_cell` writes the `TileRowInfo` the row never had, in
+/// the shape `Document::new` writes and all three apps open, and bumps the
+/// tile's `numrows` to count it. Inserting a row and filling it now compose.
 #[test]
-fn filling_the_inserted_row_is_refused_until_first_cell_writes_land() {
+fn the_inserted_row_can_then_be_filled() {
     fixture!("numbers-formats.numbers");
     let mut doc = open("numbers-formats.numbers").unwrap();
     doc.insert_row("Formate", 8).unwrap();
-    let err = doc
-        .set_cell("Formate", 8, 0, CellValue::Text("Neu".into()))
-        .expect_err("the inserted row has no TileRowInfo to write into")
-        .to_string();
-    assert!(err.contains("no stored cells"), "{err}");
-    // The refused write left the inserted (empty) row and its neighbours intact.
+    doc.set_cell("Formate", 8, 0, CellValue::Text("Neu".into()))
+        .unwrap();
+    doc.set_cell(
+        "Formate",
+        8,
+        1,
+        CellValue::Number(Decimal::parse("42").unwrap()),
+    )
+    .unwrap();
+
     let table = doc.table("Formate").unwrap();
-    assert_eq!(table.value(8, 0), CellValue::Empty);
+    assert_eq!(table.value(8, 0), CellValue::Text("Neu".into()));
+    assert_eq!(
+        table.value(8, 1),
+        CellValue::Number(Decimal::parse("42").unwrap())
+    );
+    // The neighbours the new row was spliced between are where they were.
+    assert_eq!(table.value(7, 0), CellValue::Text("Text".into()));
     assert_eq!(table.value(9, 0), CellValue::Text("Zahlensystem".into()));
     assert!(table.audit().is_empty(), "{:?}", table.audit());
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+}
+
+/// A row that never had a cell is not only the inserted one: every row of a
+/// table `Document::new` makes has a `TileRowInfo` already, but a document the
+/// app wrote has rows that hold nothing at all. Writing into one of those goes
+/// down the same path, and the row appears in the tile in `tile_row_index`
+/// order — which is how every tile in the corpus keeps them.
+#[test]
+fn a_row_the_app_left_empty_can_be_given_its_first_cell() {
+    fixture!("numbers-values.numbers");
+    let mut doc = open("numbers-values.numbers").unwrap();
+    // Find a table with a row holding no cells at all.
+    let empty = doc
+        .tables()
+        .into_iter()
+        .find_map(|table| {
+            (0..table.rows)
+                .find(|&row| (0..table.columns).all(|c| table.value(row, c) == CellValue::Empty))
+                .map(|row| (table.name.clone(), row))
+        })
+        .expect("some table has an empty row");
+    let (name, row) = empty;
+
+    doc.set_cell(&name, row, 0, CellValue::Text("Erste".into()))
+        .unwrap();
+    let table = doc.table(&name).unwrap();
+    assert_eq!(table.value(row, 0), CellValue::Text("Erste".into()));
+    assert!(table.audit().is_empty(), "{:?}", table.audit());
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+
+    // The tile still decodes, and re-encodes to what was written.
+    let out = std::env::temp_dir().join("iwork-first-cell.numbers");
+    let _ = std::fs::remove_file(&out);
+    doc.save(&out).unwrap();
+    let again = Document::open(&out).unwrap();
+    assert_eq!(
+        again.table(&name).unwrap().value(row, 0),
+        CellValue::Text("Erste".into())
+    );
+    let _ = std::fs::remove_file(&out);
+}
+
+/// The app is the oracle for the row that was not there.
+///
+/// Off unless `IWORK_APP_CHECK=1`. A `TileRowInfo` built from nothing is
+/// exactly the kind of object ground rule 3 warns about, so the measure is
+/// Numbers opening the document and reporting the value in the row that had no
+/// storage at all.
+#[test]
+fn numbers_reads_back_a_cell_in_a_row_that_had_none() {
+    if std::env::var("IWORK_APP_CHECK").as_deref() != Ok("1") {
+        eprintln!("IWORK_APP_CHECK is not 1 — skipping the app round trip");
+        return;
+    }
+    let _ = fixture!("numbers-formats.numbers");
+    let mut doc = open("numbers-formats.numbers").unwrap();
+    doc.insert_row("Formate", 8).unwrap();
+    doc.set_cell("Formate", 8, 0, CellValue::Text("Neu".into()))
+        .unwrap();
+
+    let out = std::env::temp_dir().join("iwork-first-cell-app.numbers");
+    let _ = std::fs::remove_file(&out);
+    doc.save(&out).unwrap();
+
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/table-oracle.sh");
+    let output = std::process::Command::new(&script)
+        .arg(&out)
+        .output()
+        .unwrap_or_else(|e| panic!("{}: {e}", script.display()));
+    assert!(
+        output.status.success(),
+        "Numbers would not open the document:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(
+        text.lines().any(|line| {
+            let field: Vec<&str> = line.split('\t').collect();
+            field.first() == Some(&"cell")
+                && field.get(1) == Some(&"A9")
+                && field.get(3) == Some(&"Neu")
+        }),
+        "the app did not report A9 as the written text:\n{text}"
+    );
+    let _ = std::fs::remove_file(&out);
 }
 
 /// Everything the writer will not do, refused by name, and each refusal leaves

@@ -426,6 +426,19 @@ impl CellRecord {
         *field = key;
     }
 
+    /// Byte 6's claim that the user chose this slot's format — the only thing
+    /// separating a cell Numbers calls "number" from one it calls "automatic".
+    ///
+    /// Setting one bit leaves the others: byte 6 is a set of independent
+    /// claims, one per slot, and a cell may carry a format in more than one.
+    pub fn set_explicit_format(&mut self, slot: FormatSlot) {
+        for &(bit, named) in EXPLICIT_FORMAT {
+            if named == slot {
+                self.extras |= u16::from(bit);
+            }
+        }
+    }
+
     /// Drop byte 6's claim that the user chose this slot's format.
     ///
     /// The other bits stay: byte 6 is a set of independent claims, and a cell
@@ -1111,6 +1124,137 @@ impl Extent {
             2 => Hiding::Filter,
             other => Hiding::Other(other),
         }
+    }
+}
+
+/// A data format to give a cell — the writing half of [`CellFormat`].
+///
+/// Each variant writes the `TSK.FormatStructArchive` Numbers wrote for the same
+/// format in `numbers-formats.numbers`, field for field. What is *not* here is
+/// every knob the app's inspector has: a format this crate has not watched the
+/// app write is not one it invents. See `FORMAT.md` §Data formats.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Format {
+    /// `{1: 260}` — what a cell nobody has formatted carries.
+    Automatic,
+    /// `{1: 256, 2: decimals, 4: 0, 5: 0}`.
+    Number { decimals: Option<u8> },
+    /// `{1: 258, …}`, the same shape as a number.
+    Percent { decimals: Option<u8> },
+    /// `{1: 259, …}`, the same shape again.
+    Scientific { decimals: Option<u8> },
+    /// `{1: 257, 2: decimals, 3: code, 4: 0, 5: 0, 6: 0}` — the code is the
+    /// three-letter currency, `"CHF"` in the fixture.
+    Currency { code: String, decimals: Option<u8> },
+    /// `{1: 261, 14: pattern}` — `"dd.MM.y"` and `"dd.MM.y HH:mm"` in the
+    /// fixture, which are Unicode date patterns as the app writes them.
+    DateTime { pattern: String },
+}
+
+/// The decimal count that means "as many as it takes", which is what the app
+/// writes for number, percent and scientific formats nobody has pinned.
+const DECIMALS_AUTOMATIC: u64 = 253;
+
+impl Format {
+    /// Which of a cell record's six format slots this format goes in.
+    pub fn slot(&self) -> FormatSlot {
+        match self {
+            Format::Currency { .. } => FormatSlot::Currency,
+            Format::DateTime { .. } => FormatSlot::Date,
+            _ => FormatSlot::Number,
+        }
+    }
+
+    /// The format slot a cell of this value type uses, when it names none.
+    ///
+    /// A cell carries a format key per slot and `format_kind` says which one is
+    /// live; a cell with no `format_kind` falls back to what its value can use.
+    pub fn slot_of(cell_type: u8) -> Option<FormatSlot> {
+        match cell_type {
+            cell_type::NUMBER => Some(FormatSlot::Number),
+            cell_type::CURRENCY => Some(FormatSlot::Currency),
+            cell_type::DATE => Some(FormatSlot::Date),
+            cell_type::DURATION => Some(FormatSlot::Duration),
+            cell_type::TEXT => Some(FormatSlot::Text),
+            cell_type::BOOL => Some(FormatSlot::Boolean),
+            _ => None,
+        }
+    }
+
+    /// Whether this format can be given to a cell already using `slot`.
+    ///
+    /// **A format goes in the slot the cell already uses, or nowhere** —
+    /// measured, not assumed. A percent format written into the number slot of
+    /// a number cell is drawn as a percentage by Numbers; a *currency* format
+    /// written into the currency slot of the same cell is ignored and the app
+    /// goes on drawing a plain number. The slot follows the value's type, and
+    /// changing it is a value write (`set_cell`), not a format write.
+    pub fn suits(&self, slot: FormatSlot) -> bool {
+        match self {
+            // Automatic is what every slot's unformatted cell carries.
+            Format::Automatic => true,
+            _ => self.slot() == slot,
+        }
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            Format::Automatic => "automatic",
+            Format::Number { .. } => "number",
+            Format::Percent { .. } => "percent",
+            Format::Scientific { .. } => "scientific",
+            Format::Currency { .. } => "currency",
+            Format::DateTime { .. } => "date and time",
+        }
+    }
+
+    /// The `TSK.FormatStructArchive` itself.
+    pub fn archive(&self) -> Result<Message, crate::Error> {
+        let decimals =
+            |places: &Option<u8>| Value::Varint(places.map_or(DECIMALS_AUTOMATIC, u64::from));
+        let mut message = Message::default();
+        match self {
+            Format::Automatic => message.set_in_order(1, Value::Varint(260)),
+            Format::Number { decimals: places }
+            | Format::Percent { decimals: places }
+            | Format::Scientific { decimals: places } => {
+                let kind = match self {
+                    Format::Number { .. } => 256,
+                    Format::Percent { .. } => 258,
+                    _ => 259,
+                };
+                message.set_in_order(1, Value::Varint(kind));
+                message.set_in_order(2, decimals(places));
+                message.set_in_order(4, Value::Varint(0));
+                message.set_in_order(5, Value::Varint(0));
+            }
+            Format::Currency {
+                code,
+                decimals: places,
+            } => {
+                if code.is_empty() || !code.chars().all(|c| c.is_ascii_alphabetic()) {
+                    return Err(crate::Error::Format(format!(
+                        "{code:?} is not a currency code — the app writes three letters, as CHF"
+                    )));
+                }
+                message.set_in_order(1, Value::Varint(257));
+                message.set_in_order(2, decimals(places));
+                message.set_in_order(3, Value::Bytes(code.as_bytes().to_vec()));
+                message.set_in_order(4, Value::Varint(0));
+                message.set_in_order(5, Value::Varint(0));
+                message.set_in_order(6, Value::Varint(0));
+            }
+            Format::DateTime { pattern } => {
+                if pattern.is_empty() {
+                    return Err(crate::Error::Format(
+                        "a date format needs a pattern, as dd.MM.y".into(),
+                    ));
+                }
+                message.set_in_order(1, Value::Varint(261));
+                message.set_in_order(14, Value::Bytes(pattern.as_bytes().to_vec()));
+            }
+        }
+        Ok(message)
     }
 }
 

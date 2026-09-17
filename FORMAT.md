@@ -1201,6 +1201,57 @@ Control cells are `TST.CellSpecArchive` in the CONTROL_CELL_SPEC list:
 `interaction_type`: **4** stepper, **5** slider, **6** rating, **7** pop-up menu
 (with a `TST.PopUpMenuModel`, 6206, holding the items), **8** checkbox.
 
+### Writing a data format
+
+A format is a `TSK.FormatStructArchive` interned in the FORMAT list, and the
+archives this crate writes are the ones Numbers wrote for the same formats in
+`numbers-formats.numbers`, field for field:
+
+| Format | Archive |
+|---|---|
+| automatic | `{1: 260}` |
+| number | `{1: 256, 2: decimals, 4: 0, 5: 0}` |
+| percent | `{1: 258, …}` |
+| scientific | `{1: 259, …}` |
+| currency | `{1: 257, 2: decimals, 3: "CHF", 4: 0, 5: 0, 6: 0}` |
+| date and time | `{1: 261, 14: "dd.MM.y"}` |
+
+`decimals` is **253** for "as many as it takes", which is what the app writes
+for a format nobody has pinned.
+
+Three things on the cell have to agree, and leaving any of them out gives a cell
+the app draws the old way: the key goes in a **format slot**, `format_kind` (the
+`0x1000` payload) names that slot, and **byte 6's bit for the slot is set** —
+the last being the only thing separating a cell Numbers calls "number" from one
+it calls "automatic".
+
+**A format goes in the slot the cell's value already uses, or it is never
+drawn.** Measured: a percent format written into a number cell's number slot is
+drawn as `123450.0%` and named `percent` by the app; a *currency* format written
+into the same cell's currency slot is ignored, and the app goes on drawing a
+plain number. The slot follows the value's type — number, currency, date,
+duration, text, boolean — so changing it is a value write and not a format
+write, and this crate refuses the cross-slot case by name.
+
+Confirmed by Numbers over four cells of one table: `123450.0%` (percent, one
+decimal), `€ 19.99` (currency `EUR` — with a **non-breaking space** after the
+symbol), `12345.678` (number, three decimals) and `2024-03-01` (the pattern
+`y-MM-dd`). `tests/formats.rs::numbers_reads_back_the_formats_and_the_sizes`.
+
+### Writing a row's height and a column's width
+
+One float, in the row's or column's `HeaderStorageBucket` entry (field 2), and
+**a literal `0` means the table's default** — which is what every row and column
+of the corpus carries but the one column dragged to 150 and the one row dragged
+to 40. A row or column with no entry at all gets one, exactly as an inserted row
+does.
+
+The table's **drawable is not touched**, and measurement says it must not be:
+every table in the corpus has a frame 494pt wide whatever its columns — three of
+them, seven of them, one of them 150pt — so the app lays the table out from the
+column widths rather than from the frame. Numbers reports a written 210pt column
+and a 33pt row back exactly.
+
 ### Merged ranges
 
 A merge is stored nowhere near the cells it covers. The covered cells have no
@@ -1620,9 +1671,54 @@ back with one more row, the new one empty, and every row below it unmoved:
 
 The **empty row has no cell storage of its own**, which is the same shape the app
 gives any row that holds no cells (no `TileRowInfo`, and a zero-count bucket
-entry). It is also why `set_cell` cannot then fill it: giving a row its first
-cell needs a `TileRowInfo` built from nothing, which is a separate write this
-crate does not do yet.
+entry). Filling it is what brings the row into being — see "Giving a row its
+first cell" below.
+
+### Giving a row its first cell
+
+A row with no stored cells has no `TileRowInfo`, so the first value written into
+one has to build the row, not edit it. What is written is the shape
+`Document::new` writes and all three apps open:
+
+| # | What a new `TileRowInfo` carries |
+|---|---|
+| 1 | `tile_row_index`, the row's index **within its tile** |
+| 2 | the number of cells the row now holds |
+| 3, 4 | the pre-BNC pair, present and *empty* — `required` in the schema, meaningless in storage version 5 |
+| 5 | `5` |
+| 6, 7 | the cell buffer and its offsets |
+
+Two things about it are decided rather than invented. The entry goes into the
+tile **in ascending `tile_row_index` order**, which is how every tile in the
+corpus keeps them, and the tile's `numrows` (field 4) counts one more row —
+field 4 is the one of the tile's four counters that is not dead. The offset
+array is given **as many slots as the tile's other rows have** (255 where
+Numbers wrote them), because the padding is what a reader steps through and a
+shorter array would claim the table is narrower than it is.
+
+Verified by Numbers: a row inserted into `numbers-formats.numbers` and then
+given a value in column A comes back from the app as `A9` holding that text,
+with the rows around it unmoved
+(`tests/rows.rs::numbers_reads_back_a_cell_in_a_row_that_had_none`).
+
+### Writing many cells at once
+
+`Document::set_cells` and `set_block` write a batch in one pass, and the reason
+is the storage layout rather than convenience. A cell lives in its row's
+`TileRowInfo`, a row in a tile of up to 256 of them, and the strings and formats
+a cell names live in `TableDataList`s that hold the whole table's worth. Writing
+one cell therefore decodes and re-encodes a tile *and* two lists, so writing a
+table one cell at a time is quadratic in its size — measured at 5000 cells in
+21s and 15 000 in 206s, and worse from there.
+
+A batch decodes each tile once, each list once, and each header bucket once:
+100 000 cells go in in **0.26s**, against minutes for the same cells one at a
+time. The measurements are reproducible from
+`tests/cells.rs::a_batch_crosses_tiles_and_fills_empty_rows`.
+
+The batch is also **all or nothing** — a cell it refuses leaves the document
+byte for byte as it was, including the cells of the same batch already written,
+which a loop of single writes cannot offer.
 
 **A table with no `ColumnRowUIDMapArchive` cannot be given a row**, because the
 new row's identity has nowhere to go. Numbers writes an *empty* map for some
@@ -2672,6 +2768,57 @@ by deleting a column after the formula pointing at it was written. A
 this crate flags the range as `#REF!` rather than printing the sentinel as a
 column letter and a ten-digit row — a range can lose a single dimension where a
 single cell loses both at once.
+
+### Writing a formula from its text
+
+`=SUM(B2:B4)` typed by a caller has to become the node stream the app writes,
+and every node this crate emits was copied from one Numbers wrote — dumped out
+of `numbers-formulas.numbers` node by node and reproduced field for field. The
+shapes, with the host cell in brackets:
+
+| Typed | Nodes |
+|---|---|
+| `=B2+1` in C2 | `CELL_REFERENCE{26:{1:1,2:0}, 27:{1:0,2:0}}`, `NUMBER`, `ADDITION` |
+| `=$B$2` | `CELL_REFERENCE{26:{1:2,2:1}, 27:{1:2,2:1}}` |
+| `=(B2+1)*2` | …, `ADDITION`, **`LIST{13:1}`**, `NUMBER`, `MULTIPLICATION` |
+| `=SUM($B$2:$B$4)` | `COLON_TRACT{33:{1,1,1,1}, 40:{3:{1:1}, 4:{1:1,2:3}, 5:1}}`, `FUNCTION{2:168,3:1}` |
+| `=LEFT("abcdef",3)` | `STRING{6:…}`, `NUMBER`, `FUNCTION{2:76,3:2}` |
+| `=50%` | `NUMBER`, `PERCENT` |
+
+Three of those are the ones a writer gets wrong:
+
+* **A parenthesis is a node.** `(x)` writes a `LIST_NODE` with one argument
+  after the parenthesised expression. It is not nothing, and it is not a pair of
+  marker nodes.
+* **The two coordinate encodings differ**, as above: `AST_column`/`AST_row` are
+  zigzag, the colon tract's four lists are plain `int32`.
+* **A number literal is written twice** — the double at field 4 and the
+  decimal128 halves at 42 and 43 — and the decimal is authoritative. An integer
+  `n` is `{42: n, 43: 0x3040000000000000}`.
+
+A stored formula archive is **field 1 and nothing else**: every one of the 97 in
+this corpus carries the node array alone — no host cell, no translation flags,
+no host UUIDs — which is why building one from nothing is honest.
+
+What this crate refuses to parse is what it could not then register in the
+calculation engine (§`TSCE` above): another table's cells, a whole row or
+column, a header name, a function it does not know by name, an array,
+`LET`/`LAMBDA`. Each is refused by name, because a formula the engine only half
+knows about is one the app recalculates wrongly — which is worse than not
+writing it.
+
+Verified by Numbers: `=SUM($B$2:$B$3)*2` written into an empty cell of
+`numbers-values.numbers` comes back from the app as **`=SUM($B$2:$B$3)×2`
+showing 1500** — the app's own spelling and the app's own answer
+(`tests/formula_write.rs::numbers_reads_back_a_formula_written_from_text`). A
+formula written as `=B2+B3` in a table with headers is printed by the app as
+`=Menge Schrauben+Menge Muttern`: the same archive, rendered the way Numbers
+renders a reference into a headed table.
+
+**A table this crate made from nothing cannot be given a formula.** It has no
+`TSCE.FormulaOwnerDependenciesArchive`, so there is nowhere to register the
+cell, and an unregistered formula is one the app never recalculates. The
+refusal names it.
 
 ### Cross-table references resolve by identity
 

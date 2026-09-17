@@ -58,6 +58,7 @@ pub mod create;
 pub mod document;
 pub mod drawable;
 pub mod formula;
+pub mod formula_parse;
 pub mod iwa;
 pub mod keynote;
 pub mod media;

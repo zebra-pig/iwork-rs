@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 
+use crate::create::OFFSET_SLOTS;
 use crate::iwa::{self, ArchiveObject};
 use crate::package::Package;
 use crate::pb::{Message, Value};
@@ -135,6 +136,295 @@ struct ComponentIndex {
     declared: BTreeMap<u64, BTreeSet<u64>>,
 }
 
+/// The side-table archives a batch of cell writes is holding open.
+///
+/// A `TableDataList` is one object holding every string, format or control a
+/// table uses, so interning a string decodes and re-encodes the whole list —
+/// and a cell write does that up to three times. Over a batch that is the same
+/// quadratic cost the tiles have: filling a table with 5000 distinct strings
+/// decodes a 5000-entry list 15000 times. Here each list is decoded on first
+/// use, every cell of the batch works on the decoded form, and it is written
+/// back once, by [`ListCache::flush`].
+///
+/// Nothing is written until the flush, so a batch that refuses part way leaves
+/// the lists as they were without the caller's snapshot even being consulted.
+#[derive(Default)]
+struct ListCache {
+    open: std::collections::BTreeMap<u64, Message>,
+    dirty: std::collections::BTreeSet<u64>,
+    /// What each string list already holds, and the next key it can hand out.
+    /// Interning without it means scanning the list for the text and again for
+    /// the highest key, decoding every entry both times — per cell.
+    strings: std::collections::BTreeMap<u64, StringIndex>,
+    /// The format key borrowed for each slot, which depends only on the table
+    /// as the batch found it — so it is looked up once rather than scanned out
+    /// of every cell of the table for every cell written.
+    donors: Vec<(crate::table::FormatSlot, Option<u32>)>,
+}
+
+/// What a `TableDataList` of strings holds, so that interning is a lookup.
+#[derive(Default)]
+struct StringIndex {
+    by_text: std::collections::BTreeMap<Vec<u8>, u32>,
+    /// The next key the list can hand out — a high-water mark, as the app keeps
+    /// it, never reused downwards.
+    next: u64,
+}
+
+impl ListCache {
+    fn read(&mut self, document: &Document, list: u64) -> Result<&Message, Error> {
+        if let std::collections::btree_map::Entry::Vacant(slot) = self.open.entry(list) {
+            slot.insert(document.archive_of(list)?);
+        }
+        Ok(self.open.get(&list).expect("just inserted"))
+    }
+
+    fn write(&mut self, document: &Document, list: u64) -> Result<&mut Message, Error> {
+        self.read(document, list)?;
+        self.dirty.insert(list);
+        Ok(self.open.get_mut(&list).expect("just inserted"))
+    }
+
+    /// The text-to-key index of one `STRING` list, read once.
+    fn string_index(&mut self, document: &Document, list: u64) -> Result<&mut StringIndex, Error> {
+        if !self.strings.contains_key(&list) {
+            let archive = self.read(document, list)?;
+            let mut by_text = std::collections::BTreeMap::new();
+            let mut highest = 0u64;
+            for value in archive.all(3) {
+                let Value::Bytes(raw) = value else { continue };
+                let Some(entry) = crate::pb::decode_nested(raw) else {
+                    continue;
+                };
+                let Some(key) = entry.varint(1) else { continue };
+                highest = highest.max(key);
+                if let Some(text) = entry.bytes(3) {
+                    by_text.insert(text.to_vec(), key as u32);
+                }
+            }
+            // Above the mark *and* above every key present, because the mark is
+            // only trustworthy while the app is the one maintaining it.
+            let next = archive
+                .varint(2)
+                .unwrap_or(0)
+                .max(highest.saturating_add(1))
+                .max(1);
+            self.strings.insert(list, StringIndex { by_text, next });
+        }
+        Ok(self.strings.get_mut(&list).expect("just inserted"))
+    }
+
+    /// Put every list this batch changed back into the document.
+    fn flush(self, document: &mut Document) -> Result<(), Error> {
+        for list in &self.dirty {
+            let archive = self.open.get(list).expect("dirty lists are open");
+            document.set_archive(*list, archive)?;
+        }
+        Ok(())
+    }
+}
+
+/// What a write to one table needs that does not change from cell to cell: the
+/// tile map and the side tables every row of it shares.
+struct TableSite {
+    /// How many rows one tile covers.
+    tile_size: usize,
+    /// Tile index — `row / tile_size` — to the object holding it.
+    tiles: std::collections::BTreeMap<usize, u64>,
+    /// `TableDataList` for interned strings, for data formats, and for the
+    /// control specs a deleted cell has to give up its reference to.
+    strings: Option<u64>,
+    formats: Option<u64>,
+    controls: Option<u64>,
+    /// The `FORMULA` list, which a filled formula takes another reference in.
+    formulas: Option<u64>,
+    /// `TST.HeaderStorageBucket`s carrying the per-row and per-column cell
+    /// counts, which change when a cell appears or disappears.
+    row_bucket: Vec<u64>,
+    column_bucket: Option<u64>,
+}
+
+/// One row of a batch: the row's index in the table, and its cells by column.
+type TileRowCells = (usize, Vec<(usize, CellValue)>);
+
+/// One row of a decoded tile: its cells, and where its `TileRowInfo` sits.
+struct TileRow {
+    /// Index of the `TileRowInfo` **among the tile's fields** — or, when
+    /// `fresh`, the position a new one is inserted at.
+    position: usize,
+    /// The row has no `TileRowInfo` yet, because a row with no cells has none.
+    fresh: bool,
+    /// The row's index within its tile.
+    index: usize,
+    wide: bool,
+    /// Every cell of the row, one slot per offset entry.
+    records: Vec<Option<Vec<u8>>>,
+}
+
+/// Where each row of a decoded tile sits among its fields.
+///
+/// A `TST.Tile` carries its rows as repeated field 5, keyed by a
+/// `tile_row_index` *inside* the message, so finding one row means decoding
+/// every field until it turns up. Doing that per row is quadratic in the tile —
+/// 256 rows of a full tile decode 32 000 row messages between them — so a batch
+/// reads the keys once and looks rows up by index afterwards.
+struct TileIndex {
+    /// `tile_row_index` to the field's position in the archive.
+    positions: std::collections::BTreeMap<usize, usize>,
+    /// How many columns a row of this tile names, which is what a new row is
+    /// given: Numbers pads the array to 255 entries whatever the table's width,
+    /// and a reader steps through the padding.
+    slots: usize,
+    wide: bool,
+}
+
+impl TileIndex {
+    fn of(archive: &Message) -> TileIndex {
+        let mut positions = std::collections::BTreeMap::new();
+        let mut slots = 0;
+        for (at, field) in archive.fields.iter().enumerate() {
+            let Value::Bytes(raw) = &field.value else {
+                continue;
+            };
+            if field.number != 5 {
+                continue;
+            }
+            let Some(info) = crate::pb::decode_nested(raw) else {
+                continue;
+            };
+            if let Some(index) = info.varint(1) {
+                positions.insert(index as usize, at);
+            }
+            slots = slots.max(info.bytes(7).map(|offsets| offsets.len() / 2).unwrap_or(0));
+        }
+        TileIndex {
+            positions,
+            slots: if slots == 0 { OFFSET_SLOTS } else { slots },
+            wide: archive.varint(8).unwrap_or(0) != 0,
+        }
+    }
+
+    /// Slice one row out of the tile.
+    ///
+    /// A row with no stored cells has no `TileRowInfo` at all, so this cannot
+    /// fail to find one: it says where a new one would go instead, and the
+    /// first cell written into the row brings it into being.
+    fn row(&self, archive: &Message, tile_row: usize, where_: &str) -> Result<TileRow, Error> {
+        let Some(&position) = self.positions.get(&tile_row) else {
+            // Where the new entry goes: in ascending `tile_row_index` order,
+            // which is how every tile in the corpus keeps them.
+            let position = self
+                .positions
+                .range(tile_row + 1..)
+                .next()
+                .map(|(_, &at)| at)
+                .or_else(|| self.positions.values().next_back().map(|&last| last + 1))
+                .or_else(|| archive.fields.iter().position(|field| field.number > 5))
+                .unwrap_or(archive.fields.len());
+            return Ok(TileRow {
+                position,
+                fresh: true,
+                index: tile_row,
+                wide: self.wide,
+                records: vec![None; self.slots],
+            });
+        };
+        TileRow::at(archive, position, tile_row, self.wide, where_)
+    }
+
+    /// Record that a row was brought into being at `position`, which moves
+    /// every field after it along one.
+    fn inserted(&mut self, tile_row: usize, position: usize) {
+        for at in self.positions.values_mut() {
+            if *at >= position {
+                *at += 1;
+            }
+        }
+        self.positions.insert(tile_row, position);
+    }
+}
+
+impl TileRow {
+    /// Read the row whose `TileRowInfo` is field `position` of the tile.
+    fn at(
+        archive: &Message,
+        position: usize,
+        tile_row: usize,
+        wide: bool,
+        where_: &str,
+    ) -> Result<TileRow, Error> {
+        let Value::Bytes(raw) = &archive.fields[position].value else {
+            unreachable!("the position was found by matching on Bytes")
+        };
+        let info = crate::pb::decode_nested(raw)
+            .ok_or_else(|| Error::Format(format!("{where_}: row storage does not decode")))?;
+        let (Some(buffer), Some(offsets)) = (info.bytes(6), info.bytes(7)) else {
+            return Err(Error::Format(format!(
+                "{where_}: row {tile_row} of this tile has no version-5 cell storage"
+            )));
+        };
+        let wide = wide || info.varint(8).unwrap_or(0) != 0;
+        let mut records: Vec<Option<Vec<u8>>> = vec![None; offsets.len() / 2];
+        for (at, bytes) in crate::table::row_cells(buffer, offsets, wide)
+            .into_iter()
+            .flatten()
+        {
+            records[at] = Some(bytes.to_vec());
+        }
+        Ok(TileRow {
+            position,
+            fresh: false,
+            index: tile_row,
+            wide,
+            records,
+        })
+    }
+
+    /// Lay the row back into its tile, bringing it into being if it is new.
+    ///
+    /// The one fallible step is the offset arithmetic: a row grown past what a
+    /// 16-bit offset can address is refused rather than truncated.
+    fn put(&self, archive: &mut Message, where_: &str) -> Result<(), Error> {
+        let (buffer, offsets) = crate::table::encode_row(&self.records, self.wide)
+            .map_err(|e| Error::Format(format!("{where_}: {e}")))?;
+        let cells = self.records.iter().filter(|r| r.is_some()).count() as u64;
+        if self.fresh {
+            // The row is brought into being in the shape `Document::new` writes
+            // and all three apps open: the pre-BNC pair (3, 4) present and
+            // empty, because they are `required` in the schema and meaningless
+            // in this storage version, and `numrows` counting one more row.
+            let mut info = Message::default();
+            info.set_in_order(1, Value::Varint(self.index as u64));
+            info.set_in_order(2, Value::Varint(cells));
+            info.set_in_order(3, Value::Bytes(Vec::new()));
+            info.set_in_order(4, Value::Bytes(offsets.clone()));
+            info.set_in_order(5, Value::Varint(5));
+            info.set_in_order(6, Value::Bytes(buffer));
+            info.set_in_order(7, Value::Bytes(offsets));
+            archive.fields.insert(
+                self.position,
+                crate::pb::Field {
+                    number: 5,
+                    value: Value::Bytes(info.encode()),
+                },
+            );
+            let rows = archive.varint(4).unwrap_or(0) + 1;
+            archive.set(4, Value::Varint(rows));
+            return Ok(());
+        }
+        let Value::Bytes(raw) = &archive.fields[self.position].value else {
+            unreachable!("the position was found by matching on Bytes")
+        };
+        let mut info = crate::pb::decode_nested(raw)
+            .ok_or_else(|| Error::Format(format!("{where_}: row storage does not decode")))?;
+        info.set(2, Value::Varint(cells));
+        info.set(6, Value::Bytes(buffer));
+        info.set(7, Value::Bytes(offsets));
+        archive.fields[self.position].value = Value::Bytes(info.encode());
+        Ok(())
+    }
+}
+
 /// Everything [`Document::set_cell`] has to find before it can write a byte.
 ///
 /// A cell is addressed by row and column, but it is *stored* as a slice of one
@@ -145,8 +435,14 @@ struct CellSite {
     /// `TST.Tile` holding the row.
     tile: u64,
     /// Index of the row's `TileRowInfo` **among the tile's fields**, not its
-    /// row number: the field is what gets replaced.
+    /// row number: the field is what gets replaced — or, when `fresh_row`, the
+    /// position the new one is inserted at.
     tile_row: usize,
+    /// The row's index *within its tile*, which is what a `TileRowInfo` stores.
+    tile_row_index: usize,
+    /// Whether the row has no `TileRowInfo` yet, so that storing a record means
+    /// bringing the row into being rather than rewriting it.
+    fresh_row: bool,
     /// Whether this row's offsets count groups of four bytes.
     wide: bool,
     row: usize,
@@ -155,11 +451,6 @@ struct CellSite {
     records: Vec<Option<Vec<u8>>>,
     /// The target cell's bytes, if it has any.
     record: Option<Vec<u8>>,
-    /// `TableDataList` for interned strings, for data formats, and for the
-    /// control specs a deleted cell has to give up its reference to.
-    strings: Option<u64>,
-    formats: Option<u64>,
-    controls: Option<u64>,
     /// The `FORMULA` list, which a filled formula takes another reference in.
     formulas: Option<u64>,
     /// `TST.HeaderStorageBucket`s carrying the per-row and per-column cell
@@ -209,8 +500,11 @@ struct StagedRow {
     cells: u64,
     buffer: Vec<u8>,
     offsets: Vec<u8>,
-    had: bool,
-    has: bool,
+    /// Columns that gained a stored cell, and columns that lost one — the
+    /// header buckets count cells, so they move by these and not by the number
+    /// of values written.
+    appeared: Vec<usize>,
+    disappeared: Vec<usize>,
 }
 
 /// A planned row insert: the objects it rewrites, each with its new archive, so
@@ -1348,8 +1642,9 @@ impl Document {
     /// What it refuses, by name rather than by writing something plausible:
     /// a cell holding a formula (removing one means editing `TSCE`), a
     /// rich-text cell (its text is a `TSWP` storage, not a table string), a
-    /// cell covered by a merge, a row with no stored cells at all, and any
-    /// object carrying version patches — see [`Document::patched_objects`].
+    /// cell covered by a merge, and any object carrying version patches — see
+    /// [`Document::patched_objects`]. A row with no stored cells is *not*
+    /// refused: the write brings the row into being.
     pub fn set_cell(
         &mut self,
         wanted: &str,
@@ -1358,95 +1653,336 @@ impl Document {
         value: CellValue,
     ) -> Result<CellValue, Error> {
         let table = self.table_for_write(wanted)?;
-        let where_ = format!("{} r{row}c{column}", table.name);
-        if row >= table.rows || column >= table.columns {
-            return Err(Error::Format(format!(
-                "{where_}: the table is {}×{}",
-                table.rows, table.columns
-            )));
-        }
-        if let Some(merge) = table.merge_covering(row, column) {
-            if (merge.row, merge.column) != (row, column) {
+        let previous = table.value(row, column);
+        self.write_cells(&table, vec![(row, column, value)])?;
+        Ok(previous)
+    }
+
+    /// Write many cells of one table in a single pass.
+    ///
+    /// This is [`Document::set_cell`] for a block of values, and the two share
+    /// every rule and every refusal — `set_cell` is one cell handed to this.
+    /// What the batch adds is the two things a loop of single writes cannot
+    /// give:
+    ///
+    /// * **One pass over the row.** A cell is stored in its row's
+    ///   `TileRowInfo`, so writing a row one cell at a time decodes and
+    ///   re-encodes that row — and re-reads every table in the document to
+    ///   resolve the name — once per cell. The cost of filling a table that way
+    ///   is quadratic in its size, measured: 500 cells in 0.2s, 2000 in 3.0s,
+    ///   and a spreadsheet's worth of cells in minutes. Grouped by row it is
+    ///   one decode, one re-encode and one table resolution however wide the
+    ///   row.
+    /// * **All or nothing.** A refused cell leaves the document byte for byte
+    ///   as it was — including the cells of the same batch that had already
+    ///   been written. A loop of `set_cell` stops half-applied instead.
+    ///
+    /// Cells may be given in any order and may span any number of rows; naming
+    /// the same cell twice is refused rather than silently resolved, because
+    /// which of the two values was meant is not this crate's to guess.
+    pub fn set_cells(
+        &mut self,
+        wanted: &str,
+        cells: impl IntoIterator<Item = (usize, usize, CellValue)>,
+    ) -> Result<usize, Error> {
+        let table = self.table_for_write(wanted)?;
+        self.write_cells(&table, cells.into_iter().collect())
+    }
+
+    /// Write a rectangular block of values, `rows[0][0]` landing at `at`.
+    ///
+    /// The shape a caller with a table of data has: rows of values, written
+    /// into the table at a corner. Short rows leave the cells past their end
+    /// alone rather than emptying them — a row of three values written into a
+    /// five-column table changes three cells — because a value nobody gave is
+    /// not the same as a value someone cleared. Pass [`CellValue::Empty`] to
+    /// clear.
+    pub fn set_block(
+        &mut self,
+        wanted: &str,
+        at: (usize, usize),
+        rows: &[Vec<CellValue>],
+    ) -> Result<usize, Error> {
+        let cells: Vec<(usize, usize, CellValue)> = rows
+            .iter()
+            .enumerate()
+            .flat_map(|(row, values)| {
+                values
+                    .iter()
+                    .enumerate()
+                    .map(move |(column, value)| (at.0 + row, at.1 + column, value.clone()))
+            })
+            .collect();
+        self.set_cells(wanted, cells)
+    }
+
+    /// Every cell write in this crate, single or batched, goes through here.
+    ///
+    /// Two halves, in this order and for the reason the whole write path is
+    /// built around: every refusal that can be decided from the request alone
+    /// is decided *first*, over the whole batch, before a byte moves. What can
+    /// only be found while planning a cell — a donor format that is not there,
+    /// a string key that will not fit — is caught with the streams snapshotted,
+    /// and the snapshot is what makes a refused batch a no-op rather than a
+    /// half-written table.
+    fn write_cells(
+        &mut self,
+        table: &crate::table::Table,
+        cells: Vec<(usize, usize, CellValue)>,
+    ) -> Result<usize, Error> {
+        let mut by_row: std::collections::BTreeMap<usize, Vec<(usize, CellValue)>> =
+            std::collections::BTreeMap::new();
+        for (row, column, value) in cells {
+            let where_ = format!("{} r{row}c{column}", table.name);
+            if row >= table.rows || column >= table.columns {
                 return Err(Error::Format(format!(
-                    "{where_}: covered by the merge that begins at row {} column {}",
-                    merge.row, merge.column
+                    "{where_}: the table is {}×{}",
+                    table.rows, table.columns
                 )));
             }
+            if let Some(merge) = table.merge_covering(row, column) {
+                if (merge.row, merge.column) != (row, column) {
+                    return Err(Error::Format(format!(
+                        "{where_}: covered by the merge that begins at row {} column {}",
+                        merge.row, merge.column
+                    )));
+                }
+            }
+            match value {
+                CellValue::Empty
+                | CellValue::Text(_)
+                | CellValue::Number(_)
+                | CellValue::Bool(_)
+                | CellValue::Date(_)
+                | CellValue::Duration(_) => {}
+                other => {
+                    return Err(Error::Format(format!(
+                        "{where_}: this crate does not write {} cells",
+                        other.kind()
+                    )))
+                }
+            }
+            let row_cells = by_row.entry(row).or_default();
+            if row_cells.iter().any(|(at, _)| *at == column) {
+                return Err(Error::Format(format!("{where_}: named twice in one write")));
+            }
+            row_cells.push((column, value));
         }
-        match value {
-            CellValue::Empty
-            | CellValue::Text(_)
-            | CellValue::Number(_)
-            | CellValue::Bool(_)
-            | CellValue::Date(_)
-            | CellValue::Duration(_) => {}
-            other => {
-                return Err(Error::Format(format!(
-                    "{where_}: this crate does not write {} cells",
-                    other.kind()
-                )))
+
+        let site = self.table_site(table)?;
+        let restore = self.streams.clone();
+        match self.apply_cell_batch(table, &site, by_row) {
+            Ok(written) => Ok(written),
+            Err(e) => {
+                self.streams = restore;
+                Err(e)
+            }
+        }
+    }
+
+    /// Apply a validated batch: one decode per tile, one rewrite per bucket.
+    ///
+    /// The grouping is what makes a batch cheap. A cell lives in its row's
+    /// `TileRowInfo`, a row in its tile, and a tile holds up to 256 rows, so
+    /// decoding the tile per cell — which is what a loop of single writes does —
+    /// re-reads the whole tile for every value. Here the tile is decoded once,
+    /// every row of it is laid back in, and the object is written once. The
+    /// header buckets go the same way: their per-row and per-column cell counts
+    /// are accumulated and applied in one pass each, rather than a decode and a
+    /// re-encode per cell that appears.
+    ///
+    /// Planning and applying stay interleaved per cell, because they have to
+    /// be: two cells given two new strings need two keys, and the second key is
+    /// only free once the first has been taken. Every fallible step of a cell
+    /// still happens before that cell's reference counts move, and the caller's
+    /// snapshot covers a later cell refusing.
+    fn apply_cell_batch(
+        &mut self,
+        table: &crate::table::Table,
+        site: &TableSite,
+        by_row: std::collections::BTreeMap<usize, Vec<(usize, CellValue)>>,
+    ) -> Result<usize, Error> {
+        let mut by_tile: std::collections::BTreeMap<usize, Vec<TileRowCells>> =
+            std::collections::BTreeMap::new();
+        for (row, cells) in by_row {
+            by_tile
+                .entry(row / site.tile_size)
+                .or_default()
+                .push((row, cells));
+        }
+
+        // The patched-object list is a scan of every object in the document, so
+        // it is read once for the batch rather than once for every cell.
+        let patched = self.patched_objects();
+        let mut cache = ListCache::default();
+        let mut written = 0;
+        let mut row_delta: std::collections::BTreeMap<usize, i64> = Default::default();
+        let mut column_delta: std::collections::BTreeMap<usize, i64> = Default::default();
+
+        for (_, rows) in by_tile {
+            let first = rows.first().expect("a tile with no rows is not grouped").0;
+            let where_ = format!("{} r{first}", table.name);
+            let tile = self.tile_for_row(site, first, &where_)?;
+            let mut archive = self.archive_of(tile)?;
+            let mut index = TileIndex::of(&archive);
+            let mut touched_tile = false;
+
+            for (row, cells) in rows {
+                let mut in_tile = index.row(&archive, row % site.tile_size, &where_)?;
+                let mut changed = false;
+                for (column, value) in cells {
+                    let where_ = format!("{} r{row}c{column}", table.name);
+                    let slots = in_tile.records.len();
+                    if column >= slots {
+                        return Err(Error::Format(format!(
+                            "{where_}: the row's offset array names only {slots} columns"
+                        )));
+                    }
+                    let current = in_tile.records[column].clone();
+                    let old = match &current {
+                        Some(bytes) => crate::table::decode_cell(bytes)
+                            .map_err(|e| Error::Format(format!("{where_}: {e}")))?,
+                        None => crate::table::CellRecord {
+                            version: 5,
+                            ..crate::table::CellRecord::default()
+                        },
+                    };
+                    if old.formula_id.is_some() {
+                        return Err(Error::Format(format!(
+                            "{where_}: holds a formula, and taking one out means editing the \
+                             calculation engine — not this phase's job"
+                        )));
+                    }
+                    if old.cell_type == cell_type::RICH_TEXT || old.rich_id.is_some() {
+                        return Err(Error::Format(format!(
+                            "{where_}: holds rich text, whose words are in a TSWP storage \
+                             rather than in the table"
+                        )));
+                    }
+                    // Nothing to do, and nothing to damage.
+                    if current.is_none() && value == CellValue::Empty {
+                        continue;
+                    }
+
+                    let write =
+                        self.rewrite_record(&mut cache, table, site, old, &value, &where_)?;
+
+                    // Everything this will rewrite has to be free of version
+                    // patches, not just the tile — the string, format and
+                    // control lists and the header buckets are set_archive'd
+                    // too, and a patch left over one of those would describe the
+                    // cell as it used to be.
+                    let mut touched: Vec<u64> =
+                        write.mutations.iter().map(ListMutation::list).collect();
+                    let had = current.is_some();
+                    let has = write.record.is_some();
+                    if had != has {
+                        touched.extend(site.row_bucket.iter().copied());
+                        touched.extend(site.column_bucket);
+                    }
+                    touched.push(tile);
+                    for id in touched {
+                        if patched.iter().any(|&(at, _)| at == id) {
+                            return Err(Error::Format(format!(
+                                "{where_}: object {id} carries version patches, and rewriting \
+                                 it would leave them describing the cell as it used to be"
+                            )));
+                        }
+                    }
+
+                    // Prove the record encodes before any reference count moves.
+                    let encoded = match &write.record {
+                        Some(record) => Some(
+                            record
+                                .encode()
+                                .map_err(|e| Error::Format(format!("{where_}: {e}")))?,
+                        ),
+                        None => None,
+                    };
+                    for mutation in &write.mutations {
+                        self.apply_mutation(&mut cache, mutation)?;
+                    }
+                    match (had, has) {
+                        (false, true) => {
+                            *row_delta.entry(row).or_default() += 1;
+                            *column_delta.entry(column).or_default() += 1;
+                        }
+                        (true, false) => {
+                            *row_delta.entry(row).or_default() -= 1;
+                            *column_delta.entry(column).or_default() -= 1;
+                        }
+                        _ => {}
+                    }
+                    in_tile.records[column] = encoded;
+                    changed = true;
+                    written += 1;
+                }
+                if changed {
+                    in_tile.put(&mut archive, &where_)?;
+                    if in_tile.fresh {
+                        index.inserted(in_tile.index, in_tile.position);
+                    }
+                    touched_tile = true;
+                }
+            }
+            if touched_tile {
+                self.set_archive(tile, &archive)?;
             }
         }
 
-        let site = self.cell_site(&table, row, column)?;
-        let previous = table.value(row, column);
-        let old = match &site.record {
-            Some(bytes) => crate::table::decode_cell(bytes)
-                .map_err(|e| Error::Format(format!("{where_}: {e}")))?,
-            None => crate::table::CellRecord {
-                version: 5,
-                ..crate::table::CellRecord::default()
-            },
-        };
-        if old.formula_id.is_some() {
-            return Err(Error::Format(format!(
-                "{where_}: holds a formula, and taking one out means editing the \
-                 calculation engine — not this phase's job"
-            )));
+        cache.flush(self)?;
+        if written > 0 {
+            self.step_row_counts(site, &row_delta)?;
+            if let Some(bucket) = site.column_bucket {
+                self.step_bucket_counts(bucket, &column_delta)?;
+            }
         }
-        if old.cell_type == cell_type::RICH_TEXT || old.rich_id.is_some() {
-            return Err(Error::Format(format!(
-                "{where_}: holds rich text, whose words are in a TSWP storage rather \
-                 than in the table"
-            )));
+        Ok(written)
+    }
+
+    /// Move the per-row cell counts, each in whichever bucket holds its row.
+    ///
+    /// A table's rows are counted across a *list* of `HeaderStorageBucket`s
+    /// (its columns in a single one), so which bucket a row belongs to is
+    /// looked up once for the whole batch rather than per row — the lookup
+    /// decodes the bucket.
+    fn step_row_counts(
+        &mut self,
+        site: &TableSite,
+        deltas: &std::collections::BTreeMap<usize, i64>,
+    ) -> Result<(), Error> {
+        if deltas.is_empty() {
+            return Ok(());
         }
-
-        // Nothing to do, and nothing to damage.
-        if site.record.is_none() && value == CellValue::Empty {
-            return Ok(previous);
+        let mut per_bucket: std::collections::BTreeMap<
+            u64,
+            std::collections::BTreeMap<usize, i64>,
+        > = Default::default();
+        let mut holds: Vec<(u64, std::collections::BTreeSet<usize>)> = Vec::new();
+        for &bucket in &site.row_bucket {
+            holds.push((bucket, self.bucket_indices(bucket)));
         }
-
-        // The write is planned in full — the new record and every reference-count
-        // change it implies — before a single byte is written. Every step that
-        // can fail (the donor-format lookup, the string-key arithmetic, the
-        // record encoding, the patched-object refusal) happens in this half; the
-        // half below only applies decisions already proven to succeed. A refused
-        // write therefore leaves the document byte for byte as it was.
-        let write = self.rewrite_record(&table, &site, old, &value, &where_)?;
-
-        // Everything set_cell will rewrite has to be free of version patches, not
-        // just the tile — the string, format and control lists and the header
-        // buckets are set_archive'd too, and a patch left over one of those would
-        // describe it as it used to be.
-        let mut touched: Vec<u64> = write.mutations.iter().map(ListMutation::list).collect();
-        let had = site.record.is_some();
-        let has = write.record.is_some();
-        if had != has {
-            touched.extend(site.row_bucket.iter().copied());
-            touched.extend(site.column_bucket);
+        for (&row, &delta) in deltas {
+            if delta == 0 {
+                continue;
+            }
+            let bucket = holds
+                .iter()
+                .find(|(_, indices)| indices.contains(&row))
+                .map(|(bucket, _)| *bucket)
+                .or_else(|| site.row_bucket.first().copied());
+            if let Some(bucket) = bucket {
+                *per_bucket
+                    .entry(bucket)
+                    .or_default()
+                    .entry(row)
+                    .or_default() += delta;
+            }
         }
-        self.refuse_if_patched(&touched, &where_)?;
-
-        // Prove the record and its row encode before mutating anything.
-        let staged = self.stage_store(&site, &write.record, &where_)?;
-
-        // Commit. Nothing below returns an error for a document that read this
-        // far: the list and tile objects were all decoded above.
-        for mutation in &write.mutations {
-            self.apply_mutation(mutation)?;
+        for (bucket, deltas) in per_bucket {
+            self.step_bucket_counts(bucket, &deltas)?;
         }
-        self.write_store(&site, staged)?;
-        Ok(previous)
+        Ok(())
     }
 
     /// Resolve a table for a *write*, where an ambiguous name is an error.
@@ -1499,14 +2035,13 @@ impl Document {
         Ok(())
     }
 
-    /// Where a cell's bytes live, and which side tables reach it.
-    fn cell_site(
-        &self,
-        table: &crate::table::Table,
-        row: usize,
-        column: usize,
-    ) -> Result<CellSite, Error> {
-        let where_ = format!("{} r{row}c{column}", table.name);
+    /// What a write to one table needs that does not change from cell to cell.
+    ///
+    /// Reading it is the expensive half of a cell write — the model, the data
+    /// store, the tile map and the side-table references — so a batch reads it
+    /// once and every cell of every row shares it.
+    fn table_site(&self, table: &crate::table::Table) -> Result<TableSite, Error> {
+        let where_ = &table.name;
         let model = self.archive_of(table.model)?;
         let store = model
             .bytes(4)
@@ -1519,76 +2054,29 @@ impl Document {
             .and_then(crate::pb::decode_nested)
             .ok_or_else(|| Error::Format(format!("{where_}: the data store has no tiles")))?;
         let tile_size = tiles.varint(2).unwrap_or(256) as usize;
-        let wanted_tile = row / tile_size;
-        let tile = tiles
-            .all(1)
-            .filter_map(|value| match value {
-                Value::Bytes(raw) => crate::pb::decode_nested(raw),
-                _ => None,
-            })
-            .find(|entry| entry.varint(1).unwrap_or(0) as usize == wanted_tile)
-            .and_then(|entry| entry.bytes(2).and_then(crate::table::reference))
-            .ok_or_else(|| Error::Format(format!("{where_}: no tile covers row {row}")))?;
-        if self.patched_objects().iter().any(|&(id, _)| id == tile) {
+        if tile_size == 0 {
             return Err(Error::Format(format!(
-                "{where_}: tile {tile} carries version patches, and rewriting it would \
-                 leave them describing the cell as it used to be"
+                "{where_}: the tile storage says a tile covers no rows at all"
             )));
         }
-
-        let archive = self.archive_of(tile)?;
-        let tile_row = row % tile_size;
-        let position = archive
-            .fields
-            .iter()
-            .position(|field| {
-                field.number == 5
-                    && matches!(&field.value, Value::Bytes(raw)
-                        if crate::pb::decode_nested(raw)
-                            .and_then(|info| info.varint(1))
-                            .unwrap_or(u64::MAX) as usize == tile_row)
-            })
-            .ok_or_else(|| {
-                Error::Format(format!(
-                    "{where_}: row {row} has no stored cells, and giving a row its first \
-                     one is not implemented"
-                ))
-            })?;
-        let Value::Bytes(raw) = &archive.fields[position].value else {
-            unreachable!("the position was found by matching on Bytes")
-        };
-        let info = crate::pb::decode_nested(raw)
-            .ok_or_else(|| Error::Format(format!("{where_}: row storage does not decode")))?;
-        let (Some(buffer), Some(offsets)) = (info.bytes(6), info.bytes(7)) else {
-            return Err(Error::Format(format!(
-                "{where_}: row {row} has no version-5 cell storage"
-            )));
-        };
-        let wide = archive.varint(8).unwrap_or(0) != 0 || info.varint(8).unwrap_or(0) != 0;
-
-        let slots = offsets.len() / 2;
-        if column >= slots {
-            return Err(Error::Format(format!(
-                "{where_}: the row's offset array names only {slots} columns"
-            )));
+        let mut by_index = std::collections::BTreeMap::new();
+        for value in tiles.all(1) {
+            let Value::Bytes(raw) = value else { continue };
+            let Some(entry) = crate::pb::decode_nested(raw) else {
+                continue;
+            };
+            let (Some(index), Some(tile)) = (
+                entry.varint(1),
+                entry.bytes(2).and_then(crate::table::reference),
+            ) else {
+                continue;
+            };
+            by_index.insert(index as usize, tile);
         }
-        let mut records: Vec<Option<Vec<u8>>> = vec![None; slots];
-        for (at, bytes) in crate::table::row_cells(buffer, offsets, wide)
-            .into_iter()
-            .flatten()
-        {
-            records[at] = Some(bytes.to_vec());
-        }
-        let record = records[column].clone();
 
-        Ok(CellSite {
-            tile,
-            tile_row: position,
-            wide,
-            records,
-            record,
-            column,
-            row,
+        Ok(TableSite {
+            tile_size,
+            tiles: by_index,
             strings: list(4),
             formats: list(22),
             controls: list(21),
@@ -1610,6 +2098,59 @@ impl Document {
         })
     }
 
+    /// The tile covering `row`, refused if it carries version patches.
+    fn tile_for_row(&self, site: &TableSite, row: usize, where_: &str) -> Result<u64, Error> {
+        let tile = *site
+            .tiles
+            .get(&(row / site.tile_size))
+            .ok_or_else(|| Error::Format(format!("{where_}: no tile covers row {row}")))?;
+        if self.patched_objects().iter().any(|&(id, _)| id == tile) {
+            return Err(Error::Format(format!(
+                "{where_}: tile {tile} carries version patches, and rewriting it would \
+                 leave them describing the cell as it used to be"
+            )));
+        }
+        Ok(tile)
+    }
+
+    /// Where a cell's bytes live, and which side tables reach it.
+    fn cell_site(
+        &self,
+        table: &crate::table::Table,
+        row: usize,
+        column: usize,
+    ) -> Result<CellSite, Error> {
+        let where_ = format!("{} r{row}c{column}", table.name);
+        let site = self.table_site(table)?;
+        let tile = self.tile_for_row(&site, row, &where_)?;
+        let archive = self.archive_of(tile)?;
+        let tile_row = row % site.tile_size;
+        let in_tile = TileIndex::of(&archive).row(&archive, tile_row, &where_)?;
+        if column >= in_tile.records.len() {
+            return Err(Error::Format(format!(
+                "{where_}: the row's offset array names only {} columns",
+                in_tile.records.len()
+            )));
+        }
+        let record = in_tile.records[column].clone();
+        Ok(CellSite {
+            tile,
+            tile_row: in_tile.position,
+            tile_row_index: tile_row,
+            fresh_row: in_tile.fresh,
+            wide: in_tile.wide,
+            records: in_tile.records,
+            record,
+            column,
+            // The *absolute* row: the header bucket counts cells by the row's
+            // index in the table, not by its index in the tile.
+            row,
+            formulas: site.formulas,
+            row_bucket: site.row_bucket,
+            column_bucket: site.column_bucket,
+        })
+    }
+
     /// Plan the new record and the reference-count changes it implies.
     ///
     /// **Pure**: it reads the document to decide what to do, but writes nothing.
@@ -1621,8 +2162,9 @@ impl Document {
     /// a document this crate wrote itself.
     fn rewrite_record(
         &self,
+        cache: &mut ListCache,
         table: &crate::table::Table,
-        site: &CellSite,
+        site: &TableSite,
         old: crate::table::CellRecord,
         value: &CellValue,
         where_: &str,
@@ -1673,7 +2215,7 @@ impl Document {
             let list = site
                 .strings
                 .ok_or_else(|| Error::Format(format!("{where_}: the table has no string list")))?;
-            let (key, fresh) = self.planned_string_key(list, text, where_)?;
+            let (key, fresh) = self.planned_string_key(cache, list, text, where_)?;
             record.string_id = Some(key);
             mutations.push(ListMutation::Intern {
                 list,
@@ -1718,36 +2260,20 @@ impl Document {
             let list = site
                 .formats
                 .ok_or_else(|| Error::Format(format!("{where_}: the table has no format list")))?;
-            let donor = table
-                .cells()
-                .iter()
-                .filter_map(|cell| {
-                    cell.record
-                        .format_id_in(slot)
-                        .map(|key| (cell.record.explicit_format().is_some(), key))
-                })
-                // A cell whose format nobody chose is the better loan: its key
-                // names the plain format for the slot rather than, say, the
-                // percentage a neighbour was given.
-                .min()
-                .map(|(_, key)| key)
-                // No cell of this table carries a format for the slot being
-                // written. That is every cell of a table `Document::new` just
-                // made, and it is also the header of a currency column being
-                // turned into a number — and those two want opposite answers.
-                // What separates them is whether the table shows any sign of
-                // formatting at all: a table whose every format is *automatic*
-                // has nothing to contradict, so the automatic entry is borrowed;
-                // a table holding a currency format somewhere has been formatted
-                // by someone, and guessing which of their formats this value
-                // wants is not this crate's to do.
-                .or_else(|| self.automatic_format(list, table))
-                .ok_or_else(|| {
-                    Error::Format(format!(
-                        "{where_}: no cell in this table carries a {slot:?} format to copy, \
-                         and one invented here would be a format the document never defined"
-                    ))
-                })?;
+            let donor = match cache.donors.iter().find(|(at, _)| *at == slot) {
+                Some((_, donor)) => *donor,
+                None => {
+                    let found = self.donor_format(cache, table, list, slot);
+                    cache.donors.push((slot, found));
+                    found
+                }
+            };
+            let donor = donor.ok_or_else(|| {
+                Error::Format(format!(
+                    "{where_}: no cell in this table carries a {slot:?} format to copy, \
+                     and one invented here would be a format the document never defined"
+                ))
+            })?;
             mutations.push(ListMutation::Retain { list, key: donor });
             record.set_format_id_in(slot, Some(donor));
 
@@ -1772,6 +2298,43 @@ impl Document {
         })
     }
 
+    /// The format key a cell of this slot borrows, or `None` if there is none
+    /// to borrow honestly.
+    ///
+    /// A cell whose format nobody chose is the better loan: its key names the
+    /// plain format for the slot rather than, say, the percentage a neighbour
+    /// was given — so the smallest `(chosen, key)` wins.
+    ///
+    /// When no cell of the table carries a format for the slot at all, the
+    /// answer depends on what the table looks like otherwise. That is every
+    /// cell of a table `Document::new` just made, and it is also the header of
+    /// a currency column being turned into a number — and those two want
+    /// opposite answers. What separates them is whether the table shows any
+    /// sign of formatting: a table whose every format is *automatic* has
+    /// nothing to contradict, so the automatic entry is borrowed; a table
+    /// holding a currency format somewhere has been formatted by someone, and
+    /// guessing which of their formats this value wants is not this crate's to
+    /// do.
+    fn donor_format(
+        &self,
+        cache: &mut ListCache,
+        table: &crate::table::Table,
+        list: u64,
+        slot: crate::table::FormatSlot,
+    ) -> Option<u32> {
+        table
+            .cells()
+            .iter()
+            .filter_map(|cell| {
+                cell.record
+                    .format_id_in(slot)
+                    .map(|key| (cell.record.explicit_format().is_some(), key))
+            })
+            .min()
+            .map(|(_, key)| key)
+            .or_else(|| self.automatic_format(cache, list, table))
+    }
+
     /// The key of the automatic format in a format list, if it holds one.
     ///
     /// `format_type` 260 is the one format that reads sensibly whatever the
@@ -1779,8 +2342,13 @@ impl Document {
     /// text cells included. Nothing else in the list will do: a currency format
     /// borrowed for a number is a format the caller did not ask for, and one
     /// this crate would then have written into a document silently.
-    fn automatic_format(&self, list: u64, table: &crate::table::Table) -> Option<u32> {
-        let entries = crate::table::DataList::decode(&self.archive_of(list).ok()?).entries;
+    fn automatic_format(
+        &self,
+        cache: &mut ListCache,
+        list: u64,
+        table: &crate::table::Table,
+    ) -> Option<u32> {
+        let entries = crate::table::DataList::decode(cache.read(self, list).ok()?).entries;
         let format_type = |key: u32| {
             entries
                 .get(&key)
@@ -1812,52 +2380,43 @@ impl Document {
             .map(|(key, _)| *key)
     }
 
-    /// Apply one planned reference-count change.
-    fn apply_mutation(&mut self, mutation: &ListMutation) -> Result<(), Error> {
+    /// Apply one planned reference-count change, in the cache.
+    ///
+    /// Nothing reaches the document until [`ListCache::flush`], which is what
+    /// keeps a batch's hundredth string from re-encoding the list a hundred
+    /// times — and what leaves the lists untouched when a later cell refuses.
+    fn apply_mutation(&self, cache: &mut ListCache, mutation: &ListMutation) -> Result<(), Error> {
         match mutation {
             ListMutation::Intern {
                 list,
                 text,
                 key,
                 fresh,
-            } => self.commit_intern(*list, text, *key, *fresh),
-            ListMutation::Retain { list, key } => self.retain_list_entry(*list, *key),
-            ListMutation::Release { list, key } => self.release_list_entry(*list, *key),
+            } => self.commit_intern(cache, *list, text, *key, *fresh),
+            ListMutation::Retain { list, key } => self.step_list_entry(cache, *list, *key, 1),
+            ListMutation::Release { list, key } => self.step_list_entry(cache, *list, *key, -1),
         }
     }
 
-    /// Re-encode the target row, without touching the tile.
+    /// Lay the row's records back out, without touching the tile.
     ///
-    /// The fallible half of storing a record: encoding a record whose flags name
-    /// a payload this crate cannot place, or a row grown past what an offset can
-    /// address, fails here — before any reference count has moved.
-    fn stage_store(
+    /// The last fallible step of a row's write: a row grown past what a 16-bit
+    /// offset can address fails here, before the tile is rewritten.
+    fn stage_row(
         &self,
         site: &CellSite,
-        record: &Option<crate::table::CellRecord>,
-        where_: &str,
+        appeared: Vec<usize>,
+        disappeared: Vec<usize>,
     ) -> Result<StagedRow, Error> {
-        let had = site.record.is_some();
-        let has = record.is_some();
-        let encoded = match record {
-            Some(record) => Some(
-                record
-                    .encode()
-                    .map_err(|e| Error::Format(format!("{where_}: {e}")))?,
-            ),
-            None => None,
-        };
-        let mut records = site.records.clone();
-        records[site.column] = encoded;
-        let (buffer, offsets) = crate::table::encode_row(&records, site.wide)
-            .map_err(|e| Error::Format(format!("{where_}: {e}")))?;
-        let cells = records.iter().filter(|r| r.is_some()).count() as u64;
+        let (buffer, offsets) = crate::table::encode_row(&site.records, site.wide)
+            .map_err(|e| Error::Format(format!("{}: {e}", site.row)))?;
+        let cells = site.records.iter().filter(|r| r.is_some()).count() as u64;
         Ok(StagedRow {
             cells,
             buffer,
             offsets,
-            had,
-            has,
+            appeared,
+            disappeared,
         })
     }
 
@@ -1868,19 +2427,43 @@ impl Document {
     /// write that `stage_store` and the list mutations have already committed to.
     fn write_store(&mut self, site: &CellSite, staged: StagedRow) -> Result<(), Error> {
         let mut tile = self.archive_of(site.tile)?;
-        let Value::Bytes(raw) = &tile.fields[site.tile_row].value else {
-            unreachable!("cell_site found this field by matching on Bytes")
-        };
-        let mut info = crate::pb::decode_nested(raw)
-            .ok_or_else(|| Error::Format("row storage does not decode".to_string()))?;
-        info.set(2, Value::Varint(staged.cells));
-        info.set(6, Value::Bytes(staged.buffer));
-        info.set(7, Value::Bytes(staged.offsets));
-        tile.fields[site.tile_row].value = Value::Bytes(info.encode());
+        if site.fresh_row {
+            // The row is brought into being in the shape `Document::new` writes
+            // and all three apps open: the pre-BNC pair (3, 4) present and
+            // empty, because they are `required` in the schema and meaningless
+            // in this storage version, and `numrows` counting one more row.
+            let mut info = Message::default();
+            info.set_in_order(1, Value::Varint(site.tile_row_index as u64));
+            info.set_in_order(2, Value::Varint(staged.cells));
+            info.set_in_order(3, Value::Bytes(Vec::new()));
+            info.set_in_order(4, Value::Bytes(staged.offsets.clone()));
+            info.set_in_order(5, Value::Varint(5));
+            info.set_in_order(6, Value::Bytes(staged.buffer));
+            info.set_in_order(7, Value::Bytes(staged.offsets));
+            tile.fields.insert(
+                site.tile_row,
+                crate::pb::Field {
+                    number: 5,
+                    value: Value::Bytes(info.encode()),
+                },
+            );
+            let rows = tile.varint(4).unwrap_or(0) + 1;
+            tile.set(4, Value::Varint(rows));
+        } else {
+            let Value::Bytes(raw) = &tile.fields[site.tile_row].value else {
+                unreachable!("cell_site found this field by matching on Bytes")
+            };
+            let mut info = crate::pb::decode_nested(raw)
+                .ok_or_else(|| Error::Format("row storage does not decode".to_string()))?;
+            info.set(2, Value::Varint(staged.cells));
+            info.set(6, Value::Bytes(staged.buffer));
+            info.set(7, Value::Bytes(staged.offsets));
+            tile.fields[site.tile_row].value = Value::Bytes(info.encode());
+        }
         self.set_archive(site.tile, &tile)?;
 
-        if staged.had != staged.has {
-            let step = if staged.has { 1i64 } else { -1 };
+        let step = staged.appeared.len() as i64 - staged.disappeared.len() as i64;
+        if step != 0 {
             let bucket = site
                 .row_bucket
                 .iter()
@@ -1890,11 +2473,32 @@ impl Document {
             if let Some(bucket) = bucket {
                 self.step_bucket_count(bucket, site.row, step)?;
             }
-            if let Some(bucket) = site.column_bucket {
-                self.step_bucket_count(bucket, site.column, step)?;
+        }
+        if let Some(bucket) = site.column_bucket {
+            for column in &staged.appeared {
+                self.step_bucket_count(bucket, *column, 1)?;
+            }
+            for column in &staged.disappeared {
+                self.step_bucket_count(bucket, *column, -1)?;
             }
         }
         Ok(())
+    }
+
+    /// Every row or column index this `TST.HeaderStorageBucket` has an entry
+    /// for — read once, so a batch does not decode the bucket per row.
+    fn bucket_indices(&self, bucket: u64) -> std::collections::BTreeSet<usize> {
+        let Ok(archive) = self.archive_of(bucket) else {
+            return Default::default();
+        };
+        archive
+            .all(2)
+            .filter_map(|value| match value {
+                Value::Bytes(raw) => crate::pb::decode_nested(raw)?.varint(1),
+                _ => None,
+            })
+            .map(|index| index as usize)
+            .collect()
     }
 
     /// Does this `TST.HeaderStorageBucket` have an entry for `index`?
@@ -1912,7 +2516,23 @@ impl Document {
     /// Move a row's or column's stored cell count, adding the entry if the row
     /// or column had none — which is what an all-empty column has.
     fn step_bucket_count(&mut self, bucket: u64, index: usize, step: i64) -> Result<(), Error> {
+        let mut one = std::collections::BTreeMap::new();
+        one.insert(index, step);
+        self.step_bucket_counts(bucket, &one)
+    }
+
+    /// The same, for many indices at once: one decode and one re-encode of the
+    /// bucket however many rows or columns moved.
+    fn step_bucket_counts(
+        &mut self,
+        bucket: u64,
+        deltas: &std::collections::BTreeMap<usize, i64>,
+    ) -> Result<(), Error> {
+        if deltas.values().all(|&delta| delta == 0) {
+            return Ok(());
+        }
         let mut archive = self.archive_of(bucket)?;
+        let mut left: std::collections::BTreeMap<usize, i64> = deltas.clone();
         for field in archive.fields.iter_mut() {
             if field.number != 2 {
                 continue;
@@ -1923,24 +2543,31 @@ impl Document {
             let Some(mut entry) = crate::pb::decode_nested(raw) else {
                 continue;
             };
-            if entry.varint(1).unwrap_or(u64::MAX) as usize != index {
+            let index = entry.varint(1).unwrap_or(u64::MAX) as usize;
+            let Some(step) = left.remove(&index) else {
+                continue;
+            };
+            if step == 0 {
                 continue;
             }
             let count = entry.varint(4).unwrap_or(0) as i64 + step;
             entry.set_in_order(4, Value::Varint(count.max(0) as u64));
             field.value = Value::Bytes(entry.encode());
-            return self.set_archive(bucket, &archive);
         }
-        if step > 0 {
+        // A row or column the bucket has no entry for is one that held no cells
+        // — an all-empty column has none — so a cell appearing there adds one.
+        for (index, step) in left {
+            if step <= 0 {
+                continue;
+            }
             let mut entry = Message::default();
             entry.set_in_order(1, Value::Varint(index as u64));
             entry.set_in_order(2, Value::Fixed32(0f32.to_le_bytes()));
             entry.set_in_order(3, Value::Varint(0));
             entry.set_in_order(4, Value::Varint(step as u64));
             archive.append_in_order(2, Value::Bytes(entry.encode()));
-            return self.set_archive(bucket, &archive);
         }
-        Ok(())
+        self.set_archive(bucket, &archive)
     }
 
     /// Decide the key interning `text` will use — without writing anything.
@@ -1958,37 +2585,17 @@ impl Document {
     /// is left as it was.
     fn planned_string_key(
         &self,
+        cache: &mut ListCache,
         list: u64,
         text: &str,
         where_: &str,
     ) -> Result<(u32, bool), Error> {
-        let archive = self.archive_of(list)?;
-        for value in archive.all(3) {
-            let Value::Bytes(raw) = value else { continue };
-            let Some(entry) = crate::pb::decode_nested(raw) else {
-                continue;
-            };
-            if entry.bytes(3) == Some(text.as_bytes()) {
-                return Ok((entry.varint(1).unwrap_or(0) as u32, false));
-            }
+        let index = cache.string_index(self, list)?;
+        if let Some(&key) = index.by_text.get(text.as_bytes()) {
+            return Ok((key, false));
         }
-
-        // Above the mark *and* above every key present, because the mark is
-        // only trustworthy while the app is the one maintaining it. Computed in
-        // 64 bits so the 32-bit ceiling is a refusal and not a wrap.
-        let highest = archive
-            .all(3)
-            .filter_map(|value| match value {
-                Value::Bytes(raw) => crate::pb::decode_nested(raw)?.varint(1),
-                _ => None,
-            })
-            .max()
-            .unwrap_or(0);
-        let candidate = archive
-            .varint(2)
-            .unwrap_or(0)
-            .max(highest.saturating_add(1))
-            .max(1);
+        // Computed in 64 bits so the 32-bit ceiling is a refusal and not a wrap.
+        let candidate = index.next;
         let key = u32::try_from(candidate).map_err(|_| {
             Error::Format(format!(
                 "{where_}: the string list's next key {candidate} does not fit the 32 bits a \
@@ -2002,8 +2609,15 @@ impl Document {
     ///
     /// `fresh` says which branch the plan chose: bump an existing entry's
     /// refcount, or append a new one under `key` and raise the mark past it.
-    fn commit_intern(&mut self, list: u64, text: &str, key: u32, fresh: bool) -> Result<(), Error> {
-        let mut archive = self.archive_of(list)?;
+    fn commit_intern(
+        &self,
+        cache: &mut ListCache,
+        list: u64,
+        text: &str,
+        key: u32,
+        fresh: bool,
+    ) -> Result<(), Error> {
+        let archive = cache.write(self, list)?;
         if !fresh {
             for field in archive.fields.iter_mut() {
                 if field.number != 3 {
@@ -2020,7 +2634,7 @@ impl Document {
                 }
                 entry.set_in_order(2, Value::Varint(entry.varint(2).unwrap_or(0) + 1));
                 field.value = Value::Bytes(entry.encode());
-                return self.set_archive(list, &archive);
+                return Ok(());
             }
             // The entry planning found is gone — impossible between plan and
             // apply, since nothing touches the list in between.
@@ -2035,25 +2649,34 @@ impl Document {
         entry.set_in_order(3, Value::Bytes(text.as_bytes().to_vec()));
         archive.set_in_order(2, Value::Varint(u64::from(key) + 1));
         archive.append_in_order(3, Value::Bytes(entry.encode()));
-        self.set_archive(list, &archive)
+        if let Some(index) = cache.strings.get_mut(&list) {
+            index.by_text.insert(text.as_bytes().to_vec(), key);
+            index.next = index.next.max(u64::from(key) + 1);
+        }
+        Ok(())
     }
 
-    fn retain_list_entry(&mut self, list: u64, key: u32) -> Result<(), Error> {
-        self.step_list_entry(list, key, 1)
-    }
-
-    /// Give up one reference to a `TableDataList` entry, dropping it at zero.
+    /// Move a `TableDataList` entry's reference count, dropping it at zero.
     ///
     /// Dropping is what the app does: emptying the one cell that held a string
     /// removed its entry outright, and the key was later handed out again to a
     /// different string.
-    fn release_list_entry(&mut self, list: u64, key: u32) -> Result<(), Error> {
-        self.step_list_entry(list, key, -1)
-    }
-
-    fn step_list_entry(&mut self, list: u64, key: u32, step: i64) -> Result<(), Error> {
-        let mut archive = self.archive_of(list)?;
+    ///
+    /// Retaining an entry that is not there is a *refusal*, not a no-op: the
+    /// only way to reach one is a plan made against a stale reading of the
+    /// list, and writing the cell anyway would leave it naming a key nothing
+    /// defines — which is precisely what `Table::audit` reports and what this
+    /// crate must not produce.
+    fn step_list_entry(
+        &self,
+        cache: &mut ListCache,
+        list: u64,
+        key: u32,
+        step: i64,
+    ) -> Result<(), Error> {
+        let archive = cache.write(self, list)?;
         let mut drop = None;
+        let mut found = false;
         for (at, field) in archive.fields.iter_mut().enumerate() {
             if field.number != 3 {
                 continue;
@@ -2067,6 +2690,7 @@ impl Document {
             if entry.varint(1).unwrap_or(0) as u32 != key {
                 continue;
             }
+            found = true;
             let count = entry.varint(2).unwrap_or(0) as i64 + step;
             if count <= 0 {
                 drop = Some(at);
@@ -2076,10 +2700,483 @@ impl Document {
             }
             break;
         }
-        if let Some(at) = drop {
-            archive.fields.remove(at);
+        if !found && step > 0 {
+            return Err(Error::Format(format!(
+                "list {list} has no entry {key} to take a reference to"
+            )));
         }
-        self.set_archive(list, &archive)
+        if let Some(at) = drop {
+            // The entry goes, so the index must forget the text — a later cell
+            // in the same batch given that text interns it afresh rather than
+            // naming a key nothing defines any more.
+            let gone = match &archive.fields[at].value {
+                Value::Bytes(raw) => crate::pb::decode_nested(raw)
+                    .and_then(|entry| entry.bytes(3).map(<[u8]>::to_vec)),
+                _ => None,
+            };
+            archive.fields.remove(at);
+            if let (Some(text), Some(index)) = (gone, cache.strings.get_mut(&list)) {
+                index.by_text.remove(&text);
+            }
+        }
+        Ok(())
+    }
+
+    // -- sizes and formats ---------------------------------------------------
+
+    /// Set a column's width in points, or put it back to the table's default.
+    ///
+    /// A row or column's size lives in its `TST.HeaderStorageBucket` entry, and
+    /// **a literal `0` there means "the table's default"** — which is what
+    /// every row and column of the corpus carries except the one column a user
+    /// dragged to 150 and the one row dragged to 40. `None` writes that zero.
+    ///
+    /// The table's *drawable* is not touched, and measurement says it must not
+    /// be: every table in the corpus has a frame 494pt wide whatever its
+    /// columns — three of them, seven of them, one of them 150pt — so the app
+    /// lays the table out from the column widths rather than from the frame.
+    pub fn set_column_width(
+        &mut self,
+        wanted: &str,
+        column: usize,
+        points: Option<f32>,
+    ) -> Result<(), Error> {
+        let table = self.table_for_write(wanted)?;
+        if column >= table.columns {
+            return Err(Error::Format(format!(
+                "{} c{column}: the table has {} column(s)",
+                table.name, table.columns
+            )));
+        }
+        let site = self.table_site(&table)?;
+        let bucket = site.column_bucket.ok_or_else(|| {
+            Error::Format(format!("{}: the table has no column header", table.name))
+        })?;
+        self.refuse_if_patched(&[bucket], &format!("{} c{column}", table.name))?;
+        self.set_bucket_size(bucket, column, points.unwrap_or(0.0))
+    }
+
+    /// Set a row's height in points, or put it back to the table's default.
+    ///
+    /// The row half of [`Document::set_column_width`], and the one asymmetry is
+    /// Apple's: a table's rows are counted across a *list* of buckets where its
+    /// columns share one, so the row's own bucket has to be found first.
+    pub fn set_row_height(
+        &mut self,
+        wanted: &str,
+        row: usize,
+        points: Option<f32>,
+    ) -> Result<(), Error> {
+        let table = self.table_for_write(wanted)?;
+        if row >= table.rows {
+            return Err(Error::Format(format!(
+                "{} r{row}: the table has {} row(s)",
+                table.name, table.rows
+            )));
+        }
+        let site = self.table_site(&table)?;
+        let bucket = site
+            .row_bucket
+            .iter()
+            .copied()
+            .find(|&id| self.bucket_has(id, row))
+            .or_else(|| site.row_bucket.first().copied())
+            .ok_or_else(|| Error::Format(format!("{}: the table has no row header", table.name)))?;
+        self.refuse_if_patched(&[bucket], &format!("{} r{row}", table.name))?;
+        self.set_bucket_size(bucket, row, points.unwrap_or(0.0))
+    }
+
+    /// Write field 2 of one `HeaderStorageBucket` entry, adding the entry if the
+    /// row or column has none — which is what a row holding no cells has.
+    fn set_bucket_size(&mut self, bucket: u64, index: usize, points: f32) -> Result<(), Error> {
+        if !points.is_finite() || points < 0.0 {
+            return Err(Error::Format(format!(
+                "{points} is not a size a row or column can have"
+            )));
+        }
+        let mut archive = self.archive_of(bucket)?;
+        for field in archive.fields.iter_mut() {
+            if field.number != 2 {
+                continue;
+            }
+            let Value::Bytes(raw) = &field.value else {
+                continue;
+            };
+            let Some(mut entry) = crate::pb::decode_nested(raw) else {
+                continue;
+            };
+            if entry.varint(1).unwrap_or(u64::MAX) as usize != index {
+                continue;
+            }
+            entry.set_in_order(2, Value::Fixed32(points.to_le_bytes()));
+            field.value = Value::Bytes(entry.encode());
+            return self.set_archive(bucket, &archive);
+        }
+        let mut entry = Message::default();
+        entry.set_in_order(1, Value::Varint(index as u64));
+        entry.set_in_order(2, Value::Fixed32(points.to_le_bytes()));
+        entry.set_in_order(3, Value::Varint(0));
+        entry.set_in_order(4, Value::Varint(0));
+        archive.append_in_order(2, Value::Bytes(entry.encode()));
+        self.set_archive(bucket, &archive)
+    }
+
+    /// Give cells a data format — the number of decimals, a currency, a date
+    /// pattern.
+    ///
+    /// A format is a `TSK.FormatStructArchive` interned in the table's FORMAT
+    /// list, and the archives written here are the ones Numbers wrote for the
+    /// same formats in `numbers-formats.numbers`, field for field: a number is
+    /// `{1: 256, 2: decimals, 4: 0, 5: 0}`, a currency the same with `{3: code,
+    /// 6: 0}`, a date `{1: 261, 14: pattern}`. `253` is the decimal count that
+    /// means "as many as it takes", which is what the app writes for a format
+    /// nobody has pinned.
+    ///
+    /// Three things travel with the format, and leaving any of them out gives a
+    /// cell the app draws the old way:
+    ///
+    /// 1. the key goes in the **slot the value type uses** — a percentage is a
+    ///    number format, a currency is its own slot;
+    /// 2. `format_kind` (the `0x1000` payload) names that slot, or the format
+    ///    is inert;
+    /// 3. **byte 6's bit is set**, which is the only thing separating a cell
+    ///    Numbers calls "number" from one it calls "automatic".
+    ///
+    /// Refused by name: a format whose family the cell's value cannot use (a
+    /// date pattern on a text cell), an empty cell, a cell holding rich text,
+    /// and a table with no format list.
+    pub fn set_format(
+        &mut self,
+        wanted: &str,
+        cells: impl IntoIterator<Item = (usize, usize)>,
+        format: &crate::table::Format,
+    ) -> Result<usize, Error> {
+        let table = self.table_for_write(wanted)?;
+        let site = self.table_site(&table)?;
+        let list = site.formats.ok_or_else(|| {
+            Error::Format(format!("{}: the table has no format list", table.name))
+        })?;
+        let archive = format.archive()?;
+
+        let cells: Vec<(usize, usize)> = cells.into_iter().collect();
+        let mut slots = Vec::with_capacity(cells.len());
+        for &(row, column) in &cells {
+            let where_ = format!("{} r{row}c{column}", table.name);
+            if row >= table.rows || column >= table.columns {
+                return Err(Error::Format(format!(
+                    "{where_}: the table is {}×{}",
+                    table.rows, table.columns
+                )));
+            }
+            let cell = table.cell(row, column).ok_or_else(|| {
+                Error::Format(format!(
+                    "{where_}: is empty, and a format on nothing is not something the app \
+                     writes — give the cell a value first"
+                ))
+            })?;
+            if cell.record.cell_type == cell_type::RICH_TEXT {
+                return Err(Error::Format(format!(
+                    "{where_}: holds rich text, whose formatting is its storage's business"
+                )));
+            }
+            // The slot the cell's value actually uses — `format_kind` when it
+            // has one, and what its type can use otherwise.
+            let slot = cell
+                .record
+                .current_format()
+                .or_else(|| crate::table::Format::slot_of(cell.record.cell_type))
+                .ok_or_else(|| {
+                    Error::Format(format!(
+                        "{where_}: holds {} and this crate cannot say which format slot that \
+                         uses",
+                        table.value(row, column).kind()
+                    ))
+                })?;
+            if !format.suits(slot) {
+                return Err(Error::Format(format!(
+                    "{where_}: holds {} and uses the {slot:?} format slot, so a {} format \
+                     would sit in the file and never be drawn — the slot follows the value's \
+                     type, and changing it is a value write",
+                    table.value(row, column).kind(),
+                    format.name()
+                )));
+            }
+            slots.push(slot);
+        }
+        self.refuse_if_patched(&[list], &table.name)?;
+
+        let restore = self.streams.clone();
+        match self.apply_format(&table, &site, &cells, &slots, list, archive) {
+            Ok(written) => Ok(written),
+            Err(e) => {
+                self.streams = restore;
+                Err(e)
+            }
+        }
+    }
+
+    /// The applying half of [`Document::set_format`], behind the snapshot.
+    fn apply_format(
+        &mut self,
+        table: &crate::table::Table,
+        site: &TableSite,
+        cells: &[(usize, usize)],
+        slots: &[crate::table::FormatSlot],
+        list: u64,
+        archive: Message,
+    ) -> Result<usize, Error> {
+        let mut cache = ListCache::default();
+        // One entry however many cells take it: a format is interned exactly as
+        // a string is, and an identical archive already in the list is reused
+        // rather than written twice.
+        let payload = archive.encode();
+        let key = match self.matching_format(&mut cache, list, &payload)? {
+            Some(key) => key,
+            // No references yet: every cell of the batch takes its own below,
+            // including the first — which is what keeps the count and the cells
+            // agreeing, and what `Table::audit` checks.
+            None => self.define_list_entry(&mut cache, list, 6, payload.clone(), 0)?,
+        };
+
+        let mut written = 0;
+        for (&(row, column), &slot) in cells.iter().zip(slots) {
+            let where_ = format!("{} r{row}c{column}", table.name);
+            let tile = self.tile_for_row(site, row, &where_)?;
+            let mut tile_archive = self.archive_of(tile)?;
+            let index = TileIndex::of(&tile_archive);
+            let mut in_tile = index.row(&tile_archive, row % site.tile_size, &where_)?;
+            let Some(bytes) = in_tile.records.get(column).cloned().flatten() else {
+                return Err(Error::Format(format!("{where_}: has no stored cell")));
+            };
+            let mut record = crate::table::decode_cell(&bytes)
+                .map_err(|e| Error::Format(format!("{where_}: {e}")))?;
+
+            // The cell keeps every format it was ever given, so only the slot
+            // being written gives its key up — and a cell already carrying this
+            // exact format is left alone, references and bytes both.
+            let previous = record.format_id_in(slot);
+            if previous == Some(key) {
+                continue;
+            }
+            if let Some(previous) = previous {
+                self.step_list_entry(&mut cache, list, previous, -1)?;
+            }
+            self.step_list_entry(&mut cache, list, key, 1)?;
+            record.set_format_id_in(slot, Some(key));
+            record.set_explicit_format(slot);
+            record.format_kind = Some(crate::table::format_kind_of(slot));
+            in_tile.records[column] = Some(
+                record
+                    .encode()
+                    .map_err(|e| Error::Format(format!("{where_}: {e}")))?,
+            );
+            in_tile.put(&mut tile_archive, &where_)?;
+            self.set_archive(tile, &tile_archive)?;
+            written += 1;
+        }
+        cache.flush(self)?;
+        Ok(written)
+    }
+
+    /// The key of a format entry whose archive is byte for byte this one.
+    fn matching_format(
+        &self,
+        cache: &mut ListCache,
+        list: u64,
+        payload: &[u8],
+    ) -> Result<Option<u32>, Error> {
+        let archive = cache.read(self, list)?;
+        for value in archive.all(3) {
+            let Value::Bytes(raw) = value else { continue };
+            let Some(entry) = crate::pb::decode_nested(raw) else {
+                continue;
+            };
+            if entry.bytes(6) == Some(payload) {
+                return Ok(entry.varint(1).map(|key| key as u32));
+            }
+        }
+        Ok(None)
+    }
+
+    // -- writing a formula ---------------------------------------------------
+
+    /// Give a cell a formula, written as text.
+    ///
+    /// `=SUM(B2:B4)` — the thing a spreadsheet library is for, and the one
+    /// place in this crate that builds a `TSCE` AST from nothing.
+    /// [`crate::formula_parse`] is the parser, and every node it emits was
+    /// copied from a formula the app wrote: the shapes were dumped out of
+    /// `numbers-formulas.numbers` node by node and are reproduced field for
+    /// field, down to the list node a parenthesis writes and the `5: 1` on
+    /// every colon tract.
+    ///
+    /// **The value is the caller's**, as it is for [`Document::fill_formula`]
+    /// and for the same reason: Numbers shows what is written in the cell until
+    /// something the formula reads changes, and this crate evaluates nothing.
+    /// Give the answer the formula would produce, or an answer the app will
+    /// correct the moment a precedent moves.
+    ///
+    /// The formula is *live*: its cell is registered in the calculation
+    /// engine's dependency graph ([`crate::calc`]), so the app recalculates it
+    /// whenever a cell it reads changes.
+    ///
+    /// Refused by name: a cell that already holds a formula (removing one is
+    /// `TSCE` surgery this crate does not do), a rich-text cell, a
+    /// merge-covered cell, an empty value, a table with no formula list, any
+    /// object carrying version patches — and, from the parser, everything whose
+    /// dependency edges this crate cannot write: another table, a whole row or
+    /// column, a header name, a function it does not know.
+    pub fn set_formula(
+        &mut self,
+        wanted: &str,
+        row: usize,
+        column: usize,
+        text: &str,
+        value: CellValue,
+    ) -> Result<(), Error> {
+        let table = self.table_for_write(wanted)?;
+        let where_ = format!("{} r{row}c{column}", table.name);
+        if row >= table.rows || column >= table.columns {
+            return Err(Error::Format(format!(
+                "{where_}: the table is {}×{}",
+                table.rows, table.columns
+            )));
+        }
+        if let Some(merge) = table.merge_covering(row, column) {
+            if (merge.row, merge.column) != (row, column) {
+                return Err(Error::Format(format!(
+                    "{where_}: covered by the merge that begins at row {} column {}",
+                    merge.row, merge.column
+                )));
+            }
+        }
+        if value == CellValue::Empty {
+            return Err(Error::Format(format!(
+                "{where_}: a formula cell cannot be empty — the value is the answer the app \
+                 shows until it recalculates, and this crate evaluates nothing"
+            )));
+        }
+
+        // The formula first, because it is what the caller most likely got
+        // wrong, and nothing has moved yet when it is refused.
+        let ast = crate::formula_parse::parse(text, (column as i64, row as i64))
+            .map_err(|e| Error::Format(format!("{where_}: {e}")))?;
+        let formula = crate::formula::Formula::from_ast(ast);
+        let precedents = crate::calc::precedents_of(&formula, row, column).ok_or_else(|| {
+            Error::Format(format!(
+                "{where_}: the formula reads something this crate cannot resolve to cells \
+                     of this table, and a formula the engine only half knows about is one the \
+                     app would recalculate wrongly"
+            ))
+        })?;
+
+        let site = self.cell_site(&table, row, column)?;
+        let list = site
+            .formulas
+            .ok_or_else(|| Error::Format(format!("{where_}: the table has no formula list")))?;
+        let old = match &site.record {
+            Some(bytes) => crate::table::decode_cell(bytes)
+                .map_err(|e| Error::Format(format!("{where_}: {e}")))?,
+            None => crate::table::CellRecord {
+                version: 5,
+                ..crate::table::CellRecord::default()
+            },
+        };
+        if old.formula_id.is_some() {
+            return Err(Error::Format(format!(
+                "{where_}: already holds a formula, and replacing one means taking its \
+                 dependency edges out of the calculation engine first"
+            )));
+        }
+        if old.cell_type == cell_type::RICH_TEXT || old.rich_id.is_some() {
+            return Err(Error::Format(format!(
+                "{where_}: holds rich text, whose words are in a TSWP storage rather than in \
+                 the table"
+            )));
+        }
+        self.refuse_if_patched(&[list, site.tile], &where_)?;
+
+        let table_site = self.table_site(&table)?;
+        let mut cache = ListCache::default();
+        let write = self.rewrite_record(&mut cache, &table, &table_site, old, &value, &where_)?;
+        let mut record = write
+            .record
+            .ok_or_else(|| Error::Format(format!("{where_}: a formula cell cannot be empty")))?;
+        // One reference, taken by the cell this write is about.
+        let key = self.define_list_entry(&mut cache, list, 5, formula.encode(), 1)?;
+        record.formula_id = Some(key);
+
+        let had = site.record.is_some();
+        let mut site = site;
+        site.records[site.column] = Some(
+            record
+                .encode()
+                .map_err(|e| Error::Format(format!("{where_}: {e}")))?,
+        );
+        let appeared = if had { Vec::new() } else { vec![site.column] };
+        let staged = self.stage_row(&site, appeared, Vec::new())?;
+        for mutation in &write.mutations {
+            self.apply_mutation(&mut cache, mutation)?;
+        }
+        cache.flush(self)?;
+        self.write_store(&site, staged)?;
+        crate::calc::register_formula(
+            self,
+            &table,
+            &crate::calc::Dependency {
+                row,
+                column,
+                precedents,
+            },
+        )?;
+        Ok(())
+    }
+
+    /// Put a new entry in a `TableDataList` and hand back its key.
+    ///
+    /// The generic half of interning: an entry is `{1: key, 2: refcount}` plus
+    /// one payload field whose number says what kind of list it is — 5 for a
+    /// formula, as 3 is for a string. The key is the same arithmetic
+    /// [`Document::planned_string_key`] does: above the list's own mark *and*
+    /// above every key present, because the mark is only trustworthy while the
+    /// app is the one maintaining it. `references` is the refcount the entry
+    /// starts with: one when the caller is the single user of it, zero when
+    /// each user takes its own.
+    fn define_list_entry(
+        &self,
+        cache: &mut ListCache,
+        list: u64,
+        field: u32,
+        payload: Vec<u8>,
+        references: u64,
+    ) -> Result<u32, Error> {
+        let archive = cache.write(self, list)?;
+        let highest = archive
+            .all(3)
+            .filter_map(|value| match value {
+                Value::Bytes(raw) => crate::pb::decode_nested(raw)?.varint(1),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
+        let candidate = archive
+            .varint(2)
+            .unwrap_or(0)
+            .max(highest.saturating_add(1))
+            .max(1);
+        let key = u32::try_from(candidate).map_err(|_| {
+            Error::Format(format!(
+                "list {list}: the next key {candidate} does not fit the 32 bits a \
+                 TableDataList key has"
+            ))
+        })?;
+        let mut entry = Message::default();
+        entry.set_in_order(1, Value::Varint(u64::from(key)));
+        entry.set_in_order(2, Value::Varint(references));
+        entry.set_in_order(field, Value::Bytes(payload));
+        archive.set_in_order(2, Value::Varint(u64::from(key) + 1));
+        archive.append_in_order(3, Value::Bytes(entry.encode()));
+        Ok(key)
     }
 
     // -- filling a formula ---------------------------------------------------
@@ -2224,7 +3321,9 @@ impl Document {
         // The value goes in through the same planner every other write uses —
         // string interning, format borrowing, reference counts and all — and
         // the formula key is the one thing added on top.
-        let write = self.rewrite_record(&table, &site, old, &value, &where_)?;
+        let table_site = self.table_site(&table)?;
+        let mut cache = ListCache::default();
+        let write = self.rewrite_record(&mut cache, &table, &table_site, old, &value, &where_)?;
         let mut record = write
             .record
             .ok_or_else(|| Error::Format(format!("{where_}: a formula cell cannot be empty")))?;
@@ -2232,10 +3331,19 @@ impl Document {
         let mut mutations = write.mutations;
         mutations.push(ListMutation::Retain { list, key: formula });
 
-        let staged = self.stage_store(&site, &Some(record), &where_)?;
+        let had = site.record.is_some();
+        let mut site = site;
+        site.records[site.column] = Some(
+            record
+                .encode()
+                .map_err(|e| Error::Format(format!("{where_}: {e}")))?,
+        );
+        let appeared = if had { Vec::new() } else { vec![site.column] };
+        let staged = self.stage_row(&site, appeared, Vec::new())?;
         for mutation in &mutations {
-            self.apply_mutation(mutation)?;
+            self.apply_mutation(&mut cache, mutation)?;
         }
+        cache.flush(self)?;
         self.write_store(&site, staged)?;
         crate::calc::register_formula(
             self,

@@ -183,6 +183,11 @@ iwork organise  Budget.numbers            # sort rules, filters, categories,
 iwork formulas  Budget.numbers            # every formula: cell, text, cached value
 iwork set-cell  Budget.numbers Zellarten B3 n:43 out.numbers
 iwork set-cell  Budget.numbers Zellarten 2 1 n:43 out.numbers   # the same cell
+iwork set-cells Budget.numbers Zellarten A2 rows.csv out.numbers  # a CSV block
+iwork set-formula Budget.numbers Zellarten C9 "=SUM(B2:B8)" n:1234 out.numbers
+iwork set-format Budget.numbers Zellarten B3 percent:1 out.numbers
+iwork set-width  Budget.numbers Zellarten 0 210 out.numbers
+iwork set-height Budget.numbers Zellarten 3 33  out.numbers
 iwork insert-row Budget.numbers Zellarten 8 out.numbers   # an empty row before index 8
 iwork insert-column Budget.numbers Zellarten 1 out.numbers   # …and a column
 
@@ -626,6 +631,11 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | Tables: names, sizes, header/footer counts, freeze flags | ✅ | ✅ | — (no fixture) |
 | Cell values: text, number, boolean, date, duration, currency, rich text | ✅ | ✅ | — |
 | Data formats and control cells (checkbox, rating, slider, stepper, pop-up) | ✅ | ✅ | — |
+| Write a data format: number, percent, scientific, currency, date pattern | — | ✅ | — |
+| A format goes in the slot the value uses; any other slot is refused | — | ✅ | — |
+| **The app draws the written format** — percent, €, decimals, date pattern | — | ✅ | — |
+| Write a column's width and a row's height; the frame is left alone | — | ✅ | — |
+| **The app reports both back exactly** | — | ✅ | — |
 | Merged ranges | — (none) | ✅ | — |
 | Every cell record consumed to the byte (every one in the corpus) | ✅ | ✅ | — |
 | **Every cell agrees with the app** (2943 compared) | — | ✅ | — |
@@ -639,6 +649,12 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | Version patches: the view state and a too-new chart carry them; no table archive does | ✅ | ✅ | ✅ |
 | Every list key resolves, every refcount matches, every cell count adds up | ✅ | ✅ | — |
 | Write a cell: text, number, boolean, date, duration, empty | ✅ | ✅ | — |
+| Give a row with no storage its first cell, in the shape the app writes | — | ✅ | — |
+| **The app reads back a value in a row that had no storage at all** | — | ✅ | — |
+| Write many cells in one pass: one decode per tile, list and bucket | ✅ | ✅ | — |
+| A batch and the same single writes produce the same document, byte for byte | ✅ | ✅ | — |
+| A refused cell leaves the whole batch unwritten | ✅ | ✅ | — |
+| **The app reads back a block written across three columns and two rows** | — | ✅ | — |
 | A written cell keeps its styles, format and undecoded bytes | ✅ | ✅ | — |
 | Writing a cell what it already holds changes no byte | ✅ | ✅ | — |
 | **The app reads back the written value** | ✅ | ✅ | — |
@@ -694,6 +710,10 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | The reference model: absolute/relative per axis, whole row, whole column | ✅ | ✅ | — |
 | Number literals from their decimal128, not from the double beside it | ✅ | ✅ | — |
 | Cross-table references resolve by identity — **proven by a renamed table** | — | ✅ | — |
+| Write a formula from its text: operators, precedence, functions, ranges | — | ✅ | — |
+| Every node matches the shape the app wrote for the same formula, byte for byte | — | ✅ | — |
+| The written cell is registered in the engine, so the app recalculates it | — | ✅ | — |
+| **The app prints the written formula back in its own spelling, and its value** | — | ✅ | — |
 | Header-name references, with quoting, scoping and ambiguity | ✅ | ✅ | — |
 | A stored `#REF!`, made by deleting a column a formula pointed at | — | ✅ | — |
 | `LET`/`LAMBDA`: bindings, continuations, symbols — the 14.4 shape of fields 34–37 | — | ✅ | — |
@@ -1078,6 +1098,28 @@ fuzzing story rather than half of it.
   simply unstyled, as though nothing had been done, and another crashed on open.
   `apply_text_style` and `create_text_style` maintain the declarations;
   `iwork check` reports any that are missing.
+- **A formula can be written from its text, and its answer cannot.**
+  `set_formula` parses `=SUM(B2:B4)` and writes the node stream the app writes —
+  every node copied from one Numbers wrote for the same formula, down to the
+  list node a parenthesis needs and the `5: 1` on every colon tract — and
+  registers the cell in the calculation engine so the app recalculates it. What
+  it cannot do is *evaluate*: the value the cell shows until a precedent moves
+  is the caller's to supply, exactly as for `fill_formula`. Refused by name:
+  a cell that already holds a formula, a reference to another table, a whole row
+  or column, a header name, a function this crate does not know, and any table
+  with no cell owner in the engine — which is every table this crate built from
+  nothing.
+- **A data format is written into the slot the value uses, and nowhere else.**
+  `set_format` gives a cell a number, percent, scientific, currency or date
+  format — the archive being the one the app wrote for the same format, down to
+  the `253` that means "as many decimals as it takes". What it will not do is
+  put a format in another slot: a currency format on a plain number cell is
+  ignored by Numbers, drawn as a plain number, so it is refused rather than
+  written into a file where it would sit and never show. The slot follows the
+  *value's type*, so making a number into a currency is a value write. Column
+  widths and row heights are one float each and the app reports them back
+  exactly; the table's frame is deliberately untouched, because the app lays a
+  table out from its columns and not from its frame.
 - **No layout, no rendering, no formula evaluation.** This reads and rewrites
   the document; it does not understand it. In particular, writing a cell a
   formula depends on leaves that formula's **cached value stale**. Numbers
@@ -1101,11 +1143,19 @@ fuzzing story rather than half of it.
   Keynote create a group or a movie, so nothing here writes one; the archives
   are decoded and carried through. Live video sources, recorded presentations
   and pencil annotations are on the never-author list by design.
-- **A cell is written one at a time, into a row that already has cells.**
-  `set_cell` changes a value in place. It does not add or remove rows and
-  columns, does not write a formula, does not touch rich-text cells, and gives
-  a row its first stored cell no more than it gives a table its first row —
-  each of those is refused by name.
+- **Cells are written in place, one or many at a time.** `set_cell` changes one
+  value; `set_cells` and `set_block` write a batch, and the batch is not just
+  sugar. A cell lives in its row's `TileRowInfo` and names strings and formats
+  in table-wide lists, so writing a table one cell at a time decodes and
+  re-encodes a tile and two lists per value — quadratic in the table, measured
+  at 15 000 cells in 206s. A batch decodes each tile, list and bucket once:
+  **100 000 cells in 0.26s**. It is also all or nothing, where a loop of single
+  writes stops half-applied. A row that holds no cells at all is no longer
+  refused — the first value written into one builds the `TileRowInfo` the row
+  never had, which is what makes an inserted row fillable. What is still
+  refused by name: a formula cell, a rich-text cell, a cell covered by a merge,
+  a value type this crate does not write, and adding or removing rows and
+  columns, which is `insert_row`/`insert_column`'s business.
 - **"iWork opens it" is not tested here, and it is not a formality.** The tests
   prove the bytes are structurally correct and survive an independent decode.
   They cannot prove an app will accept the result, and the difference is real:

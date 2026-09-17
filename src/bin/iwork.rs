@@ -122,6 +122,20 @@ tables
   iwork set-cell  <file> <table> <cell> <value> <out>
   iwork set-cell  <file> <table> <row> <col> <value> <out>
                                            write one value into one cell
+  iwork set-cells <file> <table> <cell> <csv> <out>
+                                           write a CSV file into the table,
+                                           its first field landing at <cell>
+  iwork set-formula <file> <table> <cell> <formula> <value> <out>
+                                           give a cell a formula and the value
+                                           it shows until the app recalculates
+  iwork set-format <file> <table> <cell> <format> <out>
+                                           a cell's data format: automatic,
+                                           number[:places], percent[:places],
+                                           scientific[:places],
+                                           currency:CODE[:places], date:PATTERN
+  iwork set-width  <file> <table> <column> <points>|default <out>
+  iwork set-height <file> <table> <row> <points>|default <out>
+                                           a column's width, a row's height
   iwork insert-row <file> <table> <at> <out>
                                            insert an empty row before index
                                            <at> (<at> == row count appends)
@@ -172,6 +186,8 @@ cell. A number is stored as a decimal rather than a float, so `n:0.1` is
 exactly a tenth.
 
   iwork set-cell Budget.numbers Sales B3 n:43 out.numbers
+  iwork set-cells Budget.numbers Sales A2 rows.csv out.numbers
+  iwork set-formula Budget.numbers Sales B9 '=SUM(B2:B8)' n:1234 out.numbers
 
 Pages document structure
 
@@ -318,6 +334,18 @@ fn main() -> ExitCode {
         ["set-cell", file, table, row, column, value, out] => index(row)
             .and_then(|row| Ok((row, index(column)?)))
             .and_then(|(row, column)| set_cell(file, table, row, column, value, out)),
+        ["set-cells", file, table, cell, csv, out] => reference_position(cell)
+            .and_then(|(row, column)| set_cells(file, table, (row, column), csv, out)),
+        ["set-formula", file, table, cell, formula, value, out] => reference_position(cell)
+            .and_then(|(row, column)| set_formula(file, table, row, column, formula, value, out)),
+        ["set-format", file, table, cell, format, out] => reference_position(cell)
+            .and_then(|(row, column)| set_format(file, table, row, column, format, out)),
+        ["set-width", file, table, column, points, out] => {
+            index(column).and_then(|column| set_size(file, table, column, points, true, out))
+        }
+        ["set-height", file, table, row, points, out] => {
+            index(row).and_then(|row| set_size(file, table, row, points, false, out))
+        }
         ["insert-column", file, table, at, out] => {
             index(at).and_then(|at| insert_column(file, table, at, out))
         }
@@ -3002,6 +3030,165 @@ fn set_cell(
         reference_name(row, column),
         describe_value(&previous),
         describe_value(&value)
+    );
+    save(&doc, out)
+}
+
+/// Write a CSV file into a table at a corner — the batch write, from a shell.
+///
+/// The inverse of `iwork csv`, and the reason [`Document::set_block`] exists:
+/// a table of data arrives as rows, not as one cell at a time. Values take the
+/// same `n:`/`b:`/`d:` prefixes `set-cell` does, so a column of numbers is
+/// `n:1,n:2,n:3`; an empty field leaves the cell alone rather than clearing it,
+/// because a CSV row shorter than the table is not a row of blanks.
+fn set_cells(
+    path: &str,
+    table: &str,
+    at: (usize, usize),
+    csv: &str,
+    out: &str,
+) -> Result<(), Error> {
+    let text = std::fs::read_to_string(csv)?;
+    let mut rows: Vec<Vec<iwork::table::CellValue>> = Vec::new();
+    for line in text.lines() {
+        if line.is_empty() {
+            rows.push(Vec::new());
+            continue;
+        }
+        rows.push(
+            line.split(',')
+                .map(|field| parse_cell_value(field.trim()))
+                .collect::<Result<Vec<_>, Error>>()?,
+        );
+    }
+    let mut doc = Document::open(path)?;
+    let written = doc.set_block(table, at, &rows)?;
+    println!(
+        "table {table}: {written} cell(s) written from {csv} at {}; rewrote {}",
+        reference_name(at.0, at.1),
+        doc.changed_streams().join(", ")
+    );
+    save(&doc, out)
+}
+
+/// Give a cell a formula, written as text, with the value it shows.
+fn set_formula(
+    path: &str,
+    table: &str,
+    row: usize,
+    column: usize,
+    formula: &str,
+    value: &str,
+    out: &str,
+) -> Result<(), Error> {
+    let value = parse_cell_value(value)?;
+    let mut doc = Document::open(path)?;
+    doc.set_formula(table, row, column, formula, value.clone())?;
+    println!(
+        "{} of table {table}: {formula} showing {}",
+        reference_name(row, column),
+        describe_value(&value)
+    );
+    save(&doc, out)
+}
+
+/// Give a cell a data format: `percent:1`, `currency:CHF:2`, `date:dd.MM.y`.
+fn set_format(
+    path: &str,
+    table: &str,
+    row: usize,
+    column: usize,
+    format: &str,
+    out: &str,
+) -> Result<(), Error> {
+    let format = parse_format(format)?;
+    let mut doc = Document::open(path)?;
+    doc.set_format(table, [(row, column)], &format)?;
+    println!(
+        "{} of table {table}: {}",
+        reference_name(row, column),
+        format.name()
+    );
+    save(&doc, out)
+}
+
+/// `automatic`, `number[:places]`, `percent[:places]`, `scientific[:places]`,
+/// `currency:CODE[:places]`, `date:PATTERN`.
+fn parse_format(text: &str) -> Result<iwork::table::Format, Error> {
+    use iwork::table::Format;
+    let mut parts = text.split(':');
+    let kind = parts.next().unwrap_or("");
+    let rest: Vec<&str> = parts.collect();
+    let places = |at: usize| -> Result<Option<u8>, Error> {
+        match rest.get(at) {
+            None => Ok(None),
+            Some(text) => text
+                .parse()
+                .map(Some)
+                .map_err(|_| Error::Format(format!("'{text}' is not a number of decimal places"))),
+        }
+    };
+    Ok(match kind {
+        "automatic" => Format::Automatic,
+        "number" => Format::Number {
+            decimals: places(0)?,
+        },
+        "percent" => Format::Percent {
+            decimals: places(0)?,
+        },
+        "scientific" => Format::Scientific {
+            decimals: places(0)?,
+        },
+        "currency" => Format::Currency {
+            code: rest
+                .first()
+                .ok_or_else(|| Error::Format("currency needs a code, as currency:CHF".into()))?
+                .to_string(),
+            decimals: places(1)?,
+        },
+        "date" => Format::DateTime {
+            // A date pattern has colons in it — `HH:mm` — so the rest of the
+            // argument is the pattern, not the next field.
+            pattern: rest.join(":"),
+        },
+        other => {
+            return Err(Error::Format(format!(
+                "'{other}' is not a format — automatic, number, percent, scientific, currency \
+                 or date"
+            )))
+        }
+    })
+}
+
+/// A column's width or a row's height, in points; `default` gives it back.
+fn set_size(
+    path: &str,
+    table: &str,
+    index: usize,
+    points: &str,
+    column: bool,
+    out: &str,
+) -> Result<(), Error> {
+    let size = match points {
+        "default" => None,
+        text => Some(
+            text.parse::<f32>()
+                .map_err(|_| Error::Format(format!("'{text}' is not a size in points")))?,
+        ),
+    };
+    let mut doc = Document::open(path)?;
+    if column {
+        doc.set_column_width(table, index, size)?;
+    } else {
+        doc.set_row_height(table, index, size)?;
+    }
+    println!(
+        "table {table}: {} {index} is now {}",
+        if column { "column" } else { "row" },
+        match size {
+            Some(points) => format!("{points} pt"),
+            None => "the table default".to_string(),
+        }
     );
     save(&doc, out)
 }

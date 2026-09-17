@@ -752,6 +752,79 @@ three of the four written now. What is left is the one that should be left.
 Filled in as phases complete: what was proven, by which test, against which
 fixture, and what the app accepted.
 
+- 2026-09-17 — **A formula from its text, and the app prints it back.**
+  `Document::set_formula` parses `=SUM($B$2:$B$3)*2` and writes the `TSCE` node
+  stream for it — the first AST this crate builds from nothing.
+
+  **Every node was copied, not invented.** The shapes came out of
+  `numbers-formulas.numbers` node by node (a throwaway dump of all 97 of its
+  formulas) and are reproduced field for field. Three that a writer gets wrong
+  and the fixture settles: **a parenthesis is a node** (`LIST{13:1}` after the
+  expression, not nothing); **the two coordinate encodings differ** — the single
+  cell's axes are zigzag, the colon tract's four lists are plain `int32`, so −1
+  is ten bytes; and **a number is written twice**, the double at field 4 and the
+  decimal128 halves at 42/43, the decimal being authoritative. A stored formula
+  archive is field 1 and nothing else, on all 97 — which is what makes building
+  one honest.
+
+  **Numbers is the oracle and it is a strong one here.** The app opens the
+  document, parses the stream, and prints the formula back *in its own
+  spelling*: `=SUM($B$2:$B$3)×2`, showing 1500. Written as `=B2+B3` into a
+  headed table it comes back as `=Menge Schrauben+Menge Muttern` — the same
+  archive, rendered the way the app renders a reference into a table with
+  headers. `tests/formula_write.rs::numbers_reads_back_a_formula_written_from_text`.
+
+  **The parser's surface is bounded by what the engine can be told.**
+  `calc::precedents_of` resolves references to cells of the same table and
+  nothing else, so the parser refuses by name everything whose edges cannot be
+  written: another table, a whole row or column, a header name, an unknown
+  function. A formula the engine only half knows about is one the app
+  recalculates wrongly, which is worse than no formula at all.
+
+  **The one gap this opened and did not close:** a table `Document::new` made
+  has no `TSCE.FormulaOwnerDependenciesArchive`, so it can hold no formula. The
+  refusal says so by name. Giving a new table an owner is the next piece of
+  "documents from nothing", and it is not written yet.
+
+- 2026-09-17 — **The first cell in a row, and the batch.** Two of the five gaps
+  between this crate and a spreadsheet library, closed together because the
+  second exposed the first.
+
+  **A row with no cells can now be given one.** `set_cell` used to refuse a row
+  with no `TileRowInfo` by name — which is every row `insert_row` had just made,
+  so inserting a row and filling it did not compose. The row is now *built*: the
+  shape `Document::new` writes and all three apps open, with the pre-BNC pair
+  present and empty, the entry placed in ascending `tile_row_index` order, the
+  offset array as long as its neighbours', and the tile's `numrows` counting it.
+  **Numbers reads the value back** out of a row inserted at index 8 of
+  `numbers-formats.numbers` (`tests/rows.rs::
+  numbers_reads_back_a_cell_in_a_row_that_had_none`), and resaves the document.
+
+  **`set_cells` and `set_block` write a batch in one pass**, and `set_cell` is
+  now one cell handed to the same path — so the two cannot drift, and the
+  existing app-verified single-cell tests guard both. The batch is *all or
+  nothing*: a refused cell leaves the document byte for byte as it was,
+  including the cells of the same batch already written.
+
+  **What the speed cost was, and where it went.** Filling a table one cell at a
+  time is quadratic three times over: the table is re-read per call, the tile
+  holding the row is decoded and re-encoded per cell, and the string list is
+  scanned per cell for the text *and* again for the next free key. Measured
+  before: 5000 cells in 21s, 15 000 in 206s. Each was found by measurement
+  rather than guessed — two rounds of "obvious" fixes (grouping by row, then
+  caching the tile index) moved nothing, and `sample` plus phase timers put 3155
+  of 3173ms in `rewrite_record`, which is the string scan. With the tile decoded
+  once per tile, the lists once per batch and a text→key index over the string
+  list: **100 000 cells in 0.26s**, saved in 21ms, `audit` clean —
+  a 5000× improvement on the same document, and linear.
+
+  The one behaviour change beyond the new API: `Retain` on a list entry that is
+  not there is now an error rather than a silent no-op. It cannot happen from a
+  plan made against a fresh reading, and if it ever does, the cell would name a
+  key nothing defines — which `Table::audit` reports and this crate must not
+  write. `iwork set-cells <doc> <table> <cell> <csv> <out>` is the shell half,
+  the inverse of `iwork csv`.
+
 - 2026-09-07 — **Phase 10 closed: all three apps open a document made from
   nothing.** Numbers and Keynote both fell within an hour of each other, and
   both to things the app said out loud:
