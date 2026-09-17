@@ -752,6 +752,44 @@ three of the four written now. What is left is the one that should be left.
 Filled in as phases complete: what was proven, by which test, against which
 fixture, and what the app accepted.
 
+- 2026-09-17 — **The owners a new table needs, and the app recalculating what
+  this crate wrote.** The gap `set_formula` opened and left open: a table built
+  from nothing had a `HauntedOwnerArchive` in its model and no
+  `TSCE.FormulaOwnerDependenciesArchive` anywhere, so `base_owner_uid` resolved
+  to nothing, the cell owner was never found, and every formula written into
+  such a table was refused by name.
+
+  **Two owners, not eleven.** The app writes about eleven per table — kinds 1,
+  3, 4, 5, 6, 8, 9, 10, 11, 12 and 35 — and what nine of them are for is not
+  established here, so they are not written: an owner whose purpose is unknown
+  is an object invented rather than copied. The two whose job can be stated are
+  the *haunted* owner (kind 35), whose field 12 carries the `base_owner_uid`
+  that every cross-table reference and every merge is written with, and the
+  *cell* owner (kind 1), whose uid **is** that base and whose field 11 points at
+  the table model. The join is model 84 → haunted uid → kind 35 → base uid →
+  kind 1. The rest of each archive is the empty shape every owner in the corpus
+  carries, sentinels and all.
+
+  An owner is not enough alone: the engine's dependency tracker indexes them
+  **twice**, and `numbers-values.numbers` shows the two agreeing exactly — 35
+  entries in the owner list (field 3), 35 references (field 6), 35 owner
+  objects. Both are written.
+
+  **The app is the only possible oracle here, and it answered.** Numbers does
+  not recalculate when a document opens, so a formula the engine knows nothing
+  about looks exactly like one it knows — until a cell it reads changes. A
+  document built from nothing, given `=SUM(A1:A4)` in A5 with a cached 100,
+  opens showing 100 and the formula; the app is then told to set A1 to 1000 and
+  **A5 becomes 1090**. That is the whole claim, and it needed a new probe —
+  `scripts/recalculation.sh`, which opens a document, reads the formula cell,
+  changes a precedent through the app itself and reads it again.
+
+  One thing the change broke and fixed: the owners go in after the package is
+  assembled, so a brand-new document reported its engine stream as *changed*
+  before anyone had edited it. `assemble` now re-baselines the package, because
+  `changed_streams` is how a caller sees what an edit touched — and how several
+  tests prove a refused edit touched nothing.
+
 - 2026-09-17 — **A clock in the output** (and a false lead).
   `SimpleFileOptions::default()` stamps every ZIP entry with **the current
   time**, so the same document saved twice a second apart came out as two

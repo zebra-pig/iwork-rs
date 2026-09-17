@@ -3901,6 +3901,8 @@ pub fn add_table(
 
     crate::drawable::hold(document, &container, info)?;
     document.declare_external_references();
+    // The new table's own `TSCE` owners, so a formula can be written into it.
+    crate::calc::give_tables_their_owners(document)?;
     Ok(info)
 }
 

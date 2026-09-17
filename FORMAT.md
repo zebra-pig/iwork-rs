@@ -2878,10 +2878,48 @@ formula written as `=B2+B3` in a table with headers is printed by the app as
 `=Menge Schrauben+Menge Muttern`: the same archive, rendered the way Numbers
 renders a reference into a headed table.
 
-**A table this crate made from nothing cannot be given a formula.** It has no
-`TSCE.FormulaOwnerDependenciesArchive`, so there is nowhere to register the
-cell, and an unregistered formula is one the app never recalculates. The
-refusal names it.
+### The owners a table needs before it can hold a formula
+
+A table made from nothing used to be unable to hold one: it had a
+`TSCE.HauntedOwnerArchive` in its model (field 84) and no
+`FormulaOwnerDependenciesArchive` anywhere, so `base_owner_uid` resolved to
+nothing and there was nowhere to register a cell. What the app writes per table
+is about **eleven** owners — `owner_kind` 1, 3, 4, 5, 6, 8, 9, 10, 11, 12 and
+35 — and what each is for is not established here. Two of them are, and those
+two are what this crate writes:
+
+| Kind | `formula_owner_uid` | The field that matters |
+|---|---|---|
+| 35, the *haunted* owner | the table's `haunted_uid` | **12**, `base_owner_uid` — the UUID every cross-table reference and every merge is written with |
+| 1, the *cell* owner | that same `base_owner_uid` | **11**, a `TSP.Reference` to the table model |
+
+The join is those two fields: model 84 → haunted uid → the kind-35 owner →
+`base_owner_uid` → the kind-1 owner, which is where a formula's dependency
+record goes. The rest of each archive is the empty shape every owner in the
+corpus carries — the six empty sub-lists of field 6, and fields 7 and 8 holding
+the saturation sentinels `{32767, 2147483647}` twice over, which is a range
+naming no rows and no columns.
+
+An owner is not enough on its own: the engine's **dependency tracker** (field 2
+of `TSCE.CalculationEngineArchive`) indexes them twice, and both are written —
+an entry `{1: internal_owner_id, 2: {}}` in its owner list (field 3), and a
+reference to the object in the repeated field 6. In `numbers-values.numbers`
+those two agree exactly: 35 entries, 35 references, 35 owner objects.
+
+The UUID is minted 35 below the haunted one, which is where the app puts it —
+every owner a table has is a numbered offset from one base — and moved down
+again if that value is taken. The arithmetic is *not* the join and nothing reads
+it that way; following it only keeps the document looking like one the app
+wrote.
+
+**Verified by the app, and only the app could verify it.** Numbers does not
+recalculate when a document opens, so a formula the engine knows nothing about
+looks exactly like one it knows — until something the formula reads changes.
+A document built from nothing, given `=SUM(A1:A4)` in A5 with a cached 100,
+opens showing 100; the app is then told to set A1 to 1000 and **A5 becomes
+1090**. `scripts/recalculation.sh` is that probe, and
+`tests/formula_write.rs::numbers_recalculates_a_formula_in_a_document_made_from_nothing`
+runs it.
 
 ### Cross-table references resolve by identity
 

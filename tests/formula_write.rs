@@ -282,25 +282,6 @@ fn a_written_formula_refuses_what_it_cannot_write() {
     );
 }
 
-/// A formula reading cells of a table this crate built from nothing is refused,
-/// because such a table has no cell owner in the calculation engine — and a
-/// formula the engine does not know about is one the app never recalculates.
-#[test]
-fn a_table_with_no_cell_owner_is_refused() {
-    let mut doc = Document::new_spreadsheet("Blatt", "T", 4, 2).unwrap();
-    let error = doc
-        .set_formula(
-            "T",
-            3,
-            0,
-            "=A1+A2",
-            CellValue::Number(Decimal::parse("0").unwrap()),
-        )
-        .expect_err("a table made from nothing has no owner")
-        .to_string();
-    assert!(error.contains("no cell owner"), "{error}");
-}
-
 /// The app is the oracle, and for a formula it is a strong one: Numbers parses
 /// the node stream this crate built from nothing, prints the formula back in
 /// its own spelling, and evaluates it.
@@ -349,6 +330,212 @@ fn numbers_reads_back_a_formula_written_from_text() {
     assert!(
         text.contains("\tC3\treal\t1500.0\t"),
         "the app did not report the formula's value:\n{text}"
+    );
+    let _ = std::fs::remove_file(&out);
+}
+
+// -- a table made from nothing can hold a formula -----------------------------
+
+/// A table this crate builds carries the two `TSCE` owners a formula needs.
+///
+/// It used to carry none: a `HauntedOwnerArchive` in the model and nothing in
+/// the calculation engine, so `base_owner_uid` resolved to nothing and every
+/// formula written into such a table was refused by name.
+#[test]
+fn a_table_made_from_nothing_has_its_owners() {
+    let doc = Document::new_spreadsheet("Blatt", "T", 4, 2).unwrap();
+    let table = doc.table("T").unwrap();
+    assert_ne!(
+        table.haunted_uid,
+        iwork::table::Uuid::default(),
+        "the model has no haunted owner"
+    );
+    assert_ne!(
+        table.base_uid,
+        iwork::table::Uuid::default(),
+        "the haunted owner does not lead to a base_owner_uid"
+    );
+    assert_ne!(table.base_uid, table.haunted_uid);
+
+    // Two owners: the haunted one that carries the join, and the cell owner a
+    // dependency record goes into.
+    let owners: Vec<iwork::pb::Message> = doc
+        .objects()
+        .filter(|(_, object)| object.message_type() == iwork::calc::TYPE_OWNER_DEPENDENCIES)
+        .filter_map(|(_, object)| iwork::pb::Message::decode(object.payload()).ok())
+        .collect();
+    assert_eq!(owners.len(), 2, "a new table has two owners");
+    let kinds: Vec<u64> = owners.iter().filter_map(|owner| owner.varint(3)).collect();
+    assert!(kinds.contains(&35) && kinds.contains(&1), "{kinds:?}");
+
+    // Every owner is registered in the engine's dependency tracker, both ways:
+    // its internal id in the owner list and its object in the references.
+    let engine = doc
+        .objects()
+        .find(|(_, object)| object.message_type() == iwork::calc::TYPE_ENGINE)
+        .map(|(_, object)| iwork::pb::Message::decode(object.payload()).unwrap())
+        .expect("a new spreadsheet has a calculation engine");
+    let tracker = engine
+        .bytes(2)
+        .and_then(iwork::pb::decode_nested)
+        .expect("the engine has a dependency tracker");
+    assert_eq!(tracker.all(6).count(), 2, "the tracker names two owners");
+    let listed = tracker
+        .bytes(3)
+        .and_then(iwork::pb::decode_nested)
+        .expect("the tracker has an owner list");
+    assert_eq!(listed.all(1).count(), 2);
+
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+    assert!(doc.undeclared_references().is_empty());
+}
+
+/// And the formula goes in, which is the point of the owners.
+#[test]
+fn a_document_made_from_nothing_takes_a_formula() {
+    let mut doc = Document::new_spreadsheet("Blatt", "T", 6, 2).unwrap();
+    let rows: Vec<Vec<CellValue>> = (1..=4)
+        .map(|n| {
+            vec![CellValue::Number(
+                Decimal::parse(&(n * 10).to_string()).unwrap(),
+            )]
+        })
+        .collect();
+    doc.set_block("T", (0, 0), &rows).unwrap();
+    doc.set_formula(
+        "T",
+        4,
+        0,
+        "=SUM(A1:A4)",
+        CellValue::Number(Decimal::parse("100").unwrap()),
+    )
+    .unwrap();
+
+    let table = doc.table("T").unwrap();
+    assert!(table.formula(4, 0).is_some(), "the cell holds no formula");
+    assert_eq!(
+        table.value(4, 0),
+        CellValue::Number(Decimal::parse("100").unwrap())
+    );
+    // The cell is in the engine's graph, which is what makes it live.
+    let records: usize = doc
+        .objects()
+        .filter(|(_, object)| object.message_type() == iwork::calc::TYPE_CELL_RECORD_TILE)
+        .filter_map(|(_, object)| iwork::pb::Message::decode(object.payload()).ok())
+        .map(|archive| archive.all(4).count())
+        .sum();
+    assert_eq!(records, 1, "the formula was not registered");
+    assert!(table.audit().is_empty(), "{:?}", table.audit());
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+}
+
+/// A table added to a document later gets owners of its own, and they collide
+/// with nothing.
+#[test]
+fn every_table_added_later_gets_its_own_owners() {
+    let mut doc = Document::new_spreadsheet("Erstes", "T1", 3, 2).unwrap();
+    doc.add_sheet("Zweites", "T2", 3, 2).unwrap();
+    doc.add_table("Zweites", "T3", 3, 2).unwrap();
+
+    let bases: std::collections::BTreeSet<iwork::table::Uuid> =
+        doc.tables().iter().map(|table| table.base_uid).collect();
+    assert_eq!(bases.len(), 3, "two tables share a base_owner_uid");
+    assert!(!bases.contains(&iwork::table::Uuid::default()));
+
+    // Each of the three takes a formula of its own, into its own owner.
+    for name in ["T1", "T2", "T3"] {
+        doc.set_formula(
+            name,
+            2,
+            1,
+            "=A1+A2",
+            CellValue::Number(Decimal::parse("0").unwrap()),
+        )
+        .unwrap_or_else(|e| panic!("{name}: {e}"));
+    }
+    let records: usize = doc
+        .objects()
+        .filter(|(_, object)| object.message_type() == iwork::calc::TYPE_CELL_RECORD_TILE)
+        .filter_map(|(_, object)| iwork::pb::Message::decode(object.payload()).ok())
+        .map(|archive| archive.all(4).count())
+        .sum();
+    assert_eq!(records, 3, "three formulas, three dependency records");
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+    for table in doc.tables() {
+        assert!(
+            table.audit().is_empty(),
+            "{}: {:?}",
+            table.name,
+            table.audit()
+        );
+    }
+}
+
+/// The app is the oracle, and for this claim it is the only one there is.
+///
+/// Numbers does not recalculate when a document opens — the value in the cell
+/// record is what it draws — so a formula the engine knows nothing about looks
+/// exactly like one it knows until something the formula reads changes. This
+/// changes one: the app itself sets `A1` to 1000, and `A5` has to follow.
+///
+/// Off unless `IWORK_APP_CHECK=1`.
+#[test]
+fn numbers_recalculates_a_formula_in_a_document_made_from_nothing() {
+    if std::env::var("IWORK_APP_CHECK").as_deref() != Ok("1") {
+        eprintln!("IWORK_APP_CHECK is not 1 — skipping the app round trip");
+        return;
+    }
+    let mut doc = Document::new_spreadsheet("Blatt", "T", 6, 2).unwrap();
+    let rows: Vec<Vec<CellValue>> = (1..=4)
+        .map(|n| {
+            vec![CellValue::Number(
+                Decimal::parse(&(n * 10).to_string()).unwrap(),
+            )]
+        })
+        .collect();
+    doc.set_block("T", (0, 0), &rows).unwrap();
+    doc.set_formula(
+        "T",
+        4,
+        0,
+        "=SUM(A1:A4)",
+        CellValue::Number(Decimal::parse("100").unwrap()),
+    )
+    .unwrap();
+
+    let out = std::env::temp_dir().join("iwork-owners.numbers");
+    let _ = std::fs::remove_file(&out);
+    doc.save(&out).unwrap();
+
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/recalculation.sh");
+    let output = std::process::Command::new(&script)
+        .args([out.to_str().unwrap(), "A5", "A1", "1000"])
+        .output()
+        .unwrap_or_else(|e| panic!("{}: {e}", script.display()));
+    assert!(
+        output.status.success(),
+        "Numbers would not open a document made from nothing:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+    let field = |line: &str, at: usize| -> String {
+        text.lines()
+            .find(|l| l.starts_with(line))
+            .unwrap_or_else(|| panic!("no {line} line in:\n{text}"))
+            .split('\t')
+            .nth(at)
+            .unwrap_or_default()
+            .to_string()
+    };
+    // The app parses the formula this crate built from nothing…
+    assert_eq!(field("on-open", 2), "=SUM(A1:A4)", "{text}");
+    assert_eq!(field("on-open", 1), "100.0", "{text}");
+    // …and recalculates it when a cell it reads changes, which only happens
+    // for a cell the engine's dependency graph reaches.
+    assert_eq!(
+        field("after-edit", 1),
+        "1090.0",
+        "the app did not recalculate:\n{text}"
     );
     let _ = std::fs::remove_file(&out);
 }

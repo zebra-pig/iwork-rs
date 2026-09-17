@@ -724,6 +724,9 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | Write a formula from its text: operators, precedence, functions, ranges | — | ✅ | — |
 | Every node matches the shape the app wrote for the same formula, byte for byte | — | ✅ | — |
 | The written cell is registered in the engine, so the app recalculates it | — | ✅ | — |
+| A table made from nothing carries the two `TSCE` owners a formula needs | — | ✅ | — |
+| Both owners are indexed in the engine's tracker, by id and by reference | — | ✅ | — |
+| **The app recalculates a formula in a document built from nothing** | — | ✅ | — |
 | **The app prints the written formula back in its own spelling, and its value** | — | ✅ | — |
 | Header-name references, with quoting, scoping and ambiguity | ✅ | ✅ | — |
 | A stored `#REF!`, made by deleting a column a formula pointed at | — | ✅ | — |
@@ -1117,9 +1120,11 @@ fuzzing story rather than half of it.
   it cannot do is *evaluate*: the value the cell shows until a precedent moves
   is the caller's to supply, exactly as for `fill_formula`. Refused by name:
   a cell that already holds a formula, a reference to another table, a whole row
-  or column, a header name, a function this crate does not know, and any table
-  with no cell owner in the engine — which is every table this crate built from
-  nothing.
+  or column, a header name, a function this crate does not know, and a table
+  with no cell owner in the calculation engine — which no longer includes the
+  tables this crate builds: a new table is given the two `TSCE` owners a formula
+  needs, and **Numbers recalculates a formula written into a document made from
+  nothing**.
 - **A row or column can be deleted, and the refusal list is longer than the
   insert's.** What goes takes its cells' references with it, which is the part an
   insert never has to do. Refused: the table's only row or column, a header or

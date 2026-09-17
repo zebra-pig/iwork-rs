@@ -946,6 +946,18 @@ impl Document {
         // declared, and working it out from the objects beats maintaining a list
         // while building them — the same call an edit makes.
         document.declare_external_references();
+        // A table made from nothing has a haunted owner in its model and no
+        // `TSCE` owner anywhere, and a table with no cell owner can hold no
+        // formula — `set_formula` refused every one of them by name. Giving the
+        // owners here is what makes a document made from nothing a spreadsheet
+        // rather than a grid of literals.
+        crate::calc::give_tables_their_owners(&mut document)?;
+        // The owners went in after the package was assembled, so the engine's
+        // stream no longer matches the bytes the document was built from. A
+        // document nobody has edited has to report no changed streams —
+        // `changed_streams` is how a caller sees what an edit touched, and how
+        // several tests prove a refused edit touched nothing.
+        document.package = document.saved_package();
         Ok(document)
     }
 

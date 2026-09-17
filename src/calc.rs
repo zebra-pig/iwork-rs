@@ -302,3 +302,234 @@ fn object_of_type(document: &crate::Document, message_type: u32) -> Option<u64> 
         .find(|(_, object)| object.message_type() == message_type)
         .map(|(_, object)| object.identifier)
 }
+
+// -- giving a new table its owners -------------------------------------------
+
+/// `owner_kind` of the owner that stands for the table itself, the one a
+/// `base_owner_uid` is reached through.
+const OWNER_KIND_HAUNTED: u64 = 35;
+/// `owner_kind` of the owner that holds a table's *cells* — the one
+/// [`register_formula`] writes a dependency into.
+const OWNER_KIND_CELLS: u64 = 1;
+
+/// Give every table that has none the `TSCE` owners a formula needs.
+///
+/// A table this crate builds from nothing has a `HauntedOwnerArchive` in its
+/// model (field 84) and nothing else: no `FormulaOwnerDependenciesArchive`
+/// anywhere, so `base_owner_uid` resolves to nothing, [`cell_owner`] finds
+/// nothing, and every formula written into it was refused by name. This is what
+/// closes that — two owners per table, copied from the ones Numbers writes:
+///
+/// * **kind 35, the haunted owner.** Its `formula_owner_uid` is the table's
+///   `haunted_uid` and its `base_owner_uid` (12) is the UUID this mints. That
+///   pair is the whole join: it is how a reader gets from the table to the
+///   identity every cross-table reference writes.
+/// * **kind 1, the cell owner.** Its `formula_owner_uid` *is* that
+///   `base_owner_uid`, and its field 11 points at the table model. This is the
+///   one a formula's dependency record goes into.
+///
+/// The app writes about eleven owners per table — kinds 3, 4, 5, 6, 8, 9, 10,
+/// 11, 12 besides these two — and what each is for is not established here.
+/// They are not written: an owner whose purpose is unknown is an object
+/// invented rather than copied, and the two that *are* written are the two
+/// whose job this crate can state. The rest of each archive is the empty shape
+/// every owner in the corpus carries, sentinels included.
+///
+/// Both owners are registered in the engine's dependency tracker the way the
+/// app registers one: an entry in its owner list (field 3) and a reference to
+/// the object (field 6). Nothing happens to a table that already has a cell
+/// owner, so this is safe to call after every write that makes a table.
+pub fn give_tables_their_owners(document: &mut crate::Document) -> Result<usize, Error> {
+    let Some(engine) = object_of_type(document, TYPE_ENGINE) else {
+        // No calculation engine: a document that holds no formulas and cannot
+        // be given one. Pages and Keynote documents without tables are here.
+        return Ok(0);
+    };
+
+    let wanted: Vec<(u64, crate::table::Uuid)> = document
+        .tables()
+        .into_iter()
+        .filter(|table| {
+            table.haunted_uid != crate::table::Uuid::default()
+                && cell_owner(document, table).ok().flatten().is_none()
+        })
+        .map(|table| (table.model, table.haunted_uid))
+        .collect();
+    if wanted.is_empty() {
+        return Ok(0);
+    }
+
+    // Every UID and every internal id already spoken for, so the new ones
+    // collide with nothing.
+    let mut taken: BTreeSet<(u64, u64)> = BTreeSet::new();
+    let mut highest = 0u64;
+    for (_, object) in document.objects() {
+        if object.message_type() != TYPE_OWNER_DEPENDENCIES {
+            continue;
+        }
+        let Ok(archive) = Message::decode(object.payload()) else {
+            continue;
+        };
+        if let Some(uid) = archive
+            .bytes(field::OWNER_UID)
+            .and_then(crate::pb::decode_nested)
+        {
+            taken.insert((uid.varint(1).unwrap_or(0), uid.varint(2).unwrap_or(0)));
+        }
+        highest = highest.max(archive.varint(field::OWNER_ID).unwrap_or(0));
+    }
+
+    let mut registered: Vec<(u64, u64)> = Vec::new(); // (object, internal id)
+    let mut grow = crate::create::Grow::new(document);
+    for (model, haunted) in &wanted {
+        // The app numbers a table's owners as offsets from one base, and its
+        // haunted owner sits 35 above the base. That arithmetic is *not* the
+        // join — the join is the lookup through field 12 — but following it
+        // keeps a document this crate writes looking like one the app wrote,
+        // and any free value serves when it is taken.
+        let mut base = crate::table::Uuid {
+            lower: haunted.lower.wrapping_sub(OWNER_KIND_HAUNTED),
+            upper: haunted.upper,
+        };
+        while taken.contains(&(base.lower, base.upper)) || base == *haunted {
+            base.lower = base.lower.wrapping_sub(1);
+        }
+        taken.insert((base.lower, base.upper));
+        taken.insert((haunted.lower, haunted.upper));
+
+        highest += 1;
+        let haunted_id = highest;
+        let haunted_object = grow.allocate();
+        highest += 1;
+        let cells_id = highest;
+        let cells_object = grow.allocate();
+
+        let mut haunted_archive = empty_owner(*haunted, haunted_id, OWNER_KIND_HAUNTED);
+        haunted_archive.set_in_order(
+            12,
+            Value::Bytes(
+                crate::create::message(vec![
+                    crate::create::varint(1, base.lower),
+                    crate::create::varint(2, base.upper),
+                ])
+                .encode(),
+            ),
+        );
+        let mut cells_archive = empty_owner(base, cells_id, OWNER_KIND_CELLS);
+        cells_archive.set_in_order(
+            11,
+            Value::Bytes(crate::create::message(vec![crate::create::varint(1, *model)]).encode()),
+        );
+
+        grow.beside(
+            engine,
+            haunted_object,
+            TYPE_OWNER_DEPENDENCIES,
+            &haunted_archive,
+        )?;
+        grow.beside(
+            engine,
+            cells_object,
+            TYPE_OWNER_DEPENDENCIES,
+            &cells_archive,
+        )?;
+        registered.push((haunted_object, haunted_id));
+        registered.push((cells_object, cells_id));
+    }
+    grow.finish()?;
+
+    // The engine's own index of them: one entry per internal id, one reference
+    // per object, both in the dependency tracker.
+    let mut archive = document.archive(engine)?;
+    let mut tracker = archive
+        .bytes(field::TRACKER)
+        .and_then(crate::pb::decode_nested)
+        .unwrap_or_default();
+    let mut owners = tracker
+        .bytes(3)
+        .and_then(crate::pb::decode_nested)
+        .unwrap_or_default();
+    for (object, id) in &registered {
+        owners.append_in_order(
+            1,
+            Value::Bytes(
+                crate::create::message(vec![
+                    crate::create::varint(1, *id),
+                    crate::create::nested(2, Vec::new()),
+                ])
+                .encode(),
+            ),
+        );
+        tracker.append_in_order(
+            6,
+            Value::Bytes(crate::create::message(vec![crate::create::varint(1, *object)]).encode()),
+        );
+    }
+    tracker.set_in_order(3, Value::Bytes(owners.encode()));
+    archive.set_in_order(field::TRACKER, Value::Bytes(tracker.encode()));
+    document.set_archive_of(engine, &archive)?;
+    Ok(wanted.len())
+}
+
+/// A `FormulaOwnerDependenciesArchive` with nothing in it.
+///
+/// The shape every owner in the corpus carries: the two saturation sentinels in
+/// 7 and 8 — a range that names no rows and no columns — the six empty
+/// sub-lists of field 6, and the five empty fields around them. An owner
+/// written without them is one whose `required` fields a parser cannot find.
+fn empty_owner(uid: crate::table::Uuid, id: u64, kind: u64) -> Message {
+    use crate::create::{message, nested, varint};
+    let sentinels = || {
+        let extent = || {
+            nested(
+                0,
+                vec![
+                    varint(1, 32767),
+                    varint(2, 2147483647),
+                    varint(3, 32767),
+                    varint(4, 2147483647),
+                ],
+            )
+            .value
+        };
+        message(vec![
+            crate::pb::Field {
+                number: 2,
+                value: extent(),
+            },
+            crate::pb::Field {
+                number: 3,
+                value: extent(),
+            },
+        ])
+    };
+    let empty = |number: u32| crate::pb::Field {
+        number,
+        value: Value::Bytes(Vec::new()),
+    };
+    message(vec![
+        nested(1, vec![varint(1, uid.lower), varint(2, uid.upper)]),
+        varint(2, id),
+        varint(3, kind),
+        empty(4),
+        empty(5),
+        nested(
+            6,
+            vec![empty(1), empty(2), empty(3), empty(4), empty(5), empty(7)],
+        ),
+        crate::pb::Field {
+            number: 7,
+            value: Value::Bytes(sentinels().encode()),
+        },
+        crate::pb::Field {
+            number: 8,
+            value: Value::Bytes(sentinels().encode()),
+        },
+        nested(9, vec![empty(1)]),
+        empty(10),
+        empty(13),
+        empty(14),
+        empty(15),
+        empty(16),
+    ])
+}
