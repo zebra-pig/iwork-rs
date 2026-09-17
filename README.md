@@ -8,6 +8,36 @@ so [`FORMAT.md`](FORMAT.md) writes down what it actually is, derived from real
 documents and checked by the tests in this repository.
 
 ```rust
+// A spreadsheet from nothing: no template, no Apple software.
+let mut doc = iwork::Document::new_spreadsheet("Sales", "Q1", 4, 2)?;
+let mut q1 = doc.table_mut("Q1")?;                 // by name, sheet+name or id
+
+q1.set_block("A1", &[vec!["Region", "Units"]])?;   // a block, in one pass
+q1.set("A2", "Zürich")?;                           // a string is a string
+q1.set("B2", 1_240)?;                              // a number is a number
+q1.set("B3", 980)?;
+
+// A real formula, registered in the calculation engine — Numbers recalculates
+// it when a figure above it changes. The value is what the cell shows until it
+// does: this crate writes formulas and evaluates none of them.
+q1.formula("B4", "=SUM(B2:B3)", 2_220)?;
+q1.format("B4", &Format::Number { decimals: Some(0) })?;
+q1.width(0, Some(140.0))?;
+
+doc.save("Sales.numbers")?;
+```
+
+**A sheet is not a grid.** This is where a Numbers document parts company with
+the shape a spreadsheet library usually assumes: a sheet is a *canvas* holding
+any number of tables, with charts, shapes and images beside them. `doc.sheets()`
+reports the sheets and what is drawn on each, `sheet.tables(&doc)` narrows that
+to the tables, and `doc.tables()` reports every table in the document whatever
+holds it — which is also how a table on a Pages page or a Keynote slide is
+reached. A table is named by a name that is unique, by its sheet *and* name, or
+by its identifier: `numbers-pivot.numbers` has a `Sales` on each of its two
+sheets, and a bare `"Sales"` is refused rather than guessed at.
+
+```rust
 let mut doc = iwork::Document::open("Report.pages")?;
 println!("{} document", doc.kind().as_str());      // "Pages"
 
@@ -652,6 +682,9 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | Every cell record re-encodes to the bytes it came from | ✅ | ✅ | — |
 | Version patches: the view state and a too-new chart carry them; no table archive does | ✅ | ✅ | ✅ |
 | Every list key resolves, every refcount matches, every cell count adds up | ✅ | ✅ | — |
+| A cell is named `"B3"` or `(2, 1)`, and reads back the same either way | ✅ | ✅ | ✅ |
+| A sheet's drawables, and the tables among them, in the sheet's own order | — | ✅ | — |
+| A table name two sheets share is refused, with both sheets named | — | ✅ | — |
 | Write a cell: text, number, boolean, date, duration, empty | ✅ | ✅ | — |
 | Give a row with no storage its first cell, in the shape the app writes | — | ✅ | — |
 | **The app reads back a value in a row that had no storage at all** | — | ✅ | — |

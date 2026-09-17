@@ -224,6 +224,135 @@ impl ListCache {
     }
 }
 
+/// One table, held for writing — see [`Document::table_mut`].
+///
+/// A forwarding layer and nothing more: every method here calls the `Document`
+/// method of the same name with the table already resolved, so there is one
+/// implementation of each write and one set of refusals behind both.
+pub struct TableHandle<'a> {
+    document: &'a mut Document,
+    /// The table's identifier as text, which is what the write path takes and
+    /// what makes it unambiguous whatever the caller named.
+    table: String,
+}
+
+impl TableHandle<'_> {
+    /// The table as it is now — the snapshot to read many cells from.
+    pub fn read(&self) -> crate::table::Table {
+        self.document
+            .table(&self.table)
+            .expect("the handle resolved this table")
+    }
+
+    /// The table's identifier, for a caller that wants to keep it.
+    pub fn identifier(&self) -> u64 {
+        self.table.parse().expect("resolved from an identifier")
+    }
+
+    /// One cell's value. Reading many is [`TableHandle::read`] — this decodes
+    /// the table each time it is called.
+    pub fn value(&self, cell: impl Into<crate::table::CellRef>) -> Result<CellValue, Error> {
+        let (row, column) = cell.into().resolve()?;
+        Ok(self.read().value(row, column))
+    }
+
+    /// Write one cell, and hand back what it held.
+    pub fn set(
+        &mut self,
+        cell: impl Into<crate::table::CellRef>,
+        value: impl Into<CellValue>,
+    ) -> Result<CellValue, Error> {
+        let (row, column) = cell.into().resolve()?;
+        self.document
+            .set_cell(&self.table, row, column, value.into())
+    }
+
+    /// Write a rectangle of values, the first landing at `at`.
+    ///
+    /// The batch write: one pass over each tile, each list and each header
+    /// bucket however many cells are given, and all or nothing if one is
+    /// refused. See [`Document::set_block`].
+    pub fn set_block<V: Into<CellValue> + Clone>(
+        &mut self,
+        at: impl Into<crate::table::CellRef>,
+        rows: &[Vec<V>],
+    ) -> Result<usize, Error> {
+        let at = at.into().resolve()?;
+        let rows: Vec<Vec<CellValue>> = rows
+            .iter()
+            .map(|row| row.iter().cloned().map(Into::into).collect())
+            .collect();
+        self.document.set_block(&self.table, at, &rows)
+    }
+
+    /// Give a cell a formula, with the value it shows until the app
+    /// recalculates. See [`Document::set_formula`].
+    pub fn formula(
+        &mut self,
+        cell: impl Into<crate::table::CellRef>,
+        formula: &str,
+        value: impl Into<CellValue>,
+    ) -> Result<(), Error> {
+        let (row, column) = cell.into().resolve()?;
+        self.document
+            .set_formula(&self.table, row, column, formula, value.into())
+    }
+
+    /// Give a cell a data format. See [`Document::set_format`].
+    pub fn format(
+        &mut self,
+        cell: impl Into<crate::table::CellRef>,
+        format: &crate::table::Format,
+    ) -> Result<(), Error> {
+        let cell = cell.into().resolve()?;
+        self.document.set_format(&self.table, [cell], format)?;
+        Ok(())
+    }
+
+    /// A column's width in points, or `None` for the table's default.
+    pub fn width(&mut self, column: usize, points: Option<f32>) -> Result<(), Error> {
+        self.document.set_column_width(&self.table, column, points)
+    }
+
+    /// A row's height in points, or `None` for the table's default.
+    pub fn height(&mut self, row: usize, points: Option<f32>) -> Result<(), Error> {
+        self.document.set_row_height(&self.table, row, points)
+    }
+
+    pub fn insert_row(&mut self, at: usize) -> Result<(), Error> {
+        self.document.insert_row(&self.table, at)
+    }
+
+    pub fn delete_row(&mut self, at: usize) -> Result<(), Error> {
+        self.document.delete_row(&self.table, at)
+    }
+
+    pub fn insert_column(&mut self, at: usize) -> Result<(), Error> {
+        self.document.insert_column(&self.table, at)
+    }
+
+    pub fn delete_column(&mut self, at: usize) -> Result<(), Error> {
+        self.document.delete_column(&self.table, at)
+    }
+
+    /// Merge a rectangle into one cell, its top-left at `cell`.
+    pub fn merge(
+        &mut self,
+        cell: impl Into<crate::table::CellRef>,
+        rows: usize,
+        columns: usize,
+    ) -> Result<(), Error> {
+        let (row, column) = cell.into().resolve()?;
+        self.document
+            .merge_cells(&self.table, row, column, rows, columns)
+    }
+
+    pub fn unmerge(&mut self, cell: impl Into<crate::table::CellRef>) -> Result<(), Error> {
+        let (row, column) = cell.into().resolve()?;
+        self.document.unmerge_cells(&self.table, row, column)
+    }
+}
+
 /// What a write to one table needs that does not change from cell to cell: the
 /// tile map and the side tables every row of it shares.
 struct TableSite {
@@ -1686,6 +1815,43 @@ impl Document {
         tables
     }
 
+    /// Every sheet of a Numbers document, in the order the tabs show them.
+    ///
+    /// **A sheet is not a grid.** This is where a Numbers document parts
+    /// company with the spreadsheet everyone pictures: a sheet is a *canvas*,
+    /// and what it holds is a list of drawables — any number of tables, and
+    /// charts, shapes, images and text boxes beside them. Two tables on one
+    /// sheet is ordinary, and they may share nothing but the page they are
+    /// drawn on. So this reports the sheet and what is on it, and
+    /// [`Sheet::tables`] narrows that list to the tables rather than pretending
+    /// the sheet is one.
+    ///
+    /// Pages and Keynote have no sheets — a table there hangs off a page or a
+    /// slide — so this is empty for them and [`Document::tables`] is the way in.
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), iwork::Error> {
+    /// # let doc = iwork::Document::open("Budget.numbers")?;
+    /// for sheet in doc.sheets() {
+    ///     println!("{} — {} drawable(s)", sheet.name, sheet.drawables.len());
+    ///     for table in sheet.tables(&doc) {
+    ///         println!("  table {} — {}×{}", table.name, table.rows, table.columns);
+    ///     }
+    /// }
+    /// # Ok(()) }
+    /// ```
+    pub fn sheets(&self) -> Vec<crate::table::Sheet> {
+        crate::table::sheets(self)
+    }
+
+    /// One sheet by name or by identifier.
+    pub fn sheet(&self, wanted: &str) -> Option<crate::table::Sheet> {
+        let by_id: Option<u64> = wanted.parse().ok();
+        self.sheets()
+            .into_iter()
+            .find(|sheet| Some(sheet.identifier) == by_id || sheet.name == wanted)
+    }
+
     /// One table by its `TST.TableInfoArchive` identifier, or by name.
     pub fn table(&self, wanted: &str) -> Option<crate::table::Table> {
         let by_id: Option<u64> = wanted.parse().ok();
@@ -1818,7 +1984,11 @@ impl Document {
         let mut by_row: std::collections::BTreeMap<usize, Vec<(usize, CellValue)>> =
             std::collections::BTreeMap::new();
         for (row, column, value) in cells {
-            let where_ = format!("{} r{row}c{column}", table.name);
+            let where_ = format!(
+                "{} {}",
+                table.name,
+                crate::table::CellRef::Index(row, column)
+            );
             if row >= table.rows || column >= table.columns {
                 return Err(Error::Format(format!(
                     "{where_}: the table is {}×{}",
@@ -1916,7 +2086,11 @@ impl Document {
                 let mut in_tile = index.row(&archive, row % site.tile_size, &where_)?;
                 let mut changed = false;
                 for (column, value) in cells {
-                    let where_ = format!("{} r{row}c{column}", table.name);
+                    let where_ = format!(
+                        "{} {}",
+                        table.name,
+                        crate::table::CellRef::Index(row, column)
+                    );
                     let slots = in_tile.records.len();
                     if column >= slots {
                         return Err(Error::Format(format!(
@@ -2205,7 +2379,11 @@ impl Document {
         row: usize,
         column: usize,
     ) -> Result<CellSite, Error> {
-        let where_ = format!("{} r{row}c{column}", table.name);
+        let where_ = format!(
+            "{} {}",
+            table.name,
+            crate::table::CellRef::Index(row, column)
+        );
         let site = self.table_site(table)?;
         let tile = self.tile_for_row(&site, row, &where_)?;
         let archive = self.archive_of(tile)?;
@@ -2807,6 +2985,83 @@ impl Document {
         Ok(())
     }
 
+    // -- working with one table ----------------------------------------------
+
+    /// A handle for writing to one table, by any of the ways a table can be
+    /// named.
+    ///
+    /// Everything it does, the methods on [`Document`] already do; what it adds
+    /// is that the table is resolved **once** and named in one place, and that
+    /// a cell can be given as `"B3"`:
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), iwork::Error> {
+    /// let mut doc = iwork::Document::new_spreadsheet("Sales", "Q1", 9, 3)?;
+    /// let mut q1 = doc.table_mut("Q1")?;
+    /// q1.set("A1", "Region")?;
+    /// q1.set("B1", 1_240)?;
+    /// q1.set("C1", 184_300.0)?;
+    /// q1.formula("B9", "=SUM(B1:B8)", 1_240)?;
+    /// q1.width(0, Some(210.0))?;
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// **A table is addressed within its sheet when it has to be.** A Numbers
+    /// sheet holds any number of tables, and two sheets may hold tables of the
+    /// same name — `numbers-pivot.numbers` has a `Sales` on each of its two
+    /// sheets — so a bare name that is not unique is refused, and
+    /// `("Pivot Table Basics", "Sales")` or the identifier says which.
+    ///
+    /// The handle stores no cells, so it cannot go stale: every call reads what
+    /// is there now. That also means reading cell by cell re-reads the table
+    /// each time — [`TableHandle::read`] hands back a snapshot for that.
+    pub fn table_mut<'a>(
+        &'a mut self,
+        table: impl Into<crate::table::TableRef<'a>>,
+    ) -> Result<TableHandle<'a>, Error> {
+        let wanted = table.into();
+        let identifier = self.resolve_table(&wanted)?;
+        Ok(TableHandle {
+            document: self,
+            table: identifier.to_string(),
+        })
+    }
+
+    /// Which table a [`crate::table::TableRef`] names, refusing an ambiguous
+    /// one by name.
+    fn resolve_table(&self, wanted: &crate::table::TableRef<'_>) -> Result<u64, Error> {
+        use crate::table::TableRef;
+        let tables = self.tables();
+        let matches: Vec<&crate::table::Table> = match wanted {
+            TableRef::Identifier(id) => tables.iter().filter(|t| t.identifier == *id).collect(),
+            TableRef::Name(name) => tables.iter().filter(|t| t.name == *name).collect(),
+            TableRef::On(sheet, name) => tables
+                .iter()
+                .filter(|t| t.name == *name && t.sheet.as_deref() == Some(*sheet))
+                .collect(),
+        };
+        match matches.len() {
+            1 => Ok(matches[0].identifier),
+            0 => Err(Error::Format(format!("no table {wanted}"))),
+            _ => {
+                let where_ = matches
+                    .iter()
+                    .map(|t| match &t.sheet {
+                        Some(sheet) => format!("{} on {sheet:?}", t.identifier),
+                        None => t.identifier.to_string(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Err(Error::Format(format!(
+                    "{wanted} names {} tables ({where_}) — a sheet holds any number of tables \
+                     and two sheets may hold one name, so say which: (\"sheet\", \"table\") or \
+                     the identifier",
+                    matches.len()
+                )))
+            }
+        }
+    }
+
     // -- sizes and formats ---------------------------------------------------
 
     /// Set a column's width in points, or put it back to the table's default.
@@ -2946,7 +3201,11 @@ impl Document {
         let cells: Vec<(usize, usize)> = cells.into_iter().collect();
         let mut slots = Vec::with_capacity(cells.len());
         for &(row, column) in &cells {
-            let where_ = format!("{} r{row}c{column}", table.name);
+            let where_ = format!(
+                "{} {}",
+                table.name,
+                crate::table::CellRef::Index(row, column)
+            );
             if row >= table.rows || column >= table.columns {
                 return Err(Error::Format(format!(
                     "{where_}: the table is {}×{}",
@@ -3025,7 +3284,11 @@ impl Document {
 
         let mut written = 0;
         for (&(row, column), &slot) in cells.iter().zip(slots) {
-            let where_ = format!("{} r{row}c{column}", table.name);
+            let where_ = format!(
+                "{} {}",
+                table.name,
+                crate::table::CellRef::Index(row, column)
+            );
             let tile = self.tile_for_row(site, row, &where_)?;
             let mut tile_archive = self.archive_of(tile)?;
             let index = TileIndex::of(&tile_archive);
@@ -3120,7 +3383,11 @@ impl Document {
         value: CellValue,
     ) -> Result<(), Error> {
         let table = self.table_for_write(wanted)?;
-        let where_ = format!("{} r{row}c{column}", table.name);
+        let where_ = format!(
+            "{} {}",
+            table.name,
+            crate::table::CellRef::Index(row, column)
+        );
         if row >= table.rows || column >= table.columns {
             return Err(Error::Format(format!(
                 "{where_}: the table is {}×{}",
@@ -3300,7 +3567,12 @@ impl Document {
         value: Option<CellValue>,
     ) -> Result<(), Error> {
         let table = self.table_for_write(wanted)?;
-        let where_ = format!("{} r{}c{} → r{}c{}", table.name, from.0, from.1, to.0, to.1);
+        let where_ = format!(
+            "{} {} → {}",
+            table.name,
+            crate::table::CellRef::Index(from.0, from.1),
+            crate::table::CellRef::Index(to.0, to.1)
+        );
         for (row, column) in [from, to] {
             if row >= table.rows || column >= table.columns {
                 return Err(Error::Format(format!(
@@ -4034,7 +4306,11 @@ impl Document {
         columns: usize,
     ) -> Result<(), Error> {
         let table = self.table_for_write(wanted)?;
-        let where_ = format!("{}: merge r{row}c{column} {rows}×{columns}", table.name);
+        let where_ = format!(
+            "{}: merge {} {rows}×{columns}",
+            table.name,
+            crate::table::CellRef::Index(row, column)
+        );
         if rows == 0 || columns == 0 {
             return Err(Error::Format(format!("{where_}: an empty range")));
         }
@@ -4124,7 +4400,11 @@ impl Document {
     /// the app only ever raises it.
     pub fn unmerge_cells(&mut self, wanted: &str, row: usize, column: usize) -> Result<(), Error> {
         let table = self.table_for_write(wanted)?;
-        let where_ = format!("{}: unmerge r{row}c{column}", table.name);
+        let where_ = format!(
+            "{}: unmerge {}",
+            table.name,
+            crate::table::CellRef::Index(row, column)
+        );
         let merge = table
             .merges
             .iter()

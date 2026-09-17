@@ -1013,6 +1013,280 @@ pub enum CellValue {
     Unknown(u8),
 }
 
+/// A sheet of a Numbers document: a canvas, and what is drawn on it.
+///
+/// **Not a grid.** A sheet holds a *list of drawables* — any number of tables,
+/// and charts, shapes, images and text boxes beside them — which is the one
+/// place a Numbers document refuses to be modelled the way a spreadsheet
+/// usually is. [`Sheet::tables`] picks the tables out of that list; the list
+/// itself is what the sheet actually holds, in the order it holds them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sheet {
+    /// The `TN.SheetArchive` object.
+    pub identifier: u64,
+    /// The name on the tab.
+    pub name: String,
+    /// Every drawable on the sheet, in order: tables, charts, shapes, images.
+    pub drawables: Vec<u64>,
+}
+
+impl Sheet {
+    /// The tables on this sheet, in the order the sheet holds them.
+    ///
+    /// Reading a table decodes it, so this is a document-wide read filtered to
+    /// the sheet rather than a cheap lookup; a caller walking every sheet
+    /// should call [`crate::Document::tables`] once instead and group by
+    /// [`Table::sheet`].
+    pub fn tables(&self, document: &crate::Document) -> Vec<Table> {
+        let mut tables: Vec<Table> = document
+            .tables()
+            .into_iter()
+            .filter(|table| self.drawables.contains(&table.identifier))
+            .collect();
+        tables.sort_by_key(|table| {
+            self.drawables
+                .iter()
+                .position(|drawable| *drawable == table.identifier)
+                .unwrap_or(usize::MAX)
+        });
+        tables
+    }
+}
+
+/// Every sheet of a Numbers document, in the order the document lists them.
+pub fn sheets(document: &crate::Document) -> Vec<Sheet> {
+    if document.kind() != crate::Kind::Numbers {
+        return Vec::new();
+    }
+    // The document's own order, which is the order of the tabs — not the order
+    // the sheet objects happen to sit in the streams.
+    let listed: Vec<u64> = archive(document, crate::create::ROOT)
+        .map(|root| {
+            root.all(DOCUMENT_SHEETS)
+                .filter_map(|value| match value {
+                    Value::Bytes(raw) => reference(raw),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    for identifier in listed {
+        let Some(archive) = archive(document, identifier) else {
+            continue;
+        };
+        out.push(Sheet {
+            identifier,
+            name: archive
+                .bytes(sheet_field::NAME)
+                .map(|raw| String::from_utf8_lossy(raw).into_owned())
+                .unwrap_or_default(),
+            drawables: archive
+                .all(sheet_field::DRAWABLES)
+                .filter_map(|value| match value {
+                    Value::Bytes(raw) => reference(raw),
+                    _ => None,
+                })
+                .collect(),
+        });
+    }
+    out
+}
+
+/// Which table — by name, by sheet and name, or by identifier.
+///
+/// A bare name is the common case and is enough when it is unique. It often is
+/// not: **a sheet holds any number of tables**, and two sheets may each hold one
+/// called `Sales` — `numbers-pivot.numbers` does — so a name that matches more
+/// than one table is refused rather than resolved to whichever came first.
+///
+/// ```no_run
+/// # fn main() -> Result<(), iwork::Error> {
+/// # let mut doc = iwork::Document::open("Budget.numbers")?;
+/// doc.table_mut("Q1")?;                            // a unique name
+/// doc.table_mut(("Pivot Table Basics", "Sales"))?; // the sheet says which
+/// doc.table_mut(904769u64)?;                       // the identifier
+/// # Ok(()) }
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableRef<'a> {
+    Name(&'a str),
+    /// Sheet, then table.
+    On(&'a str, &'a str),
+    Identifier(u64),
+}
+
+impl<'a> From<&'a str> for TableRef<'a> {
+    fn from(name: &'a str) -> TableRef<'a> {
+        TableRef::Name(name)
+    }
+}
+
+impl<'a> From<&'a String> for TableRef<'a> {
+    fn from(name: &'a String) -> TableRef<'a> {
+        TableRef::Name(name.as_str())
+    }
+}
+
+impl<'a> From<(&'a str, &'a str)> for TableRef<'a> {
+    fn from((sheet, name): (&'a str, &'a str)) -> TableRef<'a> {
+        TableRef::On(sheet, name)
+    }
+}
+
+impl From<u64> for TableRef<'_> {
+    fn from(identifier: u64) -> TableRef<'static> {
+        TableRef::Identifier(identifier)
+    }
+}
+
+impl std::fmt::Display for TableRef<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TableRef::Name(name) => write!(f, "{name:?}"),
+            TableRef::On(sheet, name) => write!(f, "{name:?} on sheet {sheet:?}"),
+            TableRef::Identifier(id) => write!(f, "{id}"),
+        }
+    }
+}
+
+/// Which cell, named either way.
+///
+/// The archive addresses a cell by zero-based row and column; the app, the
+/// formula bar and every person reading a spreadsheet address it as `B3`. A
+/// caller should not have to convert between them, and the two are easy to get
+/// the wrong way round — so both are accepted wherever a cell is named.
+///
+/// ```
+/// use iwork::table::CellRef;
+/// assert_eq!(CellRef::from("B3").resolve().unwrap(), (2, 1));
+/// assert_eq!(CellRef::from((2, 1)).resolve().unwrap(), (2, 1));
+/// assert_eq!(CellRef::from((2, 1)).to_string(), "B3");
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CellRef {
+    /// Zero-based row and column, the way the archive stores them.
+    Index(usize, usize),
+    /// `"B3"` — one-based, the column in letters, as the app writes it.
+    Name(String),
+}
+
+impl CellRef {
+    /// The zero-based row and column, or why the name is not a cell.
+    pub fn resolve(&self) -> Result<(usize, usize), crate::Error> {
+        match self {
+            CellRef::Index(row, column) => Ok((*row, *column)),
+            CellRef::Name(name) => crate::formula::parse_a1(name).ok_or_else(|| {
+                crate::Error::Format(format!("{name:?} is not a cell reference like B3"))
+            }),
+        }
+    }
+}
+
+impl From<(usize, usize)> for CellRef {
+    fn from((row, column): (usize, usize)) -> CellRef {
+        CellRef::Index(row, column)
+    }
+}
+
+impl From<&str> for CellRef {
+    fn from(name: &str) -> CellRef {
+        CellRef::Name(name.to_string())
+    }
+}
+
+impl From<String> for CellRef {
+    fn from(name: String) -> CellRef {
+        CellRef::Name(name)
+    }
+}
+
+impl std::fmt::Display for CellRef {
+    /// Always in A1, whichever way the reference was given: an error message
+    /// about `r2c1` is one the reader has to decode.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CellRef::Name(name) => write!(f, "{name}"),
+            CellRef::Index(row, column) => write!(
+                f,
+                "{}{}",
+                crate::formula::column_letters(*column as i64),
+                row + 1
+            ),
+        }
+    }
+}
+
+/// Everything a cell can be written from without ceremony.
+///
+/// Writing a number used to mean `Decimal::parse(&value.to_string())` and an
+/// `unwrap` — which is what this crate's own example did, and it turned a
+/// number it could not parse into an *empty cell*. A number is a number:
+/// `doc.set("Q1", "B2", 1_240)?`.
+///
+/// `f64` goes through [`Decimal::from_f64`], which keeps the value a double
+/// stands for rather than its integer part. A `&str` is text, not a number to
+/// be parsed: a cell holding `"007"` is what the caller asked for, and turning
+/// it into `7` is the kind of helpfulness that loses data.
+macro_rules! cell_value_from {
+    ($($type:ty => $make:expr),* $(,)?) => {
+        $(impl From<$type> for CellValue {
+            fn from(value: $type) -> CellValue {
+                #[allow(clippy::redundant_closure_call)]
+                ($make)(value)
+            }
+        })*
+    };
+}
+
+cell_value_from! {
+    &str => |v: &str| CellValue::Text(v.to_string()),
+    String => CellValue::Text,
+    &String => |v: &String| CellValue::Text(v.clone()),
+    bool => CellValue::Bool,
+    Decimal => CellValue::Number,
+    i8 => |v: i8| CellValue::Number(Decimal::from(i128::from(v))),
+    i16 => |v: i16| CellValue::Number(Decimal::from(i128::from(v))),
+    i32 => |v: i32| CellValue::Number(Decimal::from(i128::from(v))),
+    i64 => |v: i64| CellValue::Number(Decimal::from(i128::from(v))),
+    u8 => |v: u8| CellValue::Number(Decimal::from(i128::from(v))),
+    u16 => |v: u16| CellValue::Number(Decimal::from(i128::from(v))),
+    u32 => |v: u32| CellValue::Number(Decimal::from(i128::from(v))),
+    u64 => |v: u64| CellValue::Number(Decimal::from(i128::from(v))),
+    usize => |v: usize| CellValue::Number(Decimal::from(v as i128)),
+    f32 => |v: f32| CellValue::Number(Decimal::from_f64(f64::from(v))),
+    f64 => |v: f64| CellValue::Number(Decimal::from_f64(v)),
+}
+
+/// `None` is an empty cell, which is how a caller clears one from data that
+/// has holes in it.
+impl<T: Into<CellValue>> From<Option<T>> for CellValue {
+    fn from(value: Option<T>) -> CellValue {
+        match value {
+            Some(value) => value.into(),
+            None => CellValue::Empty,
+        }
+    }
+}
+
+impl From<i128> for Decimal {
+    fn from(mantissa: i128) -> Decimal {
+        Decimal {
+            mantissa,
+            exponent: 0,
+        }
+    }
+}
+
+impl std::str::FromStr for Decimal {
+    type Err = crate::Error;
+
+    fn from_str(text: &str) -> Result<Decimal, crate::Error> {
+        Decimal::parse(text)
+            .ok_or_else(|| crate::Error::Format(format!("{text:?} is not a number")))
+    }
+}
+
 impl CellValue {
     pub fn is_empty(&self) -> bool {
         matches!(self, CellValue::Empty)

@@ -752,6 +752,45 @@ three of the four written now. What is left is the one that should be left.
 Filled in as phases complete: what was proven, by which test, against which
 fixture, and what the app accepted.
 
+- 2026-09-17 — **The API a caller meets, rather than the format it hides.**
+  Four things that made the crate harder to use than the format made it, each
+  found by using it rather than by reading it:
+
+  **A number needed a string.** `Decimal::parse(&value.to_string())` and an
+  `unwrap` — which is what this crate's own example did, and its `unwrap_or`
+  turned a number it could not parse into an *empty cell*. `CellValue` now
+  converts from every integer, float, bool, string and `Option` of those; a
+  `&str` stays text, because a cell holding `"007"` is what the caller asked
+  for.
+
+  **A cell had one name and the app used another.** The archive says row 2
+  column 1 and everybody else says `B3`, and the A1 reader lived in the CLI
+  where no library caller could reach it. `CellRef` takes either, and every
+  message about a cell now prints A1 — the CLI's own copy of the parser is
+  gone, so the shell and a caller accept exactly the same thing. The example
+  rewritten in A1 caught an off-by-one in its own total row, which is the
+  argument in miniature.
+
+  **A table handle went stale silently.** `doc.table(name)` hands back a
+  snapshot, and after a write it reports what the table used to hold — no error,
+  a wrong answer. `doc.table_mut(…)` resolves the table once and stores its
+  identifier and nothing else, so every call reads what is there now, and
+  `read()` is the snapshot for when a caller wants one.
+
+  **And a sheet is not a grid.** The user's own point, and the format's: a
+  Numbers sheet is a *canvas* holding any number of tables, with charts and
+  shapes beside them — `numbers-formats.numbers` has three tables on one sheet,
+  `numbers-pivot.numbers` has a table called `Sales` on each of two. So `Sheet`
+  is now public with the drawables it holds in order, `sheet.tables(&doc)`
+  narrows that list, and a table is named by a unique name, by **sheet and
+  name**, or by identifier — an ambiguous name is refused with both sheets
+  named rather than resolved to whichever came first. An API that assumed one
+  grid per sheet would have been wrong about the format, not merely awkward.
+
+  The handle is forwarding and nothing else: every method calls the `Document`
+  method of the same name, so there is one implementation of each write and one
+  set of refusals behind both.
+
 - 2026-09-17 — **The owners a new table needs, and the app recalculating what
   this crate wrote.** The gap `set_formula` opened and left open: a table built
   from nothing had a `HauntedOwnerArchive` in its model and no

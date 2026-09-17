@@ -15,6 +15,35 @@
 //! knowing every message definition, and it means an unrecognised object is
 //! carried through untouched rather than lost.
 //!
+//! ```no_run
+//! # fn main() -> Result<(), iwork::Error> {
+//! use iwork::table::Format;
+//!
+//! let mut doc = iwork::Document::new_spreadsheet("Sales", "Q1", 4, 3)?;
+//! let mut q1 = doc.table_mut("Q1")?;
+//! q1.set_block("A1", &[vec!["Region", "Units"]])?;
+//! q1.set("A2", "Zürich")?;
+//! q1.set("B2", 1_240)?;
+//! q1.set("A3", "Genève")?;
+//! q1.set("B3", 980)?;
+//! // A real formula: Numbers recalculates it when a figure above it changes.
+//! // The value is what the cell shows until it does — nothing here evaluates.
+//! q1.formula("B4", "=SUM(B2:B3)", 2_220)?;
+//! q1.format("B4", &Format::Number { decimals: Some(0) })?;
+//! doc.save("Sales.numbers")?;
+//! # Ok(()) }
+//! ```
+//!
+//! **A sheet is not a grid.** This is the one place a Numbers document refuses
+//! the shape a spreadsheet library usually assumes: a sheet is a *canvas*
+//! holding any number of tables, with charts, shapes and images beside them.
+//! [`Document::sheets`] reports the sheets and what is drawn on each;
+//! [`Document::tables`] reports every table in the document whatever holds it,
+//! which is also how a table on a Pages page or a Keynote slide is reached.
+//! A table is named by a name that is unique, or by its sheet and name, or by
+//! its identifier — `numbers-pivot.numbers` has a `Sales` on each of two
+//! sheets, and a bare `"Sales"` is refused rather than guessed at.
+//!
 //! A document is *created* two ways. [`Document::from_template`] copies one
 //! that works — a template bundle is a package like any other — and needs
 //! Apple's software installed to have something to copy. [`Document::new`]

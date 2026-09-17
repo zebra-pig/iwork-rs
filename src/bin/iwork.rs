@@ -3855,28 +3855,10 @@ fn index(text: &str) -> Result<usize, Error> {
         .map_err(|_| Error::Format(format!("'{text}' is not a row or column index")))
 }
 
-/// `B3` to the `(row, column)` pair the API takes — the inverse of
-/// [`reference_name`].
+/// A cell named as the app names it, as indices — the library's own reader, so
+/// the CLI and a caller of the crate accept exactly the same thing.
 fn reference_position(text: &str) -> Result<(usize, usize), Error> {
-    let bad = || Error::Format(format!("'{text}' is not a cell reference like B3"));
-    let split = text
-        .find(|c: char| c.is_ascii_digit())
-        .filter(|&at| at > 0)
-        .ok_or_else(bad)?;
-    let (letters, digits) = text.split_at(split);
-    let mut column = 0usize;
-    for letter in letters.chars() {
-        let value = letter.to_ascii_uppercase() as u32;
-        if !(b'A' as u32..=b'Z' as u32).contains(&value) {
-            return Err(bad());
-        }
-        column = column * 26 + (value - b'A' as u32 + 1) as usize;
-    }
-    let row: usize = digits.parse().map_err(|_| bad())?;
-    if row == 0 {
-        return Err(bad());
-    }
-    Ok((row - 1, column - 1))
+    iwork::table::CellRef::from(text).resolve()
 }
 
 /// A dotted path of field numbers, or one of the names in
