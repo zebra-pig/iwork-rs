@@ -804,6 +804,40 @@ pub struct LiveVideoSource {
     pub listed: bool,
 }
 
+/// Which slide — by its position in the deck, or by an identifier.
+///
+/// A deck is an ordered thing, so position is the natural way in: `0` is the
+/// first slide the show plays, skipped slides included. An identifier is the
+/// `KN.SlideArchive`'s or its node's, which is what [`crate::Document::slides`]
+/// prints and what the CLI takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlideRef {
+    Index(usize),
+    Identifier(u64),
+}
+
+/// A bare number is a **position**: `doc.slide_mut(0)` is the first slide.
+///
+/// An identifier is spelled — `SlideRef::Identifier(2652498)` — rather than
+/// given its own conversion. Two integer conversions would make a literal
+/// ambiguous, and the ambiguity would not be an error at the call site but a
+/// silent choice between "the third slide" and "slide 3", which is not a
+/// mistake this crate is willing to let a caller make.
+impl From<usize> for SlideRef {
+    fn from(index: usize) -> SlideRef {
+        SlideRef::Index(index)
+    }
+}
+
+impl std::fmt::Display for SlideRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SlideRef::Index(index) => write!(f, "at {index}"),
+            SlideRef::Identifier(id) => write!(f, "{id}"),
+        }
+    }
+}
+
 /// One slide of the deck.
 #[derive(Debug, Clone)]
 pub struct Slide {

@@ -215,3 +215,116 @@ fn a_cell_that_is_not_a_cell_is_refused() {
     assert!(error.contains("the table is 3×2"), "{error}");
     assert!(doc.changed_streams().is_empty());
 }
+
+// -- text, and slides --------------------------------------------------------
+
+/// Text is where Pages and Keynote live, and every text call takes a storage
+/// identifier — a number the caller has to find first. The handle finds it
+/// once.
+#[test]
+fn a_text_handle_edits_without_an_identifier_in_sight() {
+    let mut doc = fixture!("pages-plain.pages");
+    let before = {
+        let body = doc.body_mut().unwrap();
+        body.read().unwrap()
+    };
+    assert!(!before.is_empty());
+
+    let mut body = doc.body_mut().unwrap();
+    body.append("Ein neuer Absatz").unwrap();
+    let after = body.read().unwrap();
+    assert_eq!(after, format!("{before}\nEin neuer Absatz"));
+    assert_eq!(body.paragraphs().unwrap().len(), 2);
+
+    // The ordinary edits, all in UTF-16 code units as the format counts them.
+    body.insert(0, "Vorn: ").unwrap();
+    assert!(body.read().unwrap().starts_with("Vorn: "));
+    body.delete(0..6).unwrap();
+    assert_eq!(body.read().unwrap(), after);
+    body.replace(0..4, "XXXX").unwrap();
+    assert!(body.read().unwrap().starts_with("XXXX"));
+    body.set("Alles neu").unwrap();
+    assert_eq!(body.read().unwrap(), "Alles neu");
+
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+}
+
+/// A document with no body says so rather than handing back nothing.
+#[test]
+fn only_a_pages_document_has_a_body() {
+    let mut numbers = Document::new_spreadsheet("Blatt", "T", 2, 2).unwrap();
+    let error = numbers.body_mut().err().expect("no body").to_string();
+    assert!(error.contains("has no body text"), "{error}");
+    assert!(Document::new(iwork::Kind::Pages)
+        .unwrap()
+        .body_mut()
+        .is_ok());
+    // And a storage that is not there is an error now rather than at the first
+    // edit.
+    assert!(numbers.text_mut(99_999).is_err());
+}
+
+/// A slide is addressed by its position in the deck or by an identifier, and
+/// **a slide is not a page with a title slot**: a title is a placeholder the
+/// *layout* defines, so a layout that defines none refuses the write by name
+/// rather than inventing a text box and calling it a title.
+#[test]
+fn a_slide_is_what_its_layout_makes_it() {
+    // A deck from nothing: one slide, a layout with no placeholders at all.
+    let mut doc = Document::new(iwork::Kind::Keynote).unwrap();
+    let mut slide = doc.slide_mut(0).unwrap();
+    assert_eq!(slide.read().layout_name, "Title");
+    let error = slide
+        .title("Hallo")
+        .expect_err("no placeholder")
+        .to_string();
+    assert!(error.contains("gives it no title"), "{error}");
+    assert!(error.contains("a box and not a title"), "{error}");
+
+    // What it *can* hold: drawables of its own, and a transition.
+    let box_ = slide
+        .add_text_box("Von nichts", (100.0, 120.0), (600.0, 120.0))
+        .unwrap();
+    assert!(slide.read().drawables.contains(&box_));
+    slide.transition("dissolve", Some(1.5), None).unwrap();
+    assert_eq!(slide.read().transition.effect, "apple:dissolve");
+    assert_eq!(slide.read().transition.duration, 1.5);
+
+    // Positions and identifiers name the same slide; past the end is an error.
+    let identifier = slide.identifier();
+    assert_eq!(
+        doc.slide_mut(iwork::keynote::SlideRef::Identifier(identifier))
+            .unwrap()
+            .identifier(),
+        identifier
+    );
+    let error = doc.slide_mut(9).err().expect("no slide 9").to_string();
+    assert!(error.contains("the deck has 1"), "{error}");
+
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+}
+
+/// A deck the app made has placeholders, and then the title and body *are*
+/// writes — which is the half a from-nothing deck cannot show.
+#[test]
+fn a_slide_with_placeholders_takes_its_title_and_notes() {
+    let mut doc = fixture!("keynote-deck.key");
+    let mut slide = doc.slide_mut(1).unwrap();
+    assert!(
+        slide.read().title.is_some(),
+        "the fixture's layouts have placeholders"
+    );
+
+    slide.title("Quartalsbericht").unwrap();
+    assert_eq!(slide.read().title_text(), "Quartalsbericht");
+    slide.notes("Zahlen sind vorläufig").unwrap();
+    assert_eq!(slide.read().notes, "Zahlen sind vorläufig");
+    slide.skip(true).unwrap();
+    assert!(slide.read().skipped);
+    slide.skip(false).unwrap();
+
+    let moved = slide.move_to(0).unwrap();
+    assert_eq!(moved, 0);
+    assert_eq!(doc.slides()[0].title_text(), "Quartalsbericht");
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+}

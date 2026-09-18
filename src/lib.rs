@@ -34,6 +34,27 @@
 //! # Ok(()) }
 //! ```
 //!
+//! Pages and Keynote are addressed the same way — by the thing rather than by
+//! its object identifier. [`Document::body_mut`] hands back the Pages body,
+//! [`Document::text_mut`] any storage, and [`Document::slide_mut`] a slide by
+//! its position in the deck or by identifier:
+//!
+//! ```no_run
+//! # fn main() -> Result<(), iwork::Error> {
+//! # let mut deck = iwork::Document::open("Talk.key")?;
+//! let mut slide = deck.slide_mut(0)?;
+//! slide.title("Quarterly review")?;
+//! slide.notes("The numbers are provisional")?;
+//! slide.transition("dissolve", Some(1.5), None)?;
+//! # Ok(()) }
+//! ```
+//!
+//! **A slide is not a page with a title slot.** What a slide can hold is
+//! decided by the *layout* it is built on: a title is a placeholder that layout
+//! defines. A deck made from nothing has a layout that defines none, so
+//! `title` refuses by name there and says why, rather than putting a text box
+//! on the slide and calling it a title.
+//!
 //! **A sheet is not a grid.** This is the one place a Numbers document refuses
 //! the shape a spreadsheet library usually assumes: a sheet is a *canvas*
 //! holding any number of tables, with charts, shapes and images beside them.

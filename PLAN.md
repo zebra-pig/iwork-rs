@@ -752,6 +752,41 @@ three of the four written now. What is left is the one that should be left.
 Filled in as phases complete: what was proven, by which test, against which
 fixture, and what the app accepted.
 
+- 2026-09-18 — **The same handles for Pages and Keynote, shaped by what those
+  documents are.** The table handle made a spreadsheet readable; the other two
+  apps were still addressed entirely by object identifier — `set_text(6083, …)`
+  on a number a caller had to go and find.
+
+  **Text, which is where Pages lives.** `doc.text_mut(storage)` and
+  `doc.body_mut()` hold a storage and forward every edit to the `Document`
+  method behind it, so the remapping each one does — style runs, hyperlinks,
+  list levels, anchored drawables, comment anchors — is the same code and the
+  same refusals. `append` is the one thing of its own, and it is the paragraph
+  arithmetic `append_paragraph` already knew. Indices stay UTF-16 code units,
+  which is what iWork counts text in and the one thing a handle cannot make go
+  away.
+
+  **A slide, which is not a page with a title slot.** `doc.slide_mut(0)` takes
+  a position — a deck is an ordered thing — and writes the title, the body, the
+  notes, the transition, a build, a text box, a picture, a table. What a slide
+  can *hold*, though, is decided by the layout it is built on: a title is a
+  placeholder that layout defines. A deck made from nothing has a layout that
+  defines none, so `title` refuses there **by name**, saying which layout and
+  why a text box put in its place would be a box and not a title. That refusal
+  is the honest half of this change: the alternative was to invent a title and
+  let the app disagree later.
+
+  One thing the doc examples caught before a caller could: `slide_mut(0)` did
+  not compile, because a position and an identifier were both integer
+  conversions and a bare literal was ambiguous. A bare number is a **position**
+  now and an identifier is spelled — `SlideRef::Identifier(2652498)` — because
+  the ambiguity would not have been an error at the call site but a silent
+  choice between "the third slide" and "slide 3".
+
+  `examples/deck.rs` is the first Keynote example this crate has had: a deck
+  from nothing, one slide per region, each with its words in text boxes and a
+  dissolve. Keynote opens it and reads the words back.
+
 - 2026-09-18 — **Money, which the example asked for and the format would not
   give.** Rewriting `examples/spreadsheet.rs` the day before ran straight into
   a wall: a revenue column could not be CHF. `set_format` refused a currency

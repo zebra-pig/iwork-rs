@@ -224,6 +224,223 @@ impl ListCache {
     }
 }
 
+/// One text storage, held for editing — see [`Document::text_mut`].
+///
+/// Forwarding and nothing more: every method calls the `Document` method of the
+/// same name with the storage already named, so the remapping every edit does —
+/// style runs, hyperlinks, list levels, anchored drawables, comment anchors —
+/// is the same code and the same refusals behind both.
+pub struct TextHandle<'a> {
+    document: &'a mut Document,
+    storage: u64,
+}
+
+impl TextHandle<'_> {
+    /// The storage's identifier, for a caller that needs it elsewhere.
+    pub fn identifier(&self) -> u64 {
+        self.storage
+    }
+
+    /// The text as it is now.
+    pub fn read(&self) -> Result<String, Error> {
+        self.document.storage_text(self.storage)
+    }
+
+    /// Replace the whole text.
+    pub fn set(&mut self, text: &str) -> Result<TextEdit, Error> {
+        self.document.set_text(self.storage, text)
+    }
+
+    /// Insert at a character index, in UTF-16 code units.
+    pub fn insert(&mut self, at: u64, text: &str) -> Result<TextEdit, Error> {
+        self.document.insert_text(self.storage, at, text)
+    }
+
+    /// Delete a range, in UTF-16 code units.
+    pub fn delete(&mut self, range: Range<u64>) -> Result<TextEdit, Error> {
+        self.document.delete_text(self.storage, range)
+    }
+
+    /// Replace a range with other text.
+    pub fn replace(&mut self, range: Range<u64>, text: &str) -> Result<TextEdit, Error> {
+        self.document.replace_text(self.storage, range, text)
+    }
+
+    /// Add a paragraph at the end, with the newline that separates it from
+    /// whatever is already there.
+    pub fn append(&mut self, text: &str) -> Result<TextEdit, Error> {
+        let end = crate::text::length(&self.read()?);
+        match end {
+            0 => self.insert(0, text),
+            end => self.insert(end, &format!("\n{text}")),
+        }
+    }
+
+    /// Point a range of text at a text style. See
+    /// [`Document::apply_text_style`].
+    pub fn style(&mut self, range: Range<u64>, style: u64) -> Result<(), Error> {
+        self.document
+            .apply_text_style(self.storage, range, style)
+            .map(|_| ())
+    }
+
+    /// Where each paragraph begins and ends, in UTF-16 code units.
+    pub fn paragraphs(&self) -> Result<Vec<Range<u64>>, Error> {
+        self.document.paragraph_ranges(self.storage)
+    }
+}
+
+/// One slide, held for writing — see [`Document::slide_mut`].
+///
+/// Forwarding and nothing more, with one thing of its own: it knows which
+/// storage a placeholder lays out, so `title` and `body` are writes a caller
+/// can make without going through the slide's object graph to find them.
+pub struct SlideHandle<'a> {
+    document: &'a mut Document,
+    slide: u64,
+}
+
+impl SlideHandle<'_> {
+    /// The `KN.SlideArchive` identifier.
+    pub fn identifier(&self) -> u64 {
+        self.slide
+    }
+
+    /// The slide as it is now.
+    pub fn read(&self) -> crate::keynote::Slide {
+        self.document
+            .slides()
+            .into_iter()
+            .find(|slide| slide.identifier == self.slide)
+            .expect("the handle resolved this slide")
+    }
+
+    /// The storage a placeholder lays out, or why there is none to write.
+    fn placeholder(&self, which: &str) -> Result<u64, Error> {
+        let slide = self.read();
+        let placeholder = match which {
+            "title" => slide.title.as_ref(),
+            _ => slide.body.as_ref(),
+        };
+        placeholder
+            .and_then(|placeholder| placeholder.storage)
+            .ok_or_else(|| {
+                Error::Format(format!(
+                    "slide {} is built on the layout {:?}, which gives it no {which} — a \
+                     placeholder comes from the layout, and a text box put here instead would \
+                     be a box and not a {which}",
+                    slide.number.unwrap_or(slide.index + 1),
+                    slide.layout_name
+                ))
+            })
+    }
+
+    /// Write the title placeholder's text.
+    pub fn title(&mut self, text: &str) -> Result<TextEdit, Error> {
+        let storage = self.placeholder("title")?;
+        self.document.set_text(storage, text)
+    }
+
+    /// Write the body placeholder's text.
+    pub fn body(&mut self, text: &str) -> Result<TextEdit, Error> {
+        let storage = self.placeholder("body")?;
+        self.document.set_text(storage, text)
+    }
+
+    /// Write the presenter notes. See [`Document::set_presenter_notes`].
+    pub fn notes(&mut self, text: &str) -> Result<TextEdit, Error> {
+        self.document.set_presenter_notes(self.slide, text)
+    }
+
+    /// Leave the slide out of the show, or put it back.
+    pub fn skip(&mut self, skipped: bool) -> Result<bool, Error> {
+        self.document.set_slide_skipped(self.slide, skipped)
+    }
+
+    /// Move the slide to a position in the deck, counting from 0.
+    pub fn move_to(&mut self, index: usize) -> Result<usize, Error> {
+        self.document.move_slide(self.slide, index)
+    }
+
+    /// Copy the slide, straight after itself.
+    pub fn duplicate(&mut self) -> Result<crate::keynote::SlideCopy, Error> {
+        self.document.duplicate_slide(self.slide)
+    }
+
+    /// Give the slide a transition — by the app's name for the effect or by the
+    /// identifier on the wire, and `"none"` takes it away.
+    ///
+    /// The duration and delay the app writes unless a caller says otherwise;
+    /// everything subtler is [`Document::set_transition`] and a
+    /// [`crate::keynote::TransitionEdit`] of one's own.
+    pub fn transition(
+        &mut self,
+        effect: &str,
+        duration: Option<f64>,
+        delay: Option<f64>,
+    ) -> Result<crate::keynote::Transition, Error> {
+        self.document.set_transition(
+            self.slide,
+            &crate::keynote::TransitionEdit {
+                effect: effect.to_string(),
+                duration,
+                delay,
+                automatic: None,
+                direction: None,
+            },
+        )
+    }
+
+    /// Animate one of the slide's drawables on, or off.
+    ///
+    /// The effect is the kind's default — see [`crate::keynote::BuildEdit`] for
+    /// the rest, and note that a *build* effect is not a transition effect.
+    pub fn add_build(
+        &mut self,
+        drawable: u64,
+        kind: crate::keynote::BuildKind,
+    ) -> Result<u64, Error> {
+        self.document.add_build(
+            self.slide,
+            drawable,
+            &crate::keynote::BuildEdit {
+                kind,
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Put a text box on the slide, at a position and size in points.
+    pub fn add_text_box(
+        &mut self,
+        text: &str,
+        position: (f32, f32),
+        size: (f32, f32),
+    ) -> Result<u64, Error> {
+        let slide = self.slide.to_string();
+        self.document.add_text_box(&slide, text, position, size)
+    }
+
+    /// Put a picture on the slide — PNG or JPEG bytes, drawn at its own pixel
+    /// size unless `size` says otherwise.
+    pub fn add_image(
+        &mut self,
+        bytes: &[u8],
+        name: &str,
+        position: (f32, f32),
+        size: Option<(f32, f32)>,
+    ) -> Result<u64, Error> {
+        let slide = self.slide.to_string();
+        self.document.add_image(&slide, bytes, name, position, size)
+    }
+
+    /// Put a table on the slide.
+    pub fn add_table(&mut self, name: &str, rows: usize, columns: usize) -> Result<u64, Error> {
+        let slide = self.slide.to_string();
+        self.document.add_table(&slide, name, rows, columns)
+    }
+}
+
 /// One table, held for writing — see [`Document::table_mut`].
 ///
 /// A forwarding layer and nothing more: every method here calls the `Document`
@@ -3063,6 +3280,103 @@ impl Document {
             }
         }
         Ok(())
+    }
+
+    // -- working with one text storage ---------------------------------------
+
+    /// A handle for editing one text storage, without carrying its identifier
+    /// around.
+    ///
+    /// Text is where Pages and Keynote live, and every text call in this crate
+    /// takes a `TSWP.StorageArchive` identifier — a number a caller has to find
+    /// first and then thread through every edit. This resolves it once:
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), iwork::Error> {
+    /// # let mut doc = iwork::Document::open("Report.pages")?;
+    /// let mut body = doc.body_mut()?;
+    /// body.append("A new paragraph")?;
+    /// body.insert(12, "eingeschoben ")?;
+    /// println!("{}", body.read()?);
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// Indices are **UTF-16 code units**, which is what iWork counts text in
+    /// and what every range here means — the one thing a handle cannot make go
+    /// away.
+    pub fn text_mut(&mut self, storage: u64) -> Result<TextHandle<'_>, Error> {
+        // Resolve now, so a wrong identifier is an error here rather than on
+        // the first edit.
+        self.storage_text(storage)?;
+        Ok(TextHandle {
+            document: self,
+            storage,
+        })
+    }
+
+    /// The document body of a Pages document, as a handle.
+    ///
+    /// Pages only: a Numbers or Keynote document has no body, and says so.
+    pub fn body_mut(&mut self) -> Result<TextHandle<'_>, Error> {
+        let storage = self.body_storage().ok_or_else(|| {
+            Error::Format(format!(
+                "a {} document has no body text — a Pages document does, and a deck's words \
+                 are on its slides",
+                self.kind().as_str()
+            ))
+        })?;
+        self.text_mut(storage)
+    }
+
+    // -- working with one slide ----------------------------------------------
+
+    /// A handle for one slide of a deck, by position or by identifier.
+    ///
+    /// **A slide is not a page with a title slot.** What a slide can hold is
+    /// decided by the *layout* it is built on: the placeholders that layout
+    /// defines — title, body, slide number, object — and any drawables the
+    /// slide owns besides. So [`SlideHandle::title`] writes the title
+    /// placeholder when the layout has one and refuses by name when it does
+    /// not, rather than inventing a text box and calling it a title.
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), iwork::Error> {
+    /// # let mut doc = iwork::Document::open("Talk.key")?;
+    /// let mut slide = doc.slide_mut(0)?;
+    /// slide.title("Quarterly review")?;
+    /// slide.notes("Remember the numbers are provisional")?;
+    /// slide.transition("dissolve", Some(1.5), None)?;
+    /// # Ok(()) }
+    /// ```
+    pub fn slide_mut(
+        &mut self,
+        slide: impl Into<crate::keynote::SlideRef>,
+    ) -> Result<SlideHandle<'_>, Error> {
+        let wanted = slide.into();
+        let slides = self.slides();
+        if slides.is_empty() {
+            return Err(Error::Format(format!(
+                "a {} document has no slides",
+                self.kind().as_str()
+            )));
+        }
+        let found = match wanted {
+            crate::keynote::SlideRef::Index(index) => slides.get(index).map(|s| s.identifier),
+            crate::keynote::SlideRef::Identifier(id) => slides
+                .iter()
+                .find(|s| s.identifier == id || s.node == id)
+                .map(|s| s.identifier),
+        };
+        let identifier = found.ok_or_else(|| {
+            Error::Format(format!(
+                "no slide {wanted} — the deck has {} of them",
+                slides.len()
+            ))
+        })?;
+        Ok(SlideHandle {
+            document: self,
+            slide: identifier,
+        })
     }
 
     // -- working with one table ----------------------------------------------

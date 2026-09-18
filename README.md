@@ -37,6 +37,27 @@ reached. A table is named by a name that is unique, by its sheet *and* name, or
 by its identifier: `numbers-pivot.numbers` has a `Sales` on each of its two
 sheets, and a bare `"Sales"` is refused rather than guessed at.
 
+Pages and Keynote are addressed the same way — by the thing, not by its object
+id:
+
+```rust
+let mut body = doc.body_mut()?;                    // the Pages document body
+body.append("A new paragraph")?;
+body.replace(40..55, "different words")?;          // UTF-16 code units
+
+let mut slide = deck.slide_mut(0)?;                // by position, or by id
+slide.title("Quarterly review")?;                  // the layout's title placeholder
+slide.notes("The numbers are provisional")?;
+slide.transition("dissolve", Some(1.5), None)?;
+slide.add_text_box("Aside", (100.0, 120.0), (600.0, 120.0))?;
+```
+
+**A slide is not a page with a title slot.** What a slide can hold is decided by
+the *layout* it is built on: a title is a placeholder that layout defines. A
+deck made from nothing has a layout that defines none, so `slide.title(…)`
+refuses by name and says why, rather than putting a text box on the slide and
+calling it a title.
+
 ```rust
 let mut doc = iwork::Document::open("Report.pages")?;
 println!("{} document", doc.kind().as_str());      // "Pages"
@@ -687,6 +708,9 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | Version patches: the view state and a too-new chart carry them; no table archive does | ✅ | ✅ | ✅ |
 | Every list key resolves, every refcount matches, every cell count adds up | ✅ | ✅ | — |
 | A cell is named `"B3"` or `(2, 1)`, and reads back the same either way | ✅ | ✅ | ✅ |
+| A text storage is edited through a handle, not an object id | ✅ | ✅ | ✅ |
+| A slide is addressed by position or identifier | — | — | ✅ |
+| A title the layout does not define is refused by name, not invented | — | — | ✅ |
 | A sheet's drawables, and the tables among them, in the sheet's own order | — | ✅ | — |
 | A table name two sheets share is refused, with both sheets named | — | ✅ | — |
 | Write a cell: text, number, boolean, date, duration, empty | ✅ | ✅ | — |
