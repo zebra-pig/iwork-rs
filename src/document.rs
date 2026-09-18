@@ -373,22 +373,24 @@ impl SlideHandle<'_> {
     /// The duration and delay the app writes unless a caller says otherwise;
     /// everything subtler is [`Document::set_transition`] and a
     /// [`crate::keynote::TransitionEdit`] of one's own.
-    pub fn transition(
+    /// The duration and delay are the app's own unless
+    /// [`SlideHandle::transition_with`] says otherwise — which is the call to
+    /// use for those, because `(Some(1.5), None)` is two `Option<f64>` in a row
+    /// and nothing but the reader's memory says which is which.
+    pub fn transition(&mut self, effect: &str) -> Result<crate::keynote::Transition, Error> {
+        self.transition_with(&crate::keynote::TransitionEdit {
+            effect: effect.to_string(),
+            ..Default::default()
+        })
+    }
+
+    /// A transition with every field named — duration, delay, the automatic
+    /// flag and the direction the app's own writer never emits.
+    pub fn transition_with(
         &mut self,
-        effect: &str,
-        duration: Option<f64>,
-        delay: Option<f64>,
+        edit: &crate::keynote::TransitionEdit,
     ) -> Result<crate::keynote::Transition, Error> {
-        self.document.set_transition(
-            self.slide,
-            &crate::keynote::TransitionEdit {
-                effect: effect.to_string(),
-                duration,
-                delay,
-                automatic: None,
-                direction: None,
-            },
-        )
+        self.document.set_transition(self.slide, edit)
     }
 
     /// Animate one of the slide's drawables on, or off.
@@ -410,28 +412,46 @@ impl SlideHandle<'_> {
         )
     }
 
-    /// Put a text box on the slide, at a position and size in points.
+    /// Put a text box on the slide, in a frame given in points.
+    ///
+    /// The frame is named rather than positional: `(100.0, 120.0), (600.0,
+    /// 120.0)` is two tuples of the same type whose order is the whole meaning,
+    /// and `Frame { x, y, width, height }` cannot be given in the wrong order.
     pub fn add_text_box(
         &mut self,
         text: &str,
-        position: (f32, f32),
-        size: (f32, f32),
+        frame: crate::drawable::Frame,
     ) -> Result<u64, Error> {
         let slide = self.slide.to_string();
-        self.document.add_text_box(&slide, text, position, size)
+        self.document.add_text_box(
+            &slide,
+            text,
+            (frame.x, frame.y),
+            (frame.width, frame.height),
+        )
     }
 
-    /// Put a picture on the slide — PNG or JPEG bytes, drawn at its own pixel
-    /// size unless `size` says otherwise.
+    /// Put a picture on the slide, in a frame — PNG or JPEG bytes.
     pub fn add_image(
         &mut self,
         bytes: &[u8],
         name: &str,
-        position: (f32, f32),
-        size: Option<(f32, f32)>,
+        frame: crate::drawable::Frame,
     ) -> Result<u64, Error> {
         let slide = self.slide.to_string();
-        self.document.add_image(&slide, bytes, name, position, size)
+        self.document.add_image(
+            &slide,
+            bytes,
+            name,
+            (frame.x, frame.y),
+            Some((frame.width, frame.height)),
+        )
+    }
+
+    /// The same, drawn at the picture's own pixel size.
+    pub fn add_image_at(&mut self, bytes: &[u8], name: &str, x: f32, y: f32) -> Result<u64, Error> {
+        let slide = self.slide.to_string();
+        self.document.add_image(&slide, bytes, name, (x, y), None)
     }
 
     /// Put a table on the slide.
@@ -552,24 +572,29 @@ impl TableHandle<'_> {
         Ok(())
     }
 
-    /// Give a cell a data format. See [`Document::set_format`].
+    /// Give cells a data format — one cell, or a range of them at once.
+    ///
+    /// See [`Document::set_format`], which this calls with the range's cells.
     pub fn format(
         &mut self,
-        cell: impl Into<crate::table::CellRef>,
+        cells: impl Into<crate::table::CellRange>,
         format: &crate::table::Format,
-    ) -> Result<(), Error> {
-        let cell = cell.into().resolve()?;
-        self.document.set_format(&self.table, [cell], format)?;
-        Ok(())
+    ) -> Result<usize, Error> {
+        let cells = cells.into().cells()?;
+        self.document.set_format(&self.table, cells, format)
     }
 
     /// A column's width in points, or `None` for the table's default.
-    pub fn width(&mut self, column: usize, points: Option<f32>) -> Result<(), Error> {
+    ///
+    /// The axis is in the name rather than in the reader's memory: `width(0,
+    /// …)` could be a column's width or a row's, and the compiler cannot tell
+    /// the difference between two `usize`s.
+    pub fn column_width(&mut self, column: usize, points: Option<f32>) -> Result<(), Error> {
         self.document.set_column_width(&self.table, column, points)
     }
 
     /// A row's height in points, or `None` for the table's default.
-    pub fn height(&mut self, row: usize, points: Option<f32>) -> Result<(), Error> {
+    pub fn row_height(&mut self, row: usize, points: Option<f32>) -> Result<(), Error> {
         self.document.set_row_height(&self.table, row, points)
     }
 
@@ -589,16 +614,21 @@ impl TableHandle<'_> {
         self.document.delete_column(&self.table, at)
     }
 
-    /// Merge a rectangle into one cell, its top-left at `cell`.
-    pub fn merge(
-        &mut self,
-        cell: impl Into<crate::table::CellRef>,
-        rows: usize,
-        columns: usize,
-    ) -> Result<(), Error> {
-        let (row, column) = cell.into().resolve()?;
-        self.document
-            .merge_cells(&self.table, row, column, rows, columns)
+    /// Merge a rectangle of cells into one — `merge("B2:D2")`.
+    ///
+    /// A range and not a corner with two counts: which of `(1, 3)` is the rows
+    /// and which the columns is something a caller has to remember and the
+    /// compiler cannot check, and `"B2:D2"` says it in the notation the app
+    /// itself uses.
+    pub fn merge(&mut self, cells: impl Into<crate::table::CellRange>) -> Result<(), Error> {
+        let rectangle = cells.into().resolve()?;
+        self.document.merge_cells(
+            &self.table,
+            rectangle.top_left.0,
+            rectangle.top_left.1,
+            rectangle.rows(),
+            rectangle.columns(),
+        )
     }
 
     pub fn unmerge(&mut self, cell: impl Into<crate::table::CellRef>) -> Result<(), Error> {
@@ -1631,6 +1661,37 @@ impl Document {
         self.structure()?.body_storage
     }
 
+    /// Refuse an edit to "the document body" when the document does not draw
+    /// one.
+    ///
+    /// **A page-layout document has a body storage and never shows it.** Its
+    /// words live in text boxes, and the app's Document Body switch is off —
+    /// which is what the mode *is*. The storage is still there, holding the
+    /// `U+0004` that starts the first section, so an append into it succeeds at
+    /// the byte level and produces text nobody will ever see: measured, by
+    /// appending a paragraph to `pages-layout.pages`, opening it in Pages and
+    /// asking for every word in the document. Forty lines came back and the new
+    /// paragraph was not among them.
+    ///
+    /// So the concept "the document's body" is refused here rather than
+    /// written into a void. The storage itself is still reachable by identifier
+    /// through [`Document::text_mut`], for a caller who means exactly that.
+    fn refuse_if_body_is_not_drawn(&self) -> Result<(), Error> {
+        let Some(structure) = self.structure() else {
+            return Ok(());
+        };
+        if structure.mode == crate::pages::Mode::PageLayout {
+            return Err(Error::Format(
+                "this is a page-layout document: it has a body storage and the app never draws \
+                 it, so text put there is text nobody sees. Its words live in text boxes — \
+                 `add_text_box` makes one — and the storage itself is reachable by identifier \
+                 if that is really what was meant"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Add a paragraph to the end of a Pages document's body.
     ///
     /// The exceljs-shaped call: a document from [`Document::new`] has an empty
@@ -1643,6 +1704,7 @@ impl Document {
     /// does for [`Document::insert_text`]: this is that call with the index
     /// worked out.
     pub fn append_paragraph(&mut self, text: &str) -> Result<TextEdit, Error> {
+        self.refuse_if_body_is_not_drawn()?;
         let Some(storage) = self.body_storage() else {
             return Err(Error::Format(format!(
                 "a {} document has no body to append a paragraph to",
@@ -3318,6 +3380,7 @@ impl Document {
     ///
     /// Pages only: a Numbers or Keynote document has no body, and says so.
     pub fn body_mut(&mut self) -> Result<TextHandle<'_>, Error> {
+        self.refuse_if_body_is_not_drawn()?;
         let storage = self.body_storage().ok_or_else(|| {
             Error::Format(format!(
                 "a {} document has no body text — a Pages document does, and a deck's words \
@@ -3345,7 +3408,7 @@ impl Document {
     /// let mut slide = doc.slide_mut(0)?;
     /// slide.title("Quarterly review")?;
     /// slide.notes("Remember the numbers are provisional")?;
-    /// slide.transition("dissolve", Some(1.5), None)?;
+    /// slide.transition("dissolve")?;
     /// # Ok(()) }
     /// ```
     pub fn slide_mut(
@@ -3396,7 +3459,7 @@ impl Document {
     /// q1.set("B1", 1_240)?;
     /// q1.set("C1", 184_300.0)?;
     /// q1.formula("B9", "=SUM(B1:B8)", 1_240)?;
-    /// q1.width(0, Some(210.0))?;
+    /// q1.column_width(0, Some(210.0))?;
     /// # Ok(()) }
     /// ```
     ///

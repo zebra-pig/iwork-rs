@@ -172,8 +172,8 @@ fn a_handle_writes_and_never_goes_stale() {
     q1.formula("B4", "=SUM(B2:B3)", 2_220).unwrap();
     q1.format("B4", &Format::Number { decimals: Some(0) })
         .unwrap();
-    q1.width(0, Some(140.0)).unwrap();
-    q1.height(0, Some(28.0)).unwrap();
+    q1.column_width(0, Some(140.0)).unwrap();
+    q1.row_height(0, Some(28.0)).unwrap();
     assert_eq!(q1.value("B4").unwrap().to_text(), "2220");
 
     q1.insert_row(1).unwrap();
@@ -188,9 +188,9 @@ fn a_handle_writes_and_never_goes_stale() {
     assert_eq!(q1.value("A2").unwrap().to_text(), "Zürich");
 
     q1.set("C2", "weg").unwrap();
-    q1.merge("C2", 1, 1).unwrap_err(); // one cell is not a merge
+    q1.merge("C2").unwrap_err(); // a range of one cell is not a merge
     q1.set("C3", 1).unwrap();
-    q1.merge("C2", 2, 1).unwrap();
+    q1.merge("C2:C3").unwrap();
     assert_eq!(q1.read().merges.len(), 1);
     q1.unmerge("C2").unwrap();
     assert!(q1.read().merges.is_empty());
@@ -283,10 +283,24 @@ fn a_slide_is_what_its_layout_makes_it() {
 
     // What it *can* hold: drawables of its own, and a transition.
     let box_ = slide
-        .add_text_box("Von nichts", (100.0, 120.0), (600.0, 120.0))
+        .add_text_box(
+            "Von nichts",
+            iwork::drawable::Frame {
+                x: 100.0,
+                y: 120.0,
+                width: 600.0,
+                height: 120.0,
+            },
+        )
         .unwrap();
     assert!(slide.read().drawables.contains(&box_));
-    slide.transition("dissolve", Some(1.5), None).unwrap();
+    slide
+        .transition_with(&iwork::keynote::TransitionEdit {
+            effect: "dissolve".into(),
+            duration: Some(1.5),
+            ..Default::default()
+        })
+        .unwrap();
     assert_eq!(slide.read().transition.effect, "apple:dissolve");
     assert_eq!(slide.read().transition.duration, 1.5);
 
@@ -327,4 +341,76 @@ fn a_slide_with_placeholders_takes_its_title_and_notes() {
     assert_eq!(moved, 0);
     assert_eq!(doc.slides()[0].title_text(), "Quartalsbericht");
     assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+}
+
+/// A span is a range, not two counts: `merge("B2:D2")` says in the app's own
+/// notation what `(1, 3)` says only to a reader who remembers the order.
+#[test]
+fn a_range_says_what_two_counts_only_imply() {
+    use iwork::table::CellRange;
+
+    let range = CellRange::from("B2:D4");
+    assert_eq!(range.resolve().unwrap().top_left, (1, 1));
+    assert_eq!(range.resolve().unwrap().bottom_right, (3, 3));
+    assert_eq!(range.size().unwrap(), (3, 3));
+    assert_eq!(range.cells().unwrap().len(), 9);
+    assert_eq!(range.to_string(), "B2:D4");
+
+    // A single cell is a range of one, whichever way it is named.
+    assert_eq!(CellRange::from("B2").size().unwrap(), (1, 1));
+    assert_eq!(CellRange::from((1, 1)).to_string(), "B2");
+    // Corners given the wrong way round are the same rectangle.
+    assert_eq!(
+        CellRange::from("D4:B2").resolve().unwrap(),
+        CellRange::from("B2:D4").resolve().unwrap()
+    );
+    assert!(CellRange::from("B2:nowhere").resolve().is_err());
+
+    // And a range formats every cell in it in one pass.
+    let mut doc = Document::new_spreadsheet("Blatt", "Q1", 4, 3).unwrap();
+    let mut q1 = doc.table_mut("Q1").unwrap();
+    q1.set_block("A1", &[vec![1, 2], vec![3, 4]]).unwrap();
+    let written = q1
+        .format("A1:B2", &Format::Number { decimals: Some(1) })
+        .unwrap();
+    assert_eq!(written, 4, "a range of four cells, formatted in one call");
+    assert!(q1.read().audit().is_empty());
+}
+
+/// A page-layout document has a body storage the app never draws, so the
+/// concept "the document's body" is refused there rather than written into a
+/// void.
+///
+/// Measured: a paragraph appended to `pages-layout.pages`, opened in Pages,
+/// which read back forty lines of text without it among them.
+#[test]
+fn a_page_layout_document_refuses_body_text() {
+    let mut doc = fixture!("pages-layout.pages");
+    assert_eq!(
+        doc.structure().unwrap().mode,
+        iwork::pages::Mode::PageLayout
+    );
+    // The storage is there — that is exactly the trap.
+    assert!(doc.body_storage().is_some());
+
+    for error in [doc.append_paragraph("x").err(), doc.body_mut().err()] {
+        let error = error.expect("a page-layout body is refused").to_string();
+        assert!(error.contains("page-layout document"), "{error}");
+        assert!(error.contains("text nobody sees"), "{error}");
+    }
+    assert!(doc.changed_streams().is_empty());
+
+    // Everything a page-layout document *is* still reads, and the way to put
+    // words on its pages still works.
+    let structure = doc.structure().unwrap();
+    assert_eq!(structure.sections.len(), 2);
+    assert!(!structure.page_templates.is_empty());
+    assert!(doc.text_storages().len() > 1, "its words are in boxes");
+    doc.add_text_box("page 1", "Von nichts", (100.0, 100.0), (300.0, 60.0))
+        .unwrap();
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+
+    // A word-processing document is untouched by any of this.
+    let mut plain = fixture!("pages-plain.pages");
+    assert!(plain.append_paragraph("x").is_ok());
 }

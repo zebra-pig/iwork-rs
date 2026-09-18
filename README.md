@@ -22,7 +22,7 @@ q1.set("B3", 980)?;
 // does: this crate writes formulas and evaluates none of them.
 q1.formula("B4", "=SUM(B2:B3)", 2_220)?;
 q1.format("B4", &Format::Number { decimals: Some(0) })?;
-q1.width(0, Some(140.0))?;
+q1.column_width(0, Some(140.0))?;
 
 doc.save("Sales.numbers")?;
 ```
@@ -45,11 +45,11 @@ let mut body = doc.body_mut()?;                    // the Pages document body
 body.append("A new paragraph")?;
 body.replace(40..55, "different words")?;          // UTF-16 code units
 
-let mut slide = deck.slide_mut(0)?;                // by position, or by id
+let mut slide = deck.slide_mut(0)?;                // by position; ids are spelled
 slide.title("Quarterly review")?;                  // the layout's title placeholder
 slide.notes("The numbers are provisional")?;
-slide.transition("dissolve", Some(1.5), None)?;
-slide.add_text_box("Aside", (100.0, 120.0), (600.0, 120.0))?;
+slide.transition("dissolve")?;
+slide.add_text_box("Aside", Frame { x: 100.0, y: 120.0, width: 600.0, height: 120.0 })?;
 ```
 
 **A slide is not a page with a title slot.** What a slide can hold is decided by
@@ -710,6 +710,8 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | A cell is named `"B3"` or `(2, 1)`, and reads back the same either way | ✅ | ✅ | ✅ |
 | A text storage is edited through a handle, not an object id | ✅ | ✅ | ✅ |
 | A slide is addressed by position or identifier | — | — | ✅ |
+| A span is a range (`"B2:D2"`), a frame is named, a duration is a field | ✅ | ✅ | ✅ |
+| **The app does not draw a page-layout document's body** — so it is refused | ✅ | — | — |
 | A title the layout does not define is refused by name, not invented | — | — | ✅ |
 | A sheet's drawables, and the tables among them, in the sheet's own order | — | ✅ | — |
 | A table name two sheets share is refused, with both sheets named | — | ✅ | — |
@@ -1186,6 +1188,18 @@ fuzzing story rather than half of it.
   tables this crate builds: a new table is given the two `TSCE` owners a formula
   needs, and **Numbers recalculates a formula written into a document made from
   nothing**.
+- **A page-layout document's body is refused, not written.** Pages has two
+  modes, and the crate reads both: word processing, where text flows from page
+  to page, and page layout, where every word is in a text box. A page-layout
+  document still *has* a body storage — holding the `U+0004` that starts its
+  first section — and the app never draws it, because that is what the Document
+  Body switch being off means. Appending to it therefore succeeds at the byte
+  level and produces text nobody will ever see: measured, by appending a
+  paragraph to `pages-layout.pages`, opening it in Pages and asking for every
+  word in the document — forty lines came back and the new paragraph was not
+  among them. So `append_paragraph` and `body_mut` refuse on such a document and
+  say why; `add_text_box` is how words get onto its pages, and the storage
+  itself is still reachable by identifier for a caller who means exactly that.
 - **A row or column can be deleted, and the refusal list is longer than the
   insert's.** What goes takes its cells' references with it, which is the part an
   insert never has to do. Refused: the table's only row or column, a header or

@@ -76,7 +76,7 @@ fn main() -> Result<(), iwork::Error> {
         )),
     )?;
 
-    q1.width(0, Some(140.0))?;
+    q1.column_width(0, Some(140.0))?;
 
     doc.save(&out)?;
     println!("wrote {out}");

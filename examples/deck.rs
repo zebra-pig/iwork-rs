@@ -13,6 +13,7 @@
 //! placed on the slide. Open a deck built from one of Apple's themes and the
 //! placeholders are there, and `title` and `body` write them.
 
+use iwork::drawable::Frame;
 use iwork::{Document, Kind};
 
 struct Region {
@@ -52,14 +53,26 @@ fn main() -> Result<(), iwork::Error> {
 
     for (index, region) in SALES.iter().enumerate() {
         let mut slide = doc.slide_mut(index)?;
-        slide.add_text_box(region.name, (100.0, 120.0), (1720.0, 160.0))?;
+        slide.add_text_box(
+            region.name,
+            Frame {
+                x: 100.0,
+                y: 120.0,
+                width: 1720.0,
+                height: 160.0,
+            },
+        )?;
         slide.add_text_box(
             &format!("{} units\nCHF {:.2}", region.units, region.revenue),
-            (100.0, 360.0),
-            (1720.0, 320.0),
+            Frame {
+                x: 100.0,
+                y: 360.0,
+                width: 1720.0,
+                height: 320.0,
+            },
         )?;
         // The app's own name for the effect, or the identifier on the wire.
-        slide.transition("dissolve", None, None)?;
+        slide.transition("dissolve")?;
     }
 
     doc.save(&out)?;

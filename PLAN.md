@@ -752,6 +752,48 @@ three of the four written now. What is left is the one that should be left.
 Filled in as phases complete: what was proven, by which test, against which
 fixture, and what the app accepted.
 
+- 2026-09-18 — **Positions as implicit arguments, which is what had just been
+  fixed for cells and left standing everywhere else.** The user's question, and
+  it was right: a cell was `"B3"` now, and a *frame* was still `(100.0, 120.0),
+  (600.0, 120.0)` — two tuples of the same type whose order is the entire
+  meaning — a *span* was `merge("C2", 2, 1)`, a *size* was `width(0, …)` with
+  the axis only in the caller's memory, and a transition was `(Some(1.5),
+  None)`, two `Option<f64>` in a row.
+
+  Each is now named rather than positioned. A frame is `drawable::Frame`, which
+  the crate already had. A span is a **range**: `merge("B2:D2")` in the app's
+  own notation, and `CellRange` resolves to a `Rectangle` with `top_left`,
+  `bottom_right`, `rows()` and `columns()` — clippy's complaint about
+  `((usize, usize), (usize, usize))` was the same smell one level down, and
+  naming the corners answered both. The sizes carry their axis in the method
+  name, `column_width` and `row_height`. And a transition is `transition(effect)`
+  with the app's own defaults, or `transition_with(&TransitionEdit)` where every
+  field has a name.
+
+  A range earns its keep twice over: `format("A1:B2", …)` formats four cells in
+  one pass, where a per-cell loop would have been four batches.
+
+- 2026-09-18 — **Page-layout Pages documents: read, and a trap closed.** Asked
+  whether the crate supports Pages documents that are not flowing text. It
+  reads them fully — the mode, the sections, the page templates, the threads,
+  all fourteen storages and twenty-three drawables of `pages-layout.pages` —
+  and every drawable write works on them, because a page-layout page *is*
+  drawables.
+
+  What it also did, until now, was let a caller write into a body that does not
+  exist to the app. `body` being false is not the absence of the storage:
+  `pages-layout.pages` has one, holding the `U+0004` that starts its first
+  section, and `append_paragraph` wrote into it perfectly happily. **Pages never
+  draws it.** Measured rather than assumed: a paragraph appended, the document
+  opened in Pages, every word in it read back — forty lines came back and the
+  new paragraph was not among them, and `app-check.sh` exited 3.
+
+  So "the document's body" is refused on a page-layout document and says why,
+  pointing at `add_text_box`, which is where such a document's words live. The
+  storage stays reachable by identifier for a caller who means exactly that.
+  This is the same class as the `#REF!` refusals: bytes that go in cleanly and
+  are wrong the moment the app looks at them.
+
 - 2026-09-18 — **The same handles for Pages and Keynote, shaped by what those
   documents are.** The table handle made a spreadsheet readable; the other two
   apps were still addressed entirely by object identifier — `set_text(6083, …)`

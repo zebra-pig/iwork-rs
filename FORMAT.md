@@ -2372,6 +2372,19 @@ Two more signals say the same thing, and neither was assumed:
   *precisely* the 388 carrying one, with no exception either way. A
   word-processing document has none.
 
+**And it still has a body storage, which the app never draws.** `body` being
+false is not the absence of the storage: `pages-layout.pages` has one, holding
+the `U+0004` that starts its first section and nothing else. Writing into it
+therefore *works* — the bytes go in, the document still opens — and the text is
+never seen. Measured: a paragraph appended to that storage, the document opened
+in Pages, and every word in it read back through the scripting interface. Forty
+lines came back and the new paragraph was not among them.
+
+That is why this crate refuses "the document's body" on a page-layout document
+rather than writing into it. The storage is reachable by identifier for a caller
+who means exactly that; what a page-layout document's words live in is text
+boxes.
+
 **A page-layout document has no sections to the app.** `pages-layout` carries
 two `TP.SectionArchive`s — three section templates each, thirty-six header and
 footer storages between them — and Pages answers `count of sections` with 0. The `sections` element is word-processing only, the way the Document

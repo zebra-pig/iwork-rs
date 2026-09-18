@@ -1217,6 +1217,129 @@ impl std::fmt::Display for CellRef {
     }
 }
 
+/// A rectangle of cells — `"B2:D4"`, or a single cell, which is a range of one.
+///
+/// What it is *for* is the calls that would otherwise take counts: a merge is
+/// `merge("B2:D2")` and not `merge("B2", 1, 3)`, where the two numbers are a
+/// row span and a column span in an order the caller has to remember and the
+/// compiler cannot check.
+///
+/// ```
+/// use iwork::table::CellRange;
+/// let range = CellRange::from("B2:D4");
+/// assert_eq!(range.resolve().unwrap().top_left, (1, 1));
+/// assert_eq!(range.resolve().unwrap().bottom_right, (3, 3));
+/// assert_eq!(range.resolve().unwrap().rows(), 3);
+/// assert_eq!(CellRange::from("B2").size().unwrap(), (1, 1));
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CellRange {
+    pub start: CellRef,
+    pub end: CellRef,
+}
+
+/// The rectangle a [`CellRange`] covers, with its corners named.
+///
+/// `((1, 1), (3, 3))` is four numbers in an order a reader has to reconstruct;
+/// this is the same four with `top_left`, `bottom_right`, `rows` and `columns`
+/// on them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rectangle {
+    /// Zero-based row and column of the first cell.
+    pub top_left: (usize, usize),
+    /// …and of the last, which is *inside* the rectangle.
+    pub bottom_right: (usize, usize),
+}
+
+impl Rectangle {
+    pub fn rows(&self) -> usize {
+        self.bottom_right.0 - self.top_left.0 + 1
+    }
+
+    pub fn columns(&self) -> usize {
+        self.bottom_right.1 - self.top_left.1 + 1
+    }
+
+    /// Every cell in it, row by row.
+    pub fn cells(&self) -> Vec<(usize, usize)> {
+        (self.top_left.0..=self.bottom_right.0)
+            .flat_map(|row| {
+                (self.top_left.1..=self.bottom_right.1).map(move |column| (row, column))
+            })
+            .collect()
+    }
+}
+
+impl CellRange {
+    /// The rectangle it covers, with the smaller of each axis first — so a
+    /// range given corner-to-corner either way round is the same rectangle.
+    pub fn resolve(&self) -> Result<Rectangle, crate::Error> {
+        let start = self.start.resolve()?;
+        let end = self.end.resolve()?;
+        Ok(Rectangle {
+            top_left: (start.0.min(end.0), start.1.min(end.1)),
+            bottom_right: (start.0.max(end.0), start.1.max(end.1)),
+        })
+    }
+
+    /// How many rows and columns it covers.
+    pub fn size(&self) -> Result<(usize, usize), crate::Error> {
+        let rectangle = self.resolve()?;
+        Ok((rectangle.rows(), rectangle.columns()))
+    }
+
+    /// Every cell in it, row by row.
+    pub fn cells(&self) -> Result<Vec<(usize, usize)>, crate::Error> {
+        Ok(self.resolve()?.cells())
+    }
+}
+
+impl From<&str> for CellRange {
+    /// `"B2:D4"`, or `"B2"` for a range of one cell.
+    fn from(text: &str) -> CellRange {
+        match text.split_once(':') {
+            Some((start, end)) => CellRange {
+                start: CellRef::from(start),
+                end: CellRef::from(end),
+            },
+            None => CellRange {
+                start: CellRef::from(text),
+                end: CellRef::from(text),
+            },
+        }
+    }
+}
+
+impl From<String> for CellRange {
+    fn from(text: String) -> CellRange {
+        CellRange::from(text.as_str())
+    }
+}
+
+impl From<CellRef> for CellRange {
+    fn from(cell: CellRef) -> CellRange {
+        CellRange {
+            start: cell.clone(),
+            end: cell,
+        }
+    }
+}
+
+impl From<(usize, usize)> for CellRange {
+    fn from(cell: (usize, usize)) -> CellRange {
+        CellRange::from(CellRef::from(cell))
+    }
+}
+
+impl std::fmt::Display for CellRange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.start == self.end {
+            true => write!(f, "{}", self.start),
+            false => write!(f, "{}:{}", self.start, self.end),
+        }
+    }
+}
+
 /// Everything a cell can be written from without ceremony.
 ///
 /// Writing a number used to mean `Decimal::parse(&value.to_string())` and an

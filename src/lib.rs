@@ -45,7 +45,7 @@
 //! let mut slide = deck.slide_mut(0)?;
 //! slide.title("Quarterly review")?;
 //! slide.notes("The numbers are provisional")?;
-//! slide.transition("dissolve", Some(1.5), None)?;
+//! slide.transition("dissolve")?;
 //! # Ok(()) }
 //! ```
 //!
