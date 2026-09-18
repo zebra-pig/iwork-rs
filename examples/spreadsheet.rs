@@ -6,7 +6,7 @@
 //! open Sales.numbers
 //! ```
 
-use iwork::table::Format;
+use iwork::table::{CellValue, Decimal};
 use iwork::Document;
 
 struct Region {
@@ -49,12 +49,9 @@ fn main() -> Result<(), iwork::Error> {
         let row = index + 2;
         q1.set(format!("A{row}"), region.name)?;
         q1.set(format!("B{row}"), region.units)?;
-        q1.set(format!("C{row}"), region.revenue)?;
-        // Two decimals, not a currency: a *currency cell* is a value type this
-        // crate does not write yet, and a currency format on a plain number
-        // would sit in the file and never be drawn — which `set_format` says
-        // rather than accepting.
-        q1.format(format!("C{row}"), &Format::Number { decimals: Some(2) })?;
+        // Money is a value type, not a format: the cell becomes a currency
+        // cell and the app draws `CHF 184300.00`.
+        q1.currency(format!("C{row}"), region.revenue, "CHF")?;
     }
 
     // The total is a real formula: Numbers recalculates it when a figure above
@@ -68,12 +65,17 @@ fn main() -> Result<(), iwork::Error> {
         &format!("=SUM(B2:B{last})"),
         SALES.iter().map(|region| region.units).sum::<u32>(),
     )?;
+    // The total is money too: a currency *value*, which the formula cell takes
+    // like any other — the CHF format the rows above interned is the one it
+    // borrows.
     q1.formula(
         format!("C{total}"),
         &format!("=SUM(C2:C{last})"),
-        SALES.iter().map(|region| region.revenue).sum::<f64>(),
+        CellValue::Currency(Decimal::from_f64(
+            SALES.iter().map(|region| region.revenue).sum::<f64>(),
+        )),
     )?;
-    q1.format(format!("C{total}"), &Format::Number { decimals: Some(2) })?;
+
     q1.width(0, Some(140.0))?;
 
     doc.save(&out)?;

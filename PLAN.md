@@ -752,6 +752,35 @@ three of the four written now. What is left is the one that should be left.
 Filled in as phases complete: what was proven, by which test, against which
 fixture, and what the app accepted.
 
+- 2026-09-18 — **Money, which the example asked for and the format would not
+  give.** Rewriting `examples/spreadsheet.rs` the day before ran straight into
+  a wall: a revenue column could not be CHF. `set_format` refused a currency
+  format on a number cell — correctly, because the app ignores one — and
+  `CellValue::Currency` was not writable, so there was no way to make the cell
+  a currency cell at all.
+
+  **The measurement was available for the asking.** Rather than reason about
+  it, Numbers was told to do the conversion: a number cell this crate wrote,
+  `set format of cell "A1" to currency` through the app's own scripting, saved
+  and read back. Type 2 → **10**; `extras` `0x0000` → **`0x0802`**, which is
+  byte 6's currency bit *and* byte 7's `0x08`; `format_kind` → the currency
+  slot; and — the question the corpus could not answer, its currency cells
+  having been born that way — **the number slot's key is dropped**. The format
+  the app interned for CHF is byte for byte the archive `Format::Currency`
+  already wrote, which is how the two halves met.
+
+  **Why it is a write of its own.** Every other format is *borrowed* from a
+  cell of the table that already carries one, and a table holding no money has
+  none to lend — so `set_currency` interns the currency format first and seeds
+  it as the slot's donor for the batch. That is the whole trick, and it is why
+  a table with nothing in it can be given a money column.
+
+  Numbers draws `CHF 184300.00` and `€ 1234.50` in one table, one format entry
+  per currency and the second CHF cell reusing the first's. A **formula** cell
+  given a currency value is money too, so the example's revenue column now
+  carries its own total: `=SUM(C2:C4)` drawn as `CHF 398450.00`, recalculated
+  by the app when a figure above it changes.
+
 - 2026-09-17 — **The API a caller meets, rather than the format it hides.**
   Four things that made the crate harder to use than the format made it, each
   found by using it rather than by reading it:

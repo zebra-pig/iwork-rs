@@ -298,6 +298,43 @@ impl TableHandle<'_> {
             .set_formula(&self.table, row, column, formula, value.into())
     }
 
+    /// Write an amount as money, in a currency named by its code.
+    ///
+    /// Two decimals unless `decimals` says otherwise — see
+    /// [`Document::set_currency`], which this calls.
+    pub fn currency(
+        &mut self,
+        cell: impl Into<crate::table::CellRef>,
+        amount: impl Into<CellValue>,
+        code: &str,
+    ) -> Result<(), Error> {
+        self.currency_with(cell, amount, code, Some(2))
+    }
+
+    /// The same, saying how many decimal places the amount shows.
+    pub fn currency_with(
+        &mut self,
+        cell: impl Into<crate::table::CellRef>,
+        amount: impl Into<CellValue>,
+        code: &str,
+        decimals: Option<u8>,
+    ) -> Result<(), Error> {
+        let (row, column) = cell.into().resolve()?;
+        let amount = match amount.into() {
+            CellValue::Number(decimal) | CellValue::Currency(decimal) => decimal,
+            other => {
+                return Err(Error::Format(format!(
+                    "{}: {} is not an amount",
+                    self.table,
+                    other.kind()
+                )))
+            }
+        };
+        self.document
+            .set_currency(&self.table, [(row, column, amount)], code, decimals)?;
+        Ok(())
+    }
+
     /// Give a cell a data format. See [`Document::set_format`].
     pub fn format(
         &mut self,
@@ -862,6 +899,12 @@ fn check_table_size(rows: usize, columns: usize) -> Result<(), Error> {
 const MAX_COLUMNS: usize = 255;
 
 /// Every slot a cell record can carry a format key in.
+/// Byte 7 of a cell record, the high half of `extras`: `0x08` on every
+/// currency cell in the corpus and `0x00` on everything else. What it means is
+/// not established here; what is established is that the app sets it when a
+/// cell becomes money and this crate has to as well.
+const CURRENCY_BYTE_SEVEN: u16 = 0x0800;
+
 const ALL_SLOTS: [crate::table::FormatSlot; 6] = [
     crate::table::FormatSlot::Number,
     crate::table::FormatSlot::Currency,
@@ -1981,6 +2024,21 @@ impl Document {
         table: &crate::table::Table,
         cells: Vec<(usize, usize, CellValue)>,
     ) -> Result<usize, Error> {
+        self.write_cells_with(table, cells, ListCache::default())
+    }
+
+    /// The same, with a cache the caller has already put something in.
+    ///
+    /// One caller does: [`Document::set_currency`] interns the currency format
+    /// and seeds it as the *donor* for the currency slot, so the cells it then
+    /// writes point at that format rather than hunting the table for one to
+    /// borrow — which a table holding no money has none of.
+    fn write_cells_with(
+        &mut self,
+        table: &crate::table::Table,
+        cells: Vec<(usize, usize, CellValue)>,
+        cache: ListCache,
+    ) -> Result<usize, Error> {
         let mut by_row: std::collections::BTreeMap<usize, Vec<(usize, CellValue)>> =
             std::collections::BTreeMap::new();
         for (row, column, value) in cells {
@@ -2007,6 +2065,7 @@ impl Document {
                 CellValue::Empty
                 | CellValue::Text(_)
                 | CellValue::Number(_)
+                | CellValue::Currency(_)
                 | CellValue::Bool(_)
                 | CellValue::Date(_)
                 | CellValue::Duration(_) => {}
@@ -2026,7 +2085,7 @@ impl Document {
 
         let site = self.table_site(table)?;
         let restore = self.streams.clone();
-        match self.apply_cell_batch(table, &site, by_row) {
+        match self.apply_cell_batch(table, &site, by_row, cache) {
             Ok(written) => Ok(written),
             Err(e) => {
                 self.streams = restore;
@@ -2056,6 +2115,7 @@ impl Document {
         table: &crate::table::Table,
         site: &TableSite,
         by_row: std::collections::BTreeMap<usize, Vec<(usize, CellValue)>>,
+        mut cache: ListCache,
     ) -> Result<usize, Error> {
         let mut by_tile: std::collections::BTreeMap<usize, Vec<TileRowCells>> =
             std::collections::BTreeMap::new();
@@ -2069,7 +2129,6 @@ impl Document {
         // The patched-object list is a scan of every object in the document, so
         // it is read once for the batch rather than once for every cell.
         let patched = self.patched_objects();
-        let mut cache = ListCache::default();
         let mut written = 0;
         let mut row_delta: std::collections::BTreeMap<usize, i64> = Default::default();
         let mut column_delta: std::collections::BTreeMap<usize, i64> = Default::default();
@@ -2447,6 +2506,7 @@ impl Document {
             CellValue::Empty => None,
             CellValue::Text(_) => Some(FormatSlot::Text),
             CellValue::Number(_) => Some(FormatSlot::Number),
+            CellValue::Currency(_) => Some(FormatSlot::Currency),
             CellValue::Bool(_) => Some(FormatSlot::Boolean),
             CellValue::Date(_) => Some(FormatSlot::Date),
             CellValue::Duration(_) => Some(FormatSlot::Duration),
@@ -2456,13 +2516,25 @@ impl Document {
             CellValue::Empty => cell_type::EMPTY,
             CellValue::Text(_) => cell_type::TEXT,
             CellValue::Number(_) => cell_type::NUMBER,
+            CellValue::Currency(_) => cell_type::CURRENCY,
             CellValue::Bool(_) => cell_type::BOOL,
             CellValue::Date(_) => cell_type::DATE,
             CellValue::Duration(_) => cell_type::DURATION,
             _ => unreachable!("set_cell rejected every other value"),
         };
+        // Byte 7 is `0x08` on every currency cell in the corpus and `0x00`
+        // everywhere else, and nothing here knows what it means — so it is
+        // written as the app writes it and cleared when the cell stops being
+        // money. Measured on a cell this crate wrote and Numbers converted:
+        // `extras` went from `0x0000` to `0x0802`.
+        record.extras = match value {
+            CellValue::Currency(_) => record.extras | CURRENCY_BYTE_SEVEN,
+            _ => record.extras & !CURRENCY_BYTE_SEVEN,
+        };
         match value {
-            CellValue::Number(decimal) => record.decimal = Some(*decimal),
+            CellValue::Number(decimal) | CellValue::Currency(decimal) => {
+                record.decimal = Some(*decimal)
+            }
             CellValue::Bool(flag) => record.double = Some(if *flag { 1.0 } else { 0.0 }),
             CellValue::Duration(seconds) => record.double = Some(*seconds),
             CellValue::Date(seconds) => record.seconds = Some(*seconds),
@@ -2555,6 +2627,14 @@ impl Document {
             }
         }
         record.format_kind = Some(crate::table::format_kind_of(slot));
+        // Money is a format the caller *chose*, and byte 6 is where that is
+        // said: the app's own conversion set the currency bit, and without it
+        // this crate's reader — and the app's inspector — call the cell
+        // automatic. Every other value type leaves byte 6 as it found it,
+        // because writing a number into a cell is not choosing a format for it.
+        if matches!(value, CellValue::Currency(_)) {
+            record.set_explicit_format(crate::table::FormatSlot::Currency);
+        }
         Ok(CellWrite {
             record: Some(record),
             mutations,
@@ -3344,6 +3424,73 @@ impl Document {
             }
         }
         Ok(None)
+    }
+
+    /// Write amounts as **money**, in a currency the caller names.
+    ///
+    /// A currency cell is a *value type*, not a format: `type 10`, the amount
+    /// in the decimal payload, and the currency's format in the cell's currency
+    /// slot. That is why a currency format applied to a plain number cell is
+    /// ignored by the app — the cell is still a number — and why this exists
+    /// beside [`Document::set_format`] rather than inside it.
+    ///
+    /// Measured, on a cell this crate wrote and Numbers converted through its
+    /// own inspector: the record's type went from 2 to **10**, `extras` from
+    /// `0x0000` to **`0x0802`** — byte 6's currency bit, and byte 7's `0x08`
+    /// whose meaning is not established here — `format_kind` to the currency
+    /// slot, and **the number slot's key was dropped**, which is what this does
+    /// too. The format the app interned for `CHF` is byte for byte the one
+    /// [`crate::table::Format::Currency`] writes.
+    ///
+    /// The format is interned once for the whole batch and seeded as the slot's
+    /// donor, so a table holding no money can be given a money column — which
+    /// borrowing from the table, the way every other format is found, cannot
+    /// do.
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), iwork::Error> {
+    /// # let mut doc = iwork::Document::new_spreadsheet("Sales", "Q1", 4, 3)?;
+    /// let mut q1 = doc.table_mut("Q1")?;
+    /// q1.currency("C2", 184_300.0, "CHF")?;
+    /// # Ok(()) }
+    /// ```
+    pub fn set_currency(
+        &mut self,
+        wanted: &str,
+        cells: impl IntoIterator<Item = (usize, usize, crate::table::Decimal)>,
+        code: &str,
+        decimals: Option<u8>,
+    ) -> Result<usize, Error> {
+        let table = self.table_for_write(wanted)?;
+        let site = self.table_site(&table)?;
+        let list = site.formats.ok_or_else(|| {
+            Error::Format(format!("{}: the table has no format list", table.name))
+        })?;
+        self.refuse_if_patched(&[list], &table.name)?;
+        let format = crate::table::Format::Currency {
+            code: code.to_string(),
+            decimals,
+        };
+        let payload = format.archive()?.encode();
+
+        let mut cache = ListCache::default();
+        // The same entry a second money column reuses, and the same one the app
+        // would have interned.
+        let key = match self.matching_format(&mut cache, list, &payload)? {
+            Some(key) => key,
+            None => self.define_list_entry(&mut cache, list, 6, payload, 0)?,
+        };
+        // Seeding the donor is what makes this work on a table with no money in
+        // it: the planner takes a reference per cell, so the count follows.
+        cache
+            .donors
+            .push((crate::table::FormatSlot::Currency, Some(key)));
+
+        let cells: Vec<(usize, usize, CellValue)> = cells
+            .into_iter()
+            .map(|(row, column, amount)| (row, column, CellValue::Currency(amount)))
+            .collect();
+        self.write_cells_with(&table, cells, cache)
     }
 
     // -- writing a formula ---------------------------------------------------

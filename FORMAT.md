@@ -1238,6 +1238,44 @@ decimal), `€ 19.99` (currency `EUR` — with a **non-breaking space** after th
 symbol), `12345.678` (number, three decimals) and `2024-03-01` (the pattern
 `y-MM-dd`). `tests/formats.rs::numbers_reads_back_the_formats_and_the_sizes`.
 
+### Writing money, which is a value and not a format
+
+A currency cell is a **value type**, not a number wearing a format — which is
+why a currency format applied to a plain number cell is ignored by the app, and
+why this is a separate write. What the app produces was measured directly: a
+number cell this crate wrote, converted through Numbers' own inspector
+(`set format of cell "A1" to currency`), and read back.
+
+| | before (number) | after (currency) |
+|---|---|---|
+| cell type | `2` | **`10`** |
+| `extras` | `0x0000` | **`0x0802`** — byte 6's currency bit, byte 7's `0x08` |
+| flags | `0x3001` | `0x5001` — decimal, `format_kind`, **currency** slot key |
+| `format_kind` | 1 (number) | **2 (currency)** |
+| number-slot key | 1 | **gone** |
+
+Two things in there are not guesses. **Byte 7 is `0x08` on money and `0x00`
+everywhere else** — what it means is not established, but the app sets it and so
+does this crate, clearing it again when a number is written over the cell. And
+the **number slot's key is dropped**: a converted cell does not keep the format
+it had as a number, which is the one question the corpus could not answer
+because its currency cells were born that way.
+
+The format the app interned for `CHF` is `{1: 257, 2: 2, 3: "CHF", 4: 0, 5: 0,
+6: 0}` — byte for byte what `Format::Currency` already wrote, which is how these
+two halves meet. It is interned **once per currency**: a second CHF cell takes a
+reference to the same entry, and a table can hold two currencies at once.
+
+That the format is written with the value is what lets a table holding no money
+be given a money column at all. Every other format is *borrowed* from a cell of
+the table that already carries one, and a table with no currency cell has none
+to lend.
+
+Verified by Numbers: `CHF 184300.00` and `€ 1234.50` in one table, both named
+`currency` by the app — and a formula cell given a currency value is drawn as
+money too, so a money column can carry its own total
+(`tests/formats.rs::numbers_draws_written_money_as_money`).
+
 ### Writing a row's height and a column's width
 
 One float, in the row's or column's `HeaderStorageBucket` entry (field 2), and

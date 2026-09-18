@@ -668,6 +668,10 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | Write a data format: number, percent, scientific, currency, date pattern | — | ✅ | — |
 | A format goes in the slot the value uses; any other slot is refused | — | ✅ | — |
 | **The app draws the written format** — percent, €, decimals, date pattern | — | ✅ | — |
+| Write money: a currency *cell*, its amount and the currency's own format | — | ✅ | — |
+| The record is the app's own: type 10, `extras 0x0802`, no number-slot key | — | ✅ | — |
+| One format entry per currency, reused; a number written over money clears it | — | ✅ | — |
+| **The app draws two currencies in one table** — `CHF 184300.00`, `€ 1234.50` | — | ✅ | — |
 | Write a column's width and a row's height; the frame is left alone | — | ✅ | — |
 | **The app reports both back exactly** | — | ✅ | — |
 | Merged ranges | — (none) | ✅ | — |
@@ -1182,7 +1186,9 @@ fuzzing story rather than half of it.
   put a format in another slot: a currency format on a plain number cell is
   ignored by Numbers, drawn as a plain number, so it is refused rather than
   written into a file where it would sit and never show. The slot follows the
-  *value's type*, so making a number into a currency is a value write. Column
+  *value's type*, so making a number into a currency is a value write —
+  `set_currency` is that write, and the money it makes is drawn as money.
+  Column
   widths and row heights are one float each and the app reports them back
   exactly; the table's frame is deliberately untouched, because the app lays a
   table out from its columns and not from its frame.

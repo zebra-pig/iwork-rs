@@ -284,3 +284,134 @@ fn numbers_reads_back_the_formats_and_the_sizes() {
     assert!(text.contains("row\t2\t33.0"), "the row height");
     let _ = std::fs::remove_file(&out);
 }
+
+// -- money -------------------------------------------------------------------
+
+/// A currency cell is a **value type**, not a format, and this is the record
+/// the app writes for one — measured by having Numbers convert a number cell
+/// this crate wrote through its own inspector.
+#[test]
+fn money_is_written_the_way_the_app_writes_it() {
+    use iwork::table::{CellValue, Decimal};
+
+    let mut doc = Document::new_spreadsheet("Blatt", "T", 4, 2).unwrap();
+    let mut t = doc.table_mut("T").unwrap();
+    t.set("A1", 19.99).unwrap();
+    t.currency("A2", 184_300.0, "CHF").unwrap();
+    t.currency("A3", 1_234.5, "EUR").unwrap();
+    t.currency("A4", 99.0, "CHF").unwrap();
+
+    let table = t.read();
+    // The value reads back as money, not as a number that looks like money.
+    assert_eq!(
+        table.value(1, 0),
+        CellValue::Currency(Decimal::parse("184300").unwrap())
+    );
+    assert_eq!(table.cell(1, 0).unwrap().format.as_str(), "currency");
+    // …and the record is the app's: type 10, and `extras` 0x0802 — byte 6's
+    // currency bit and byte 7's 0x08, whose meaning is not established here.
+    let record = &table.cell(1, 0).unwrap().record;
+    assert_eq!(record.cell_type, 10);
+    assert_eq!(record.extras, 0x0802);
+    assert!(record.decimal.is_some(), "the amount is a decimal128");
+    assert!(record.currency_format_id.is_some());
+    assert_eq!(record.number_format_id, None, "the number slot is not used");
+
+    // One entry per currency, and a second CHF cell reuses the first's.
+    let chf = table.cell(1, 0).unwrap().record.currency_format_id;
+    let eur = table.cell(2, 0).unwrap().record.currency_format_id;
+    let again = table.cell(3, 0).unwrap().record.currency_format_id;
+    assert_ne!(chf, eur, "two currencies, one entry");
+    assert_eq!(chf, again, "CHF was interned twice");
+
+    // The plain number beside them is untouched.
+    assert_eq!(table.cell(0, 0).unwrap().record.cell_type, 2);
+    assert!(table.audit().is_empty(), "{:?}", table.audit());
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+}
+
+/// Writing a number over money takes the money away — the currency slot's key,
+/// byte 6's claim and byte 7 with it.
+#[test]
+fn a_number_written_over_money_stops_being_money() {
+    use iwork::table::CellValue;
+
+    let mut doc = Document::new_spreadsheet("Blatt", "T", 2, 2).unwrap();
+    let mut t = doc.table_mut("T").unwrap();
+    // A plain number beside it, because a number written into a table whose
+    // only format is a currency has nothing to borrow — the donor rule, not
+    // this write.
+    t.set("A2", 1).unwrap();
+    t.currency("A1", 19.99, "CHF").unwrap();
+    assert_eq!(t.read().cell(0, 0).unwrap().record.extras, 0x0802);
+
+    t.set("A1", 42).unwrap();
+    let table = t.read();
+    let record = &table.cell(0, 0).unwrap().record;
+    assert_eq!(record.cell_type, 2, "still a currency cell");
+    assert_eq!(record.extras & 0x0800, 0, "byte 7 kept its currency mark");
+    assert_eq!(table.value(0, 0), CellValue::from(42));
+    assert!(table.audit().is_empty(), "{:?}", table.audit());
+}
+
+/// What money will not be written from.
+#[test]
+fn money_refuses_what_is_not_an_amount() {
+    let mut doc = Document::new_spreadsheet("Blatt", "T", 2, 2).unwrap();
+    let mut t = doc.table_mut("T").unwrap();
+    assert!(t.currency("A1", "zwanzig", "CHF").is_err(), "not an amount");
+    assert!(t.currency("A1", 1, "€").is_err(), "not a currency code");
+    assert!(t.currency("A1", 1, "").is_err(), "no currency code");
+    assert!(t.currency("Z9", 1, "CHF").is_err(), "not in the table");
+    assert!(doc.changed_streams().is_empty());
+}
+
+/// The app is the oracle: it draws what this crate called money as money, in
+/// two currencies at once. Off unless `IWORK_APP_CHECK=1`.
+#[test]
+fn numbers_draws_written_money_as_money() {
+    if std::env::var("IWORK_APP_CHECK").as_deref() != Ok("1") {
+        eprintln!("IWORK_APP_CHECK is not 1 — skipping the app round trip");
+        return;
+    }
+    let mut doc = Document::new_spreadsheet("Blatt", "T", 3, 2).unwrap();
+    let mut t = doc.table_mut("T").unwrap();
+    t.set("A1", 19.99).unwrap();
+    t.currency("A2", 184_300.0, "CHF").unwrap();
+    t.currency("A3", 1_234.5, "EUR").unwrap();
+
+    let out = std::env::temp_dir().join("iwork-money.numbers");
+    let _ = std::fs::remove_file(&out);
+    doc.save(&out).unwrap();
+
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/table-oracle.sh");
+    let output = std::process::Command::new(&script)
+        .arg(&out)
+        .output()
+        .unwrap_or_else(|e| panic!("{}: {e}", script.display()));
+    assert!(
+        output.status.success(),
+        "Numbers would not open the document:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+    for (cell, drawn, named) in [
+        ("A1", "19.99", "automatic"),
+        // The app's own separator between symbol and amount is a
+        // *non-breaking* space, as `a_column_width_and_a_row_height` found.
+        ("A2", "CHF\u{a0}184300.00", "currency"),
+        ("A3", "€\u{a0}1234.50", "currency"),
+    ] {
+        assert!(
+            text.lines().any(|line| {
+                let field: Vec<&str> = line.split('\t').collect();
+                field.first() == Some(&"cell")
+                    && field.get(1) == Some(&cell)
+                    && field.get(4) == Some(&drawn)
+                    && field.get(5) == Some(&named)
+            }),
+            "the app did not draw {cell} as {drawn} ({named}):\n{text}"
+        );
+    }
+    let _ = std::fs::remove_file(&out);
+}
