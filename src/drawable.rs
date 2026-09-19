@@ -39,7 +39,7 @@
 //! wrapped in a `TSWP.ShapeStyleArchive`, and a property the style does not
 //! carry comes from its parent. Setting a shape's opacity in Keynote makes the
 //! app write a new variation style whose only properties are the ones that
-//! changed — observed, and the reason [`Document::object_style`] walks the
+//! changed — observed, and the reason [`crate::Document::object_style`] walks the
 //! chain rather than reading one object.
 
 use std::collections::BTreeMap;
@@ -1930,7 +1930,7 @@ fn text_box_style(document: &crate::Document) -> Option<u64> {
 
 /// The styles a new text storage points at: a paragraph style and a list style
 /// the document already has.
-fn text_styles(document: &crate::Document) -> Option<(u64, u64, u64)> {
+pub(crate) fn text_styles(document: &crate::Document) -> Option<(u64, u64, u64)> {
     let stylesheet = document
         .objects()
         .find(|(_, object)| object.message_type() == crate::create::TYPE_STYLESHEET)

@@ -612,6 +612,53 @@ pub(crate) fn pages(paper: Paper) -> Blueprint {
             vec![string(2, IMAGE_IDENTIFIER), reference(5, stylesheet)],
         )]),
     );
+    // A calculation engine, which every Pages document the app makes carries
+    // whether or not it has a table — `pages-plain` and `pages-styled` have one
+    // apiece with nothing in it. It is also *where a table goes*: a Pages
+    // document keeps its `TST.TableInfoArchive` and `TST.TableModelArchive` in
+    // the engine's component, so without one there is nowhere to put a table.
+    let (engine_component, engine) = blueprint.component("CalculationEngine", false);
+    blueprint.put(
+        engine_component,
+        engine,
+        TYPE_CALCULATION_ENGINE,
+        message(vec![nested(2, Vec::new())]),
+    );
+
+    // The styles a *table* is drawn with. A Pages document has no table when
+    // it is made, and carries them anyway — a blank document the app makes
+    // holds 102 cell styles with not a table in sight — which is what lets one
+    // be added later: `add_table` finds them by the names registered here.
+    //
+    // They are **not listed in the stylesheet**, and that is not an oversight:
+    // adding them to its field 8 the way a Numbers stylesheet lists its styles
+    // made Pages refuse the document outright — measured, by bisecting a
+    // document it would not open. The styles are found by name among the
+    // objects instead, which is what `add_table` does.
+    blueprint.add(
+        styles,
+        TYPE_TABLE_STYLE,
+        named_style("table-0-tableStyle", stylesheet),
+    );
+    for area in CELL_AREAS {
+        blueprint.add(
+            styles,
+            TYPE_CELL_STYLE,
+            cell_style(&format!("tableCell-0-{area}"), stylesheet),
+        );
+    }
+    for area in TEXT_AREAS {
+        blueprint.add(
+            styles,
+            crate::style::TYPE_PARAGRAPH_STYLE,
+            table_text_style(
+                &format!("text-0-paragraphstyle-{area}"),
+                area,
+                stylesheet,
+                list,
+            ),
+        );
+    }
     blueprint.put(
         styles,
         stylesheet,
@@ -1405,7 +1452,7 @@ struct TableParts<'a> {
 
 /// The areas of a table that carry a cell style of their own, in the order the
 /// model's fields name them.
-const CELL_AREAS: &[&str] = &[
+pub(crate) const CELL_AREAS: &[&str] = &[
     "bodyStyle",
     "headerRowStyle",
     "headerColumnStyle",
@@ -1426,7 +1473,7 @@ const CELL_AREAS: &[&str] = &[
 ];
 
 /// The same for the text in those areas.
-const TEXT_AREAS: &[&str] = &[
+pub(crate) const TEXT_AREAS: &[&str] = &[
     "Table Header",
     "Table Body",
     "Table Footer",
@@ -1660,9 +1707,9 @@ fn cell_style(identifier: &str, stylesheet: u64) -> Message {
 }
 
 /// `TST.TableStyleArchive`.
-const TYPE_TABLE_STYLE: u32 = 6003;
+pub(crate) const TYPE_TABLE_STYLE: u32 = 6003;
 /// `TST.CellStyleArchive`.
-const TYPE_CELL_STYLE: u32 = 6004;
+pub(crate) const TYPE_CELL_STYLE: u32 = 6004;
 /// `TSWP.ShapeStyleArchive`.
 pub(crate) const TYPE_SHAPE_STYLE: u32 = 2025;
 
@@ -2027,6 +2074,46 @@ pub(crate) fn keynote(slide_size: (f32, f32)) -> Blueprint {
         ("text-0-liststyle-None".to_string(), list),
         (BODY_IDENTIFIER.to_string(), body),
     ];
+
+    // The styles a *table* is drawn with, which a deck carries whether or not
+    // it has one — `keynote-deck.key` holds 102 cell styles and no table. They
+    // are objects and are not listed in the sheet: `add_table` finds them by
+    // the names they carry, and listing them is what made Pages refuse a
+    // document outright.
+    blueprint.add(
+        style_component,
+        TYPE_TABLE_STYLE,
+        named_style("table-0-tableStyle", stylesheet),
+    );
+    for area in CELL_AREAS {
+        blueprint.add(
+            style_component,
+            TYPE_CELL_STYLE,
+            cell_style(&format!("tableCell-0-{area}"), stylesheet),
+        );
+    }
+    for area in TEXT_AREAS {
+        blueprint.add(
+            style_component,
+            crate::style::TYPE_PARAGRAPH_STYLE,
+            table_text_style(
+                &format!("text-0-paragraphstyle-{area}"),
+                area,
+                stylesheet,
+                list,
+            ),
+        );
+    }
+
+    // …and the calculation engine, which every deck the app makes carries and
+    // which is the component a table's model and info live in.
+    let (engine_component, engine) = blueprint.component("CalculationEngine", false);
+    blueprint.put(
+        engine_component,
+        engine,
+        TYPE_CALCULATION_ENGINE,
+        message(vec![nested(2, Vec::new())]),
+    );
 
     let presets = theme_presets(&mut blueprint, style_component, stylesheet, &mut named);
     let theme = blueprint.allocate();
@@ -2825,11 +2912,27 @@ pub(crate) fn image(
 
 /// The `TSWP.StorageArchive` a text box owns: kind 3, and the text in it.
 pub(crate) fn text_box_storage(stylesheet: u64, paragraph: u64, list: u64, text: &str) -> Message {
-    let mut fields = vec![
-        // kind 3: a text box.
-        varint(1, 3),
-        reference(2, stylesheet),
-    ];
+    storage_of_kind(STORAGE_TEXT_BOX, stylesheet, paragraph, list, text)
+}
+
+/// `TSWP.StorageArchive.kind` 3 — a text box.
+pub(crate) const STORAGE_TEXT_BOX: u64 = 3;
+/// …and 4, a slide's presenter notes. "Presenter notes are the kind-4 storages,
+/// and nothing else is" (`FORMAT.md` §13).
+pub(crate) const STORAGE_NOTE: u64 = 4;
+
+/// A storage of a given kind, which is the only thing that differs between a
+/// text box's and a note's: the field set is identical, and was read off the
+/// note of `keynote-deck.key` to make sure — `[1, 2, 3, 5, 6, 7, 10, 14, 24]`
+/// in both.
+pub(crate) fn storage_of_kind(
+    kind: u64,
+    stylesheet: u64,
+    paragraph: u64,
+    list: u64,
+    text: &str,
+) -> Message {
+    let mut fields = vec![varint(1, kind), reference(2, stylesheet)];
     if !text.is_empty() {
         fields.push(string(3, text));
     }

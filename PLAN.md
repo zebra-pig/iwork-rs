@@ -660,9 +660,16 @@ the mediator that ties a Numbers chart to its table is the hard one.
       Numbers recalculates, and a copy of it would claim to follow a table
       while holding numbers of its own. Names and values that do not line up
       are refused too.)*
-- [ ] The mediator: a Numbers chart that follows a table, written. Needs the
-      `TSCE` half — formulas built from nothing, and function 175, which has no
-      published name.
+- [x] The mediator: a Numbers chart that follows a table, written. *(Done
+      2026-09-19, and it needed the `TSCE` half exactly as predicted — which by
+      then existed: `formula_parse` builds an AST from nothing and the merge
+      writer already emitted a cross-table reference. What was left was the
+      mediator's own shape, the **kind-2 owner** keyed by the entity id read as
+      a UUID, and the tracker registrations. Function 175 still has no
+      published name and does not need one: it is written as the corpus writes
+      it. **Numbers recalculates a chart bound this way** — the app was made to
+      set a source cell to 999 and save, and the chart's cached grid came back
+      with 999 in it.)*
 
 ## Phase 15 — Columns, and rows in harder tables
 
@@ -751,6 +758,71 @@ three of the four written now. What is left is the one that should be left.
 
 Filled in as phases complete: what was proven, by which test, against which
 fixture, and what the app accepted.
+
+- 2026-09-19 — **The mediator, which was the last hard half — and it had gone
+  soft.** Phase 14's open item said it needed "the `TSCE` half — formulas built
+  from nothing, and function 175". By the time it was picked up, the first half
+  existed (`formula_parse`) and so did the second in all but name: the *merge*
+  writer already emitted a colon tract carrying a cross-table UUID, which is
+  structurally what a chart's data reference is.
+
+  What was left was the mediator's own shape, and the corpus settled it by
+  counting. Twelve mediators, and **twelve `FormulaOwnerDependenciesArchive`s
+  of `owner_kind` 2** — against eleven owners apiece for each of the eight
+  tables. One owner per mediator, its field 11 pointing at the chart. And the
+  mediator's `entity_id`, a UUID *string*, is the same sixteen bytes as that
+  owner's `formula_owner_uid` **byte-reversed** — checked against all twelve
+  pairs. Without the owner the formulas are text the app never evaluates.
+
+  **Proved the only way it can be.** A chart's grid is a cache of what its
+  mediator last evaluated to, so a mediator the app disbelieves leaves the cache
+  exactly as it was. The test unbinds a chart, binds it with formulas written
+  here, and hands the document to Numbers — which is then made to set `B2` of
+  the source table to 999 and save. The chart's cached grid comes back with
+  **999** in it. `scripts/edit-and-save.sh` is the new probe;
+  `tests/chart_write.rs::numbers_recalculates_a_chart_bound_by_this_crate` runs
+  it.
+
+- 2026-09-19 — **Two holes in "from nothing", and what the app said about
+  each.** A deck this crate made could not carry a word of presenter notes, and
+  a Pages document it made could not be given a table.
+
+  **Notes** turned out to be two objects and no mystery: a `KN.NoteArchive`,
+  which is `{1: → storage}` and nothing else, and a `TSWP.StorageArchive` of
+  **kind 4**. The storage is the one a text box uses with its kind changed —
+  the field set `[1, 2, 3, 5, 6, 7, 10, 14, 24]` was read off
+  `keynote-deck.key`'s own note rather than assumed. Keynote reads both slides'
+  notes back.
+
+  **A table in a Pages document** needed two things and taught one. It needed a
+  *calculation engine*, because that is the component the app keeps a table's
+  model and info in — `pages-report.pages` holds them in
+  `CalculationEngine-58185.iwa` — and every Pages document the app makes has
+  one whether or not it has a table. And it needed the seventeen cell styles and
+  eight paragraph styles a table is drawn with; a blank Pages document from the
+  app carries **102 cell styles** with not a table in sight, so writing them is
+  copying and not inventing.
+
+  The thing it taught: **listing those styles in the stylesheet made Pages
+  refuse the document outright.** Not the table — the *document*, with no table
+  in it at all. Found by bisecting a file the app would not open, which is the
+  only way that could have been found. The styles are written as objects and
+  looked up by the names they carry; the stylesheet is left exactly as it was.
+  Pages opens a document made from nothing with a table in it and reads
+  `Schrauben` back out of it.
+
+  And two things the change turned up on its own. A Keynote deck carries the
+  same 102 cell styles and the same empty engine, so it got both — and a table
+  added to a *slide* then failed this crate's own check: "slide 1063 owns 1079,
+  which is in `CalculationEngine.iwa`, not `Slide-1063.iwa`". A container owns
+  only what is in its own component, so the table's **info** now goes beside the
+  container and its model beside the styles' neighbour, which for a Numbers
+  sheet is the same component anyway. That was a latent bug in `add_table` on a
+  slide, and nothing had found it because no fixture has a table on a slide.
+
+  Still refused, and still for the reason Phase 14 gave: a **chart** in a
+  document with no chart to copy. A dozen `TSCH.Generated.*` objects stand
+  behind one and this crate decodes none of them.
 
 - 2026-09-18 — **Positions as implicit arguments, which is what had just been
   fixed for cells and left standing everywhere else.** The user's question, and

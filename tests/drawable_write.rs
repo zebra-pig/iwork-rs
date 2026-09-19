@@ -330,7 +330,14 @@ fn an_image_placed_from_nothing_is_registered_and_declared() {
         .into_iter()
         .find(|d| Some(d.identifier) == media.data)
         .expect("the registry lists it");
-    assert_eq!(file.entry_name().as_deref(), Some("Data/probe-1011.png"));
+    // The entry is named after the object that owns it — `probe-<id>.png` —
+    // so this checks the shape rather than the number, which moves whenever a
+    // new document gains an object.
+    let entry = file.entry_name().expect("the file has a name");
+    assert!(
+        entry.starts_with("Data/probe-") && entry.ends_with(".png"),
+        "{entry}"
+    );
     assert_eq!(
         file.digest,
         iwork::media::sha1(&bytes).to_vec(),
@@ -420,19 +427,32 @@ fn a_table_can_float_on_a_pages_page() {
     assert!(doc.undeclared_references().is_empty());
 }
 
-/// A document with no table to borrow styles from is refused by name rather
-/// than given an invented table style.
+/// A document with no table of its own can still be given one: the styles a
+/// table is drawn with are there from the start, and are found by the names
+/// they carry.
+///
+/// This used to be a refusal — "no table to borrow styles from" — because the
+/// styles were looked for on an existing table's model. A blank Pages document
+/// the app makes carries 102 cell styles with not a table in sight, so a
+/// document this crate makes carries the seventeen a table names, and the
+/// calculation engine that a Pages table's model lives in.
 #[test]
-fn a_table_needs_a_table_to_borrow_styles_from() {
+fn a_table_can_be_added_to_a_document_that_has_none() {
     let mut doc = Document::new(Kind::Pages).unwrap();
-    let refusal = doc
+    let table = doc
         .add_table_at("page 1", "Preise", 4, 3, (0.0, 0.0))
-        .unwrap_err()
-        .to_string();
-    assert!(
-        refusal.contains("no table to borrow styles from"),
-        "{refusal}"
-    );
+        .expect("the styles are there to be found");
+    assert!(table > 0);
+    assert_eq!(doc.table("Preise").unwrap().rows, 4);
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+    assert!(doc.undeclared_references().is_empty());
+
+    // A Keynote deck has the same set, and the same result.
+    let mut deck = Document::new(Kind::Keynote).unwrap();
+    let slide = deck.slides()[0].identifier;
+    deck.add_table(&slide.to_string(), "Zahlen", 3, 2)
+        .expect("a slide takes a table too");
+    assert!(deck.problems().is_empty(), "{:?}", deck.problems());
 }
 
 /// The apps read the words back. Off unless `IWORK_APP_CHECK=1`.

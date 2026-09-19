@@ -354,3 +354,192 @@ fn the_apps_resave_a_chart_this_crate_rewrote() {
     kept(&out);
     let _ = std::fs::remove_dir_all(&out);
 }
+
+// -- the mediator: a chart that follows a table ------------------------------
+
+/// Take the app's mediator out of a chart, the way a chart copied into a
+/// Numbers document from elsewhere has none.
+///
+/// A chart with a mediator is refused by `bind_chart` — replacing one means
+/// taking the first out of the calculation engine, which is unwritten — so a
+/// test needs a chart without one, and every Numbers chart in the corpus has
+/// one. This is the wire-level edit that makes one.
+fn unbind(doc: &mut Document, chart: u64) {
+    let mut archive = doc.archive(chart).unwrap();
+    let mut model = iwork::pb::decode_nested(archive.bytes(10000).unwrap()).unwrap();
+    model.clear(iwork::chart::field::MEDIATOR);
+    archive.set_in_order(10000, iwork::pb::Value::Bytes(model.encode()));
+    doc.set_archive_for(chart, &archive).unwrap();
+}
+
+/// A mediator this crate wrote, read back by this crate's own reader.
+#[test]
+fn a_chart_can_be_made_to_follow_a_table() {
+    use iwork::chart::ChartBinding;
+
+    let mut doc = fixture!("numbers-charts.numbers");
+    let chart = 905027; // the two-axis chart, fed by 'Average Rainfall'
+    unbind(&mut doc, chart);
+    assert!(doc
+        .charts()
+        .into_iter()
+        .find(|c| c.identifier == chart)
+        .unwrap()
+        .mediator
+        .is_none());
+
+    let mediator = doc
+        .bind_chart(
+            chart,
+            "Average Rainfall",
+            &ChartBinding {
+                series: vec!["B2:B13".into(), "C2:C13".into()],
+                row_labels: vec!["A2:A13".into()],
+                column_labels: vec!["B1".into(), "C1".into()],
+                series_by_row: false,
+            },
+        )
+        .unwrap();
+
+    let bound = doc
+        .charts()
+        .into_iter()
+        .find(|c| c.identifier == chart)
+        .unwrap();
+    assert_eq!(bound.mediator, Some(mediator));
+    let references = bound.references.as_ref().expect("it follows a table now");
+    assert_eq!(
+        references
+            .data
+            .iter()
+            .map(|r| r.to_text())
+            .collect::<Vec<_>>(),
+        vec!["Average Rainfall!$B$2:$B$13", "Average Rainfall!$C$2:$C$13"]
+    );
+    assert_eq!(references.row_labels.len(), 1);
+    assert_eq!(references.column_labels.len(), 2);
+    // Every reference goes through function 175, as every one in the corpus
+    // does.
+    assert!(references.data.iter().all(|r| r.wrapped));
+
+    // The mediator is keyed to the calculation engine by an entity id, and the
+    // owner that makes it live is keyed by the same sixteen bytes.
+    let archive = doc.archive(mediator).unwrap();
+    let entity = String::from_utf8_lossy(archive.bytes(2).unwrap()).into_owned();
+    let uid = iwork::chart::uuid_from_entity(&entity).expect("a UUID");
+    let owned = doc
+        .objects()
+        .filter(|(_, o)| o.message_type() == iwork::calc::TYPE_OWNER_DEPENDENCIES)
+        .filter_map(|(_, o)| iwork::pb::Message::decode(o.payload()).ok())
+        .filter(|owner| owner.varint(3) == Some(2))
+        .any(|owner| {
+            owner
+                .bytes(1)
+                .and_then(iwork::pb::decode_nested)
+                .is_some_and(|u| u.varint(1) == Some(uid.lower) && u.varint(2) == Some(uid.upper))
+        });
+    assert!(owned, "no kind-2 owner carries the mediator's identity");
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+}
+
+/// What binding will not do.
+#[test]
+fn binding_refuses_what_it_cannot_do_honestly() {
+    use iwork::chart::ChartBinding;
+    use iwork::Refusal;
+
+    let mut doc = fixture!("numbers-charts.numbers");
+    let binding = |series: &str| ChartBinding {
+        series: vec![series.into()],
+        ..Default::default()
+    };
+
+    // A chart that already follows a table.
+    let error = doc
+        .bind_chart(905027, "Average Rainfall", &binding("B2:B13"))
+        .expect_err("it already has a mediator");
+    assert!(error.to_string().contains("already follows a table"));
+
+    unbind(&mut doc, 905027);
+    // A range outside the table.
+    let error = doc
+        .bind_chart(905027, "Average Rainfall", &binding("B2:B999"))
+        .expect_err("past the table");
+    assert_eq!(error.refusal(), Some(Refusal::OutOfBounds));
+    // No series at all.
+    let error = doc
+        .bind_chart(905027, "Average Rainfall", &ChartBinding::default())
+        .expect_err("a chart follows something");
+    assert_eq!(error.refusal(), Some(Refusal::NotACell));
+    // A chart that is not there.
+    assert_eq!(
+        doc.bind_chart(1, "Average Rainfall", &binding("B2:B13"))
+            .unwrap_err()
+            .refusal(),
+        Some(Refusal::NotFound)
+    );
+}
+
+/// The one that matters, and the only measure there is: **the app
+/// recalculates the chart from the formulas this crate wrote.**
+///
+/// A chart's grid is a cache of what its mediator last evaluated to, so a
+/// mediator the app does not believe in leaves the cache exactly as it was.
+/// This binds a chart, hands the document to Numbers, has the app itself change
+/// a cell the binding names, saves, and reads the cache back.
+///
+/// Off unless `IWORK_APP_CHECK=1`.
+#[test]
+fn numbers_recalculates_a_chart_bound_by_this_crate() {
+    use iwork::chart::ChartBinding;
+
+    if std::env::var("IWORK_APP_CHECK").as_deref() != Ok("1") {
+        eprintln!("IWORK_APP_CHECK is not 1 — skipping the app round trip");
+        return;
+    }
+    let mut doc = fixture!("numbers-charts.numbers");
+    let chart = 905027;
+    unbind(&mut doc, chart);
+    doc.bind_chart(
+        chart,
+        "Average Rainfall",
+        &ChartBinding {
+            series: vec!["B2:B13".into(), "C2:C13".into()],
+            row_labels: vec!["A2:A13".into()],
+            column_labels: vec!["B1".into(), "C1".into()],
+            series_by_row: false,
+        },
+    )
+    .unwrap();
+
+    let out = scratch("iwork-bound-chart.numbers");
+    doc.save(&out).unwrap();
+
+    // The app edits a cell the chart follows, and saves.
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/edit-and-save.sh");
+    let output = std::process::Command::new(&script)
+        .args([out.to_str().unwrap(), "Average Rainfall", "B2", "999"])
+        .output()
+        .unwrap_or_else(|e| panic!("{}: {e}", script.display()));
+    assert!(
+        output.status.success(),
+        "Numbers would not open a document with a written mediator:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // The cache the chart draws followed the table, which only happens for a
+    // mediator the engine believes.
+    let after = Document::open(&out).unwrap();
+    let grid = &after
+        .charts()
+        .into_iter()
+        .find(|c| c.identifier == chart)
+        .expect("the chart survived")
+        .grid;
+    assert_eq!(
+        grid.rows[0][0].to_text(),
+        "999",
+        "the app did not recalculate the chart from the written mediator"
+    );
+    let _ = std::fs::remove_file(&out);
+}

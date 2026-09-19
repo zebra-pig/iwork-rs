@@ -269,7 +269,7 @@ pub struct CellRecord {
     /// Bytes 2–5. Zero in everything written by the apps so far.
     pub reserved: [u8; 4],
     /// Bytes 6–7. The low byte says which format the user set on purpose —
-    /// see [`EXPLICIT_FORMAT`] and [`CellRecord::explicit_format`]. The high
+    /// see `EXPLICIT_FORMAT` and [`CellRecord::explicit_format`]. The high
     /// byte is undecoded; `0x08` appears on currency cells.
     pub extras: u16,
     pub flags: u32,
@@ -4203,10 +4203,18 @@ pub const TYPE_SHEET: u32 = 2;
 /// it looks like its neighbours; only a document with no table at all needs new
 /// ones. The fields are the twenty-six a model names — see FORMAT.md §14.
 fn borrow_table_styles(document: &crate::Document) -> Option<crate::create::TableStyles> {
-    let model = document
+    let Some(model) = document
         .objects()
         .find(|(_, object)| object.message_type() == TYPE_TABLE_MODEL)
-        .map(|(_, object)| object.identifier)?;
+        .map(|(_, object)| object.identifier)
+    else {
+        // No table to copy the references from — which is every Pages document
+        // that has not had one yet. The styles themselves are still there: a
+        // blank Pages document the app makes carries 102 cell styles with not a
+        // table in sight, and one this crate makes carries the set it writes
+        // for a table, registered under the names below.
+        return table_styles_by_name(document);
+    };
     let archive = document.archive(model).ok()?;
     let at = |number: u32| {
         archive
@@ -4229,11 +4237,58 @@ fn borrow_table_styles(document: &crate::Document) -> Option<crate::create::Tabl
     })
 }
 
+/// The table styles a document carries under the names this crate registers
+/// them by, for a document that has the styles and no table.
+///
+/// The names are `create`'s: `table-0-tableStyle`, `tableCell-0-{area}` and
+/// `text-0-paragraphstyle-{area}`, and a style archive carries its own name at
+/// `1.2` — so this is a lookup and not a guess about which style is which.
+fn table_styles_by_name(document: &crate::Document) -> Option<crate::create::TableStyles> {
+    let named = |wanted: &str, message_type: u32| -> Option<u64> {
+        document
+            .objects()
+            .filter(|(_, object)| object.message_type() == message_type)
+            .find(|(_, object)| {
+                Message::decode(object.payload())
+                    .ok()
+                    .and_then(|archive| {
+                        archive
+                            .bytes(1)
+                            .and_then(decode_nested)
+                            .and_then(|inner| inner.bytes(2).map(<[u8]>::to_vec))
+                    })
+                    .is_some_and(|name| name == wanted.as_bytes())
+            })
+            .map(|(_, object)| object.identifier)
+    };
+    Some(crate::create::TableStyles {
+        table: named("table-0-tableStyle", crate::create::TYPE_TABLE_STYLE)?,
+        cells: crate::create::CELL_AREAS
+            .iter()
+            .map(|area| {
+                named(
+                    &format!("tableCell-0-{area}"),
+                    crate::create::TYPE_CELL_STYLE,
+                )
+            })
+            .collect::<Option<Vec<u64>>>()?,
+        text: crate::create::TEXT_AREAS
+            .iter()
+            .map(|area| {
+                named(
+                    &format!("text-0-paragraphstyle-{area}"),
+                    crate::style::TYPE_PARAGRAPH_STYLE,
+                )
+            })
+            .collect::<Option<Vec<u64>>>()?,
+    })
+}
+
 /// Add a table to a container that already exists — a Numbers sheet, a Keynote
 /// slide or a Pages page.
 ///
 /// A table is a drawable, so where it goes and who holds it are
-/// [`crate::drawable::container_of`]'s question, not this one's: a sheet and a
+/// `drawable::container_of`'s question, not this one's: a sheet and a
 /// slide own theirs and are named as its parent, a Pages page owns nothing and
 /// names it in a page group. Every cell of the new table can be written from
 /// the start, which is the whole reason it carries a `TileRowInfo` per row.
@@ -4262,11 +4317,27 @@ pub fn add_table(
     // Where the model and the info go: beside the table that lent its styles,
     // which is the component the app keeps them in — the calculation engine's,
     // in both Numbers and Pages.
+    // Where the model and the info go: beside a table that is already there,
+    // and otherwise beside the **calculation engine**, which is the component
+    // the app keeps them in — `pages-report.pages` holds its table's model and
+    // info in `CalculationEngine-58185.iwa`, and a Numbers document does the
+    // same.
     let neighbour = document
         .objects()
         .find(|(_, object)| object.message_type() == TYPE_TABLE_MODEL)
+        .or_else(|| {
+            document
+                .objects()
+                .find(|(_, object)| object.message_type() == crate::calc::TYPE_ENGINE)
+        })
         .map(|(_, object)| object.identifier)
-        .expect("borrow_table_styles found one");
+        .ok_or_else(|| {
+            crate::Error::refused(
+                crate::Refusal::Missing,
+                "this document has neither a table nor a calculation engine, so there is \
+                 nowhere to put a table's model — the app keeps both in the engine's component",
+            )
+        })?;
     let seed = seed_from_uuid();
 
     let mut grow = crate::create::Grow::new(document);
@@ -4293,7 +4364,18 @@ pub fn add_table(
         TYPE_TABLE_MODEL,
         &built.model_archive,
     )?;
-    grow.beside(neighbour, info, TYPE_TABLE_INFO, &built.info_archive)?;
+    // The *info* is the drawable the container owns, and a container owns only
+    // what is in its own component: a slide that owns a table living in the
+    // calculation engine's stream is what `check` reports as "slide 1063 owns
+    // 1079, which is in …". So the info goes beside the container and the model
+    // beside the table styles' neighbour, which for a Numbers sheet is the same
+    // component anyway.
+    grow.beside(
+        container.neighbour(),
+        info,
+        TYPE_TABLE_INFO,
+        &built.info_archive,
+    )?;
     grow.finish()?;
 
     crate::drawable::hold(document, &container, info)?;

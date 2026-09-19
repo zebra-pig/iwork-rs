@@ -426,3 +426,135 @@ fn saving_the_same_document_twice_gives_the_same_bytes() {
     let _ = std::fs::remove_file(&one);
     let _ = std::fs::remove_file(&two);
 }
+
+/// A document made from nothing can be given a **table** — which needs two
+/// things it did not have.
+///
+/// A Pages document keeps its `TST.TableInfoArchive` and `TableModelArchive` in
+/// the *calculation engine's* component, so without an engine there is nowhere
+/// to put a table; and a table is drawn with seventeen cell styles and eight
+/// paragraph styles that have to exist first. Every Pages document the app
+/// makes carries both — `pages-plain.pages` holds 102 cell styles and an empty
+/// engine with not a table in sight — so this crate writes both too.
+#[test]
+fn a_new_pages_document_can_be_given_a_table() {
+    use iwork::table::CellValue;
+
+    let mut doc = Document::new(Kind::Pages).unwrap();
+    assert_eq!(
+        doc.objects()
+            .filter(|(_, object)| object.message_type() == 4000)
+            .count(),
+        1,
+        "a new Pages document carries a calculation engine"
+    );
+    assert_eq!(
+        doc.objects()
+            .filter(|(_, object)| object.message_type() == 6004)
+            .count(),
+        17,
+        "…and the cell styles a table is drawn with"
+    );
+
+    doc.append_paragraph("Ein Bericht mit einer Tabelle")
+        .unwrap();
+    let table = doc.add_table("page 1", "Preise", 3, 2).unwrap();
+    assert!(table > 0);
+
+    let mut prices = doc.table_mut("Preise").unwrap();
+    prices.set_block("A1", &[vec!["Artikel", "Preis"]]).unwrap();
+    prices.set("A2", "Schrauben").unwrap();
+    prices.currency("B2", 12.5, "CHF").unwrap();
+    assert_eq!(prices.value("A2").unwrap(), CellValue::from("Schrauben"));
+    assert!(prices.read().audit().is_empty());
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+    assert!(doc.undeclared_references().is_empty());
+}
+
+/// A slide made from nothing can be given **presenter notes**.
+///
+/// A note is two objects — a `KN.NoteArchive`, which is a reference and nothing
+/// else, and a `TSWP.StorageArchive` of kind 4 — and a slide this crate makes
+/// has neither, so writing notes used to be refused by name. Both go in the
+/// slide's own stream, and the storage is the one a text box uses with its kind
+/// changed: the field set was read off `keynote-deck.key`'s own note and is
+/// identical.
+#[test]
+fn a_new_deck_can_be_given_presenter_notes() {
+    let mut doc = Document::new(Kind::Keynote).unwrap();
+    doc.add_slide(None).unwrap();
+    for index in 0..2 {
+        let mut slide = doc.slide_mut(index).unwrap();
+        assert!(slide.read().note.is_none(), "a new slide has no note");
+        slide
+            .notes(&format!("Notizen zu Folie {}", index + 1))
+            .unwrap();
+        assert_eq!(
+            slide.read().notes,
+            format!("Notizen zu Folie {}", index + 1)
+        );
+        assert!(slide.read().note.is_some());
+    }
+    // Writing the notes again edits the storage rather than making a second.
+    let notes = doc
+        .objects()
+        .filter(|(_, object)| object.message_type() == 15)
+        .count();
+    doc.slide_mut(0).unwrap().notes("Anders").unwrap();
+    assert_eq!(
+        doc.objects()
+            .filter(|(_, object)| object.message_type() == 15)
+            .count(),
+        notes
+    );
+    assert_eq!(doc.slides()[0].notes, "Anders");
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+    assert!(doc.undeclared_references().is_empty());
+}
+
+/// The apps open both. Off unless `IWORK_APP_CHECK=1`.
+#[test]
+fn the_apps_open_a_table_and_notes_made_from_nothing() {
+    if std::env::var("IWORK_APP_CHECK").as_deref() != Ok("1") {
+        eprintln!("IWORK_APP_CHECK is not 1 — skipping the app round trip");
+        return;
+    }
+    let check = |path: &std::path::Path, expected: &str| {
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/app-check.sh");
+        let output = std::process::Command::new(&script)
+            .arg(path)
+            .arg(expected)
+            .output()
+            .unwrap_or_else(|e| panic!("{}: {e}", script.display()));
+        assert!(
+            output.status.success(),
+            "the app would not open {}:\n{}\n{}",
+            path.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+
+    let mut pages = Document::new(Kind::Pages).unwrap();
+    pages.append_paragraph("Ein Bericht").unwrap();
+    pages.add_table("page 1", "Preise", 3, 2).unwrap();
+    pages
+        .table_mut("Preise")
+        .unwrap()
+        .set("A2", "Schrauben")
+        .unwrap();
+    let out = scratch("iwork-new-table.pages");
+    pages.save(&out).unwrap();
+    check(&out, "Schrauben");
+    let _ = std::fs::remove_file(&out);
+
+    let mut deck = Document::new(Kind::Keynote).unwrap();
+    deck.slide_mut(0)
+        .unwrap()
+        .notes("Notizen aus dem Nichts")
+        .unwrap();
+    let out = scratch("iwork-new-notes.key");
+    deck.save(&out).unwrap();
+    check(&out, "Notizen aus dem Nichts");
+    let _ = std::fs::remove_file(&out);
+}

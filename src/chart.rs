@@ -1570,3 +1570,270 @@ fn place(archive: &mut Message, parent: Option<u64>, position: (f32, f32), size:
         *archive = rebuilt;
     }
 }
+
+// -- binding a chart to a table ----------------------------------------------
+
+/// Which cells of which table feed a chart — see
+/// [`crate::Document::bind_chart`].
+///
+/// One range per series, and the label ranges beside them. Named rather than
+/// positional, because a chart binding is four lists and an order nobody
+/// remembers.
+#[derive(Debug, Clone, Default)]
+pub struct ChartBinding {
+    /// One range per series, in the order the chart draws them.
+    pub series: Vec<crate::table::CellRange>,
+    /// The cells the row labels are read from, one per row.
+    pub row_labels: Vec<crate::table::CellRange>,
+    /// …and the column labels.
+    pub column_labels: Vec<crate::table::CellRange>,
+    /// `direction`: series by row (1) or by column (2), as the mediator stores
+    /// it. Every mediator in the corpus carries one or the other.
+    pub series_by_row: bool,
+}
+
+/// `TN.ChartMediatorFormulaStorage` field numbers.
+mod mediator_field {
+    /// One `TSCE.FormulaArchive` per series.
+    pub const DATA: u32 = 1;
+    pub const ROW_LABELS: u32 = 3;
+    pub const COLUMN_LABELS: u32 = 4;
+    pub const DIRECTION: u32 = 5;
+}
+
+/// The function every mediator reference is wrapped in. Apple publishes no name
+/// for it; see the module comment.
+pub const MEDIATOR_FUNCTION: u64 = 175;
+
+/// Make a chart follow a table.
+///
+/// This is the second half of a Numbers chart, and the half that makes it a
+/// *chart of a table* rather than a picture of some numbers: the grid it draws
+/// stays what it was — a cache — and the mediator says where those numbers came
+/// from, so the app recalculates them when the table changes.
+///
+/// What is written, copied from the twelve mediators of
+/// `numbers-charts.numbers`:
+///
+/// * a `TN.ChartMediatorArchive` (12006) in the calculation engine's stream,
+///   holding `{2: -1, 3: series count}`, a fresh **entity id** as a UUID
+///   string, and one `TSCE.FormulaArchive` per series and per label — each of
+///   them a reference wrapped in **function 175**;
+/// * a `FormulaOwnerDependenciesArchive` of **`owner_kind` 2**, whose
+///   `formula_owner_uid` is that entity id read as a UUID and whose field 11
+///   points at the chart — one per mediator, exactly as the corpus has twelve
+///   of each;
+/// * both registered in the engine's dependency tracker, the way every owner
+///   is;
+/// * and `ChartArchive.mediator` (field 8) pointing at the mediator.
+///
+/// Refused by name: a chart that already has a mediator, a range outside the
+/// table, a binding with no series, and a table whose identity the engine does
+/// not know.
+pub fn bind_chart(
+    document: &mut crate::Document,
+    chart: u64,
+    table: &crate::table::Table,
+    binding: &ChartBinding,
+) -> Result<u64, crate::Error> {
+    use crate::{Error, Refusal};
+
+    let existing = charts(document)
+        .into_iter()
+        .find(|c| c.identifier == chart)
+        .ok_or_else(|| Error::refused(Refusal::NotFound, format!("no chart {chart}")))?;
+    if let Some(mediator) = existing.mediator {
+        return Err(Error::refused(
+            Refusal::Missing,
+            format!(
+                "chart {chart} already follows a table through mediator {mediator}, and \
+                 pointing it at another one means taking the first out of the calculation \
+                 engine"
+            ),
+        ));
+    }
+    if binding.series.is_empty() {
+        return Err(Error::refused(
+            Refusal::NotACell,
+            "a chart follows at least one series".to_string(),
+        ));
+    }
+    if table.base_uid == crate::table::Uuid::default() {
+        return Err(Error::refused(
+            Refusal::Missing,
+            format!(
+                "table {} has no base_owner_uid, so a formula cannot name it — a table this \
+                 crate made carries one",
+                table.name
+            ),
+        ));
+    }
+    for range in binding
+        .series
+        .iter()
+        .chain(&binding.row_labels)
+        .chain(&binding.column_labels)
+    {
+        let rectangle = range.resolve()?;
+        if rectangle.bottom_right.0 >= table.rows || rectangle.bottom_right.1 >= table.columns {
+            return Err(Error::refused(
+                Refusal::OutOfBounds,
+                format!(
+                    "{range} is outside {}, which is {}×{}",
+                    table.name, table.rows, table.columns
+                ),
+            ));
+        }
+    }
+
+    // The mediator's identity, in the two forms the format keeps it in: the
+    // string the archive carries, and the same sixteen bytes as the UUID its
+    // owner is keyed by. They are byte-reversed halves of one another —
+    // `E357DB84-…-CFE8` is owner uid `…CFE8` / `E357DB84…` read the other way
+    // round, which is how the corpus's twelve pairs line up.
+    let entity = crate::metadata::uuid();
+    let uid = uuid_from_entity(&entity)
+        .ok_or_else(|| Error::Format(format!("{entity} is not a UUID this crate can read back")))?;
+
+    let mut storage = crate::pb::Message::default();
+    for range in &binding.series {
+        storage.append_in_order(
+            mediator_field::DATA,
+            Value::Bytes(reference_formula(table, range)?),
+        );
+    }
+    for range in &binding.row_labels {
+        storage.append_in_order(
+            mediator_field::ROW_LABELS,
+            Value::Bytes(reference_formula(table, range)?),
+        );
+    }
+    for range in &binding.column_labels {
+        storage.append_in_order(
+            mediator_field::COLUMN_LABELS,
+            Value::Bytes(reference_formula(table, range)?),
+        );
+    }
+    storage.set_in_order(
+        mediator_field::DIRECTION,
+        Value::Varint(if binding.series_by_row { 1 } else { 2 }),
+    );
+
+    let mut head = crate::pb::Message::default();
+    // `local_series_indexes` is -1 on every mediator in the corpus, and
+    // `remote_series_indexes` is the number of series.
+    head.set_in_order(2, Value::Varint(u64::from(u32::MAX)));
+    head.set_in_order(3, Value::Varint(binding.series.len() as u64));
+
+    let mut archive = crate::pb::Message::default();
+    archive.set_in_order(1, Value::Bytes(head.encode()));
+    archive.set_in_order(2, Value::Bytes(entity.as_bytes().to_vec()));
+    archive.set_in_order(3, Value::Bytes(storage.encode()));
+
+    let mediator = crate::calc::add_chart_mediator(document, chart, &archive, uid)?;
+
+    // The chart's half of the link.
+    let mut chart_archive = document.archive(chart)?;
+    let mut model = chart_archive
+        .bytes(EXTENSION)
+        .and_then(decode_nested)
+        .ok_or_else(|| {
+            Error::Format(format!(
+                "chart {chart} carries no chart archive at extension {EXTENSION}"
+            ))
+        })?;
+    model.set_in_order(
+        field::MEDIATOR,
+        Value::Bytes(crate::create::reference_bytes(mediator)),
+    );
+    chart_archive.set_in_order(EXTENSION, Value::Bytes(model.encode()));
+    document.set_archive_of(chart, &chart_archive)?;
+    Ok(mediator)
+}
+
+/// One mediator formula: a reference to a range of a table, wrapped in function
+/// 175.
+fn reference_formula(
+    table: &crate::table::Table,
+    range: &crate::table::CellRange,
+) -> Result<Vec<u8>, crate::Error> {
+    let rectangle = range.resolve()?;
+    let cell = |row: usize, column: usize| {
+        format!(
+            "${}${}",
+            crate::formula::column_letters(column as i64),
+            row + 1
+        )
+    };
+    let text = match rectangle.top_left == rectangle.bottom_right {
+        true => format!("={}", cell(rectangle.top_left.0, rectangle.top_left.1)),
+        false => format!(
+            "={}:{}",
+            cell(rectangle.top_left.0, rectangle.top_left.1),
+            cell(rectangle.bottom_right.0, rectangle.bottom_right.1)
+        ),
+    };
+    let ast = crate::formula_parse::parse(&text, (0, 0))
+        .map_err(|e| crate::Error::Format(format!("{text}: {e}")))?;
+
+    // The reference names the table it reaches, the way a cross-table reference
+    // does — and a mediator's reference always does, because the chart is not
+    // in the table.
+    let mut nodes = ast.nodes;
+    let mut reference = nodes
+        .first()
+        .ok_or_else(|| crate::Error::Format(format!("{text} parsed to nothing")))?
+        .message()
+        .clone();
+    reference.set_in_order(28, Value::Bytes(cross_table_info(table.base_uid).encode()));
+    nodes[0] = crate::formula::Node::decode(reference)
+        .ok_or_else(|| crate::Error::Format("the range node is not a node".to_string()))?;
+
+    // …and every one of them goes through function 175.
+    let mut wrapper = crate::pb::Message::default();
+    wrapper.set_in_order(1, Value::Varint(16));
+    wrapper.set_in_order(2, Value::Varint(MEDIATOR_FUNCTION));
+    wrapper.set_in_order(3, Value::Varint(1));
+    nodes.push(
+        crate::formula::Node::decode(wrapper)
+            .ok_or_else(|| crate::Error::Format("the wrapper is not a node".to_string()))?,
+    );
+
+    let mut formula = crate::pb::Message::default();
+    formula.set_in_order(1, Value::Bytes(crate::formula::Ast { nodes }.encode()));
+    Ok(formula.encode())
+}
+
+/// `AST_cross_table_reference_extra_info` — field 28's `TSP.CFUUIDArchive`.
+fn cross_table_info(uid: crate::table::Uuid) -> crate::pb::Message {
+    let mut uuid = crate::pb::Message::default();
+    uuid.set_in_order(2, Value::Varint(uid.lower & 0xffff_ffff));
+    uuid.set_in_order(3, Value::Varint(uid.lower >> 32));
+    uuid.set_in_order(4, Value::Varint(uid.upper & 0xffff_ffff));
+    uuid.set_in_order(5, Value::Varint(uid.upper >> 32));
+    let mut extra = crate::pb::Message::default();
+    extra.set_in_order(1, Value::Bytes(uuid.encode()));
+    extra
+}
+
+/// The owner uid for a mediator's entity id.
+///
+/// The two are the same sixteen bytes with the halves read the other way round:
+/// entity `E357DB84-F3DD-4CBE-B2D8-8CD778D0CFE8` is owner uid `{lower:
+/// 0x…CFE8D078…, upper: …}` — checked against all twelve pairs in
+/// `numbers-charts.numbers`.
+pub fn uuid_from_entity(entity: &str) -> Option<crate::table::Uuid> {
+    let plain: String = entity.chars().filter(|c| *c != '-').collect();
+    if plain.len() != 32 {
+        return None;
+    }
+    let mut bytes = [0u8; 16];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&plain[index * 2..index * 2 + 2], 16).ok()?;
+    }
+    bytes.reverse();
+    Some(crate::table::Uuid {
+        lower: u64::from_be_bytes(bytes[8..].try_into().ok()?),
+        upper: u64::from_be_bytes(bytes[..8].try_into().ok()?),
+    })
+}

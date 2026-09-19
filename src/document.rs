@@ -2150,7 +2150,7 @@ impl Document {
     /// charts, shapes, images and text boxes beside them. Two tables on one
     /// sheet is ordinary, and they may share nothing but the page they are
     /// drawn on. So this reports the sheet and what is on it, and
-    /// [`Sheet::tables`] narrows that list to the tables rather than pretending
+    /// [`crate::table::Sheet::tables`] narrows that list to the tables rather than pretending
     /// the sheet is one.
     ///
     /// Pages and Keynote have no sheets — a table there hangs off a page or a
@@ -3570,6 +3570,41 @@ impl Document {
                 ))
             }
         }
+    }
+
+    /// Make a chart follow a table — the *mediator*, which is what turns a
+    /// picture of some numbers into a chart of a table.
+    ///
+    /// The grid the chart draws stays what it was: in Numbers it is a **cache**
+    /// of what the mediator's formulas last evaluated to. What this adds is the
+    /// formulas — one per series and per label, each a reference to the table
+    /// wrapped in function 175 — and the owner that makes the calculation
+    /// engine know about them. See [`crate::chart::bind_chart`].
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), iwork::Error> {
+    /// # let mut doc = iwork::Document::open("Budget.numbers")?;
+    /// use iwork::chart::ChartBinding;
+    /// doc.bind_chart(
+    ///     905245,
+    ///     "Umsatz",
+    ///     &ChartBinding {
+    ///         series: vec!["B2:B13".into(), "C2:C13".into()],
+    ///         row_labels: vec!["A2:A13".into()],
+    ///         column_labels: vec!["B1".into(), "C1".into()],
+    ///         series_by_row: false,
+    ///     },
+    /// )?;
+    /// # Ok(()) }
+    /// ```
+    pub fn bind_chart(
+        &mut self,
+        chart: u64,
+        table: &str,
+        binding: &crate::chart::ChartBinding,
+    ) -> Result<u64, Error> {
+        let table = self.table_for_write(table)?;
+        crate::chart::bind_chart(self, chart, &table, binding)
     }
 
     // -- sizes and formats ---------------------------------------------------
@@ -7847,12 +7882,14 @@ impl Document {
             .ok_or_else(|| Error::refused(Refusal::NotFound, "not a Keynote document"))?;
         let found = show.slide(slide).ok_or(Error::NoSuchObject(slide))?;
         let node = found.node;
-        let storage = found.note_storage.ok_or_else(|| {
-            Error::refused(
-                Refusal::Missing,
-                format!("slide {slide} has no presenter notes"),
-            )
-        })?;
+        // A slide with no notes is given some: two objects, which is all a note
+        // is — see [`crate::keynote::add_note`]. A deck made from nothing has
+        // none of them, and refusing here made such a deck unable to carry a
+        // word of speaker notes.
+        let storage = match found.note_storage {
+            Some(storage) => storage,
+            None => crate::keynote::add_note(self, slide)?,
+        };
 
         let edit = self.set_text(storage, text)?;
 
@@ -9114,7 +9151,18 @@ impl Document {
             .map_err(|e| Error::Format(format!("{name}: storage {identifier}: {e}")))
     }
 
-    /// [`Document::set_archive`], for the modules that model one app.
+    /// `Document::set_archive`, for the modules that model one app.
+    /// Write any object's archive back, at the wire level.
+    ///
+    /// The escape hatch [`Document::archive`] is the read half of: a caller
+    /// that understands a message this crate does not can edit it and put it
+    /// back. Nothing checks what it means — `iwork check` and
+    /// [`Document::problems`] are what say whether the result is still a
+    /// document.
+    pub fn set_archive_for(&mut self, identifier: u64, archive: &Message) -> Result<(), Error> {
+        self.set_archive(identifier, archive)
+    }
+
     pub(crate) fn set_archive_of(
         &mut self,
         identifier: u64,

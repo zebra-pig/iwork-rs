@@ -133,7 +133,7 @@ pub mod slide_tree_field {
     /// `rootSlideNode`, deprecated and absent from every deck here.
     pub const ROOT: u32 = 1;
     /// The deck, in order. **This repeated field is the slide order** — see
-    /// [`move_slide`].
+    /// [`crate::Document::move_slide`].
     pub const SLIDES: u32 = 2;
 }
 
@@ -1646,7 +1646,7 @@ fn node_of(document: &crate::Document, slide: u64) -> Result<(u64, Message), Err
 /// The node order held in a `KN.SlideTreeArchive`, **refusing the read if any
 /// entry is not a bare `{1: node}` reference**.
 ///
-/// [`move_slide`] and [`insert_into_slide_tree`] rebuild the repeated `slides`
+/// `move_slide` and `insert_into_slide_tree` rebuild the repeated `slides`
 /// field from these ids, re-emitting each as a fresh `{1: id}` message — which
 /// reproduces a bare reference byte for byte but would silently drop an entry
 /// that carried anything else, and its slide with it. Every entry Keynote
@@ -1679,7 +1679,7 @@ fn slide_tree_order(tree: &Message) -> Result<Vec<u64>, Error> {
 
 /// The show, its slide tree, and the node order — the reading every reorder
 /// starts from. Errors if the document is not a deck, has no tree, or holds a
-/// tree entry [`slide_tree_order`] will not reproduce.
+/// tree entry `slide_tree_order` will not reproduce.
 fn read_slide_tree(document: &crate::Document) -> Result<(u64, Message, Message, Vec<u64>), Error> {
     let (show_id, show_archive) = document
         .objects()
@@ -1698,7 +1698,7 @@ fn read_slide_tree(document: &crate::Document) -> Result<(u64, Message, Message,
 
 /// Write a new node order back into the show, keeping every other field of the
 /// `KN.SlideTreeArchive` verbatim. The entries are re-emitted as bare
-/// references, which reproduces what [`slide_tree_order`] accepted byte for
+/// references, which reproduces what `slide_tree_order` accepted byte for
 /// byte, so an order that ends where it began reproduces the original stream.
 fn write_slide_order(
     document: &mut crate::Document,
@@ -1752,7 +1752,7 @@ fn slide_node_in_deck(document: &crate::Document, slide: u64) -> Result<(u64, Me
 ///
 /// Refuses an id that is not a slide in the show's deck — a slide layout has a
 /// node too, and writing `isSkipped` into a theme template is a silent
-/// mis-edit. See [`slide_node_in_deck`].
+/// mis-edit. See `slide_node_in_deck`.
 ///
 /// Returns whether the flag changed.
 pub fn set_slide_skipped(
@@ -1785,7 +1785,7 @@ pub fn set_slide_skipped(
 /// Refuses a slide the deck does not list (a slide layout among them) and an
 /// out-of-range target — a clamp would report "now at position 5" for a
 /// `move … 99` on a six-slide deck, which is a lie about where the slide went.
-/// The permutation only ever re-emits entries [`slide_tree_order`] accepted as
+/// The permutation only ever re-emits entries `slide_tree_order` accepted as
 /// bare references, so it is byte-for-byte lossless or it is refused.
 pub fn move_slide(document: &mut crate::Document, slide: u64, to: usize) -> Result<usize, Error> {
     let (node, _) = node_of(document, slide)?;
@@ -2881,4 +2881,69 @@ fn chunk_archive(build: u64, edit: &BuildEdit, seed: u64) -> Message {
         nested(7, vec![nested(1, uuid()), varint(2, 1)]),
         nested(8, uuid()),
     ])
+}
+
+/// Give a slide presenter notes it does not have yet, and hand back the storage
+/// an edit takes.
+///
+/// A slide made from nothing has none: the note is not a field of the slide but
+/// **two objects** — a `KN.NoteArchive`, which is `{1: → storage}` and nothing
+/// else, and the `TSWP.StorageArchive` of **kind 4** it points at. Both go in
+/// the slide's own stream, the slide's `note` (27) points at the archive, and
+/// the node's `hasNote` follows the text.
+///
+/// The storage is the one `create::text_box_storage` writes with its
+/// kind changed: the field set is identical — `[1, 2, 3, 5, 6, 7, 10, 14, 24]`
+/// — which was read off `keynote-deck.key`'s own note rather than assumed.
+pub fn add_note(document: &mut crate::Document, slide: u64) -> Result<u64, crate::Error> {
+    use crate::{Error, Refusal};
+
+    let show = document
+        .show()
+        .ok_or_else(|| Error::refused(Refusal::NotFound, "not a Keynote document"))?;
+    let found = show
+        .slide(slide)
+        .ok_or_else(|| Error::refused(Refusal::NotFound, format!("no slide {slide}")))?;
+    if let Some(storage) = found.note_storage {
+        return Ok(storage);
+    }
+    let slide = found.identifier;
+    let (stylesheet, paragraph, list) =
+        crate::drawable::text_styles(document).ok_or_else(|| {
+            Error::refused(
+                Refusal::Missing,
+                "this document has no text styles to write notes with",
+            )
+        })?;
+
+    let mut grow = crate::create::Grow::new(document);
+    let storage = grow.allocate();
+    let note = grow.allocate();
+    grow.beside(
+        slide,
+        storage,
+        crate::TYPE_STORAGE,
+        &crate::create::storage_of_kind(
+            crate::create::STORAGE_NOTE,
+            stylesheet,
+            paragraph,
+            list,
+            "",
+        ),
+    )?;
+    grow.beside(
+        slide,
+        note,
+        TYPE_NOTE,
+        &crate::create::message(vec![crate::create::reference(1, storage)]),
+    )?;
+    grow.finish()?;
+
+    let mut archive = document.archive(slide)?;
+    archive.set_in_order(
+        slide_field::NOTE,
+        crate::pb::Value::Bytes(crate::create::reference_bytes(note)),
+    );
+    document.set_archive_of(slide, &archive)?;
+    Ok(storage)
 }

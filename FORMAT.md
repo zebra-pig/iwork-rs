@@ -3276,6 +3276,44 @@ by `base_owner_uid` — so `Fundraiser Results by Salesperson!Units Sold Andy` a
 gives `Table::A2:Table::A10` for a range, which is why the target is resolved
 first.
 
+### Writing a mediator: making a chart follow a table
+
+The hard half of a Numbers chart, and the one this crate refused until it could
+be measured. What a binding is made of, copied from the twelve mediators of
+`numbers-charts.numbers`:
+
+| Object | What it carries |
+|---|---|
+| `TN.ChartMediatorArchive` (12006), in the engine's stream | `1: {2: 0xFFFFFFFF, 3: series count}` — `local_series_indexes` is −1 on every mediator in the corpus; `2:` a fresh **entity id** as a UUID *string*; `3:` the formula storage; `4:` `columns_are_series`, absent throughout |
+| the formula storage | `1:` one `TSCE.FormulaArchive` per series, `3:` per row label, `4:` per column label, `5:` direction (1 or 2) |
+| each formula | one reference — `CELL_REFERENCE` or `COLON_TRACT` with **field 28 naming the table's `base_owner_uid`** — wrapped in `FUNCTION` **175** |
+| `FormulaOwnerDependenciesArchive`, `owner_kind` **2** | `formula_owner_uid` is the entity id *read as a UUID*, and field **11** points at the chart |
+| the engine's dependency tracker | the owner's internal id in its list (3) and a reference to the object (6), as for every owner |
+| `ChartArchive.mediator` (8) | the mediator |
+
+**The entity id and the owner uid are the same sixteen bytes, byte-reversed.**
+`E357DB84-F3DD-4CBE-B2D8-8CD778D0CFE8` is the owner whose uid reads
+`E8CFD078D78CD8B2BE4CDDF384DB57E3` — checked against all twelve pairs. That
+correspondence is what ties a mediator to the engine, and without its owner the
+formulas are text the app never evaluates.
+
+**One kind-2 owner per mediator, and eleven per table.** The corpus counts say
+it exactly: twelve mediators, twelve owners of kind 2; eight tables, eight
+owners of each of kinds 1, 3, 4, 5, 6, 8, 9, 10, 11, 12 and 35.
+
+**Verified the only way it can be.** A chart's grid is a *cache* of what its
+mediator last evaluated to, so a mediator the app does not believe leaves the
+cache untouched. The test unbinds a chart, binds it with formulas this crate
+writes, saves, and then **has Numbers itself set `B2` of the table to 999 and
+save**. The chart's cached grid comes back with 999 in it: the app recalculated
+the chart from formulas built here. `scripts/edit-and-save.sh` is that probe,
+and `tests/chart_write.rs::numbers_recalculates_a_chart_bound_by_this_crate`
+runs it.
+
+**Replacing an existing mediator is refused.** Pointing a bound chart at another
+table means taking the first mediator out of the engine — its object, its owner
+and both tracker registrations — and nothing here has watched the app do that.
+
 ### Private copy versus live references — which is which
 
 | | Pages | Keynote | Numbers |

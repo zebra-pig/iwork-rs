@@ -316,7 +316,7 @@ const OWNER_KIND_CELLS: u64 = 1;
 ///
 /// A table this crate builds from nothing has a `HauntedOwnerArchive` in its
 /// model (field 84) and nothing else: no `FormulaOwnerDependenciesArchive`
-/// anywhere, so `base_owner_uid` resolves to nothing, [`cell_owner`] finds
+/// anywhere, so `base_owner_uid` resolves to nothing, `cell_owner` finds
 /// nothing, and every formula written into it was refused by name. This is what
 /// closes that — two owners per table, copied from the ones Numbers writes:
 ///
@@ -532,4 +532,115 @@ fn empty_owner(uid: crate::table::Uuid, id: u64, kind: u64) -> Message {
         empty(15),
         empty(16),
     ])
+}
+
+/// Put a chart mediator in the engine, with the owner that makes it live.
+///
+/// The mediator archive itself is [`crate::chart::bind_chart`]'s; this is the
+/// half that belongs to the calculation engine — where the object goes, the
+/// `owner_kind` **2** owner keyed by the mediator's entity id, and the two
+/// registrations in the dependency tracker that every owner has.
+///
+/// One owner per mediator, which is what the corpus shows: twelve mediators,
+/// twelve kind-2 owners, and eleven owners apiece for the eight tables beside
+/// them.
+pub fn add_chart_mediator(
+    document: &mut crate::Document,
+    chart: u64,
+    archive: &Message,
+    uid: crate::table::Uuid,
+) -> Result<u64, Error> {
+    let engine = object_of_type(document, TYPE_ENGINE).ok_or_else(|| {
+        Error::refused(
+            crate::Refusal::Missing,
+            "this document has no calculation engine, so a chart cannot be made to follow a \
+             table"
+                .to_string(),
+        )
+    })?;
+
+    let mut highest = 0u64;
+    for (_, object) in document.objects() {
+        if object.message_type() != TYPE_OWNER_DEPENDENCIES {
+            continue;
+        }
+        if let Ok(owner) = Message::decode(object.payload()) {
+            highest = highest.max(owner.varint(field::OWNER_ID).unwrap_or(0));
+        }
+    }
+    let owner_id = highest + 1;
+
+    let mut grow = crate::create::Grow::new(document);
+    let mediator = grow.allocate();
+    let owner_object = grow.allocate();
+    // `owner_kind` 2, keyed by the mediator's entity id, pointing at the chart
+    // — the shape every kind-2 owner in the corpus has, its `6` holding one
+    // empty list where a table's owner holds six.
+    let mut owner = empty_owner(uid, owner_id, OWNER_KIND_MEDIATOR);
+    owner.clear(6);
+    owner.set_in_order(
+        6,
+        Value::Bytes(
+            crate::create::message(vec![crate::pb::Field {
+                number: 5,
+                value: Value::Bytes(Vec::new()),
+            }])
+            .encode(),
+        ),
+    );
+    owner.set_in_order(
+        11,
+        Value::Bytes(crate::create::message(vec![crate::create::varint(1, chart)]).encode()),
+    );
+
+    grow.beside(
+        engine,
+        mediator,
+        crate::chart::TYPE_TN_CHART_MEDIATOR,
+        archive,
+    )?;
+    grow.beside(engine, owner_object, TYPE_OWNER_DEPENDENCIES, &owner)?;
+    grow.finish()?;
+
+    register_owner(document, engine, owner_object, owner_id)?;
+    Ok(mediator)
+}
+
+/// `owner_kind` of the owner that stands for a chart's mediator.
+const OWNER_KIND_MEDIATOR: u64 = 2;
+
+/// Add one owner to the engine's dependency tracker: its internal id in the
+/// owner list, and a reference to the object beside it.
+fn register_owner(
+    document: &mut crate::Document,
+    engine: u64,
+    object: u64,
+    id: u64,
+) -> Result<(), Error> {
+    let mut archive = document.archive(engine)?;
+    let mut tracker = archive
+        .bytes(field::TRACKER)
+        .and_then(crate::pb::decode_nested)
+        .unwrap_or_default();
+    let mut owners = tracker
+        .bytes(3)
+        .and_then(crate::pb::decode_nested)
+        .unwrap_or_default();
+    owners.append_in_order(
+        1,
+        Value::Bytes(
+            crate::create::message(vec![
+                crate::create::varint(1, id),
+                crate::create::nested(2, Vec::new()),
+            ])
+            .encode(),
+        ),
+    );
+    tracker.append_in_order(
+        6,
+        Value::Bytes(crate::create::message(vec![crate::create::varint(1, object)]).encode()),
+    );
+    tracker.set_in_order(3, Value::Bytes(owners.encode()));
+    archive.set_in_order(field::TRACKER, Value::Bytes(tracker.encode()));
+    document.set_archive_of(engine, &archive)
 }

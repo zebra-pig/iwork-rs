@@ -201,8 +201,8 @@ impl TextStyle {
 /// Several properties come in pairs: the value, and a boolean saying the value
 /// is deliberately *none*. Removing the field means "inherit from the parent
 /// style"; setting the companion means "explicitly nothing". They are different
-/// documents. The companions this module knows are [`FONT_COLOR_NULL`],
-/// [`TEXT_BACKGROUND_NULL`], [`SHADOW_NULL`] and [`PARAGRAPH_BACKGROUND_NULL`].
+/// documents. The companions this module knows are `FONT_COLOR_NULL`,
+/// `TEXT_BACKGROUND_NULL`, `SHADOW_NULL` and `PARAGRAPH_BACKGROUND_NULL`.
 pub mod property {
     // -- character properties, field 11 --------------------------------------
     /// Bold **toggle**, `0` or `1` — not "is this text bold".
