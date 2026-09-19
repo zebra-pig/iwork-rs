@@ -100,6 +100,55 @@
 //! doc.save("Report-edited.pages")?;
 //! # Ok(()) }
 //! ```
+//!
+//! # Where things are
+//!
+//! Start at [`Document`]: it opens a package, hands out handles, and saves.
+//! Everything below it is grouped by what part of a document it is about, and
+//! each module's own documentation is where the format is written down.
+//!
+//! **What a caller reaches for**
+//!
+//! | | |
+//! |---|---|
+//! | [`document`] | [`Document`] itself, and the handles: [`document::TableHandle`], [`document::TextHandle`], [`document::SlideHandle`] |
+//! | [`table`] | cells, values, formats, ranges, sheets — [`table::CellValue`], [`table::CellRef`], [`table::CellRange`], [`table::Format`], [`table::Sheet`] |
+//! | [`text`] | what an edit to a storage has to remap, and the rules it obeys |
+//! | [`style`] | text styles, which are shared objects a range of text points at |
+//! | [`keynote`] | the show: slides, layouts, transitions, builds, playback |
+//! | [`pages`] | sections, headers and footers, page templates, the two document modes |
+//! | [`chart`] | the private grid, and the mediator that makes a chart follow a table |
+//! | [`drawable`] | anything drawn: shapes, images, tables, charts, their geometry and style |
+//! | [`annotations`] | comments, their authors and anchors, and tracked changes |
+//!
+//! **What a document is made of**
+//!
+//! | | |
+//! |---|---|
+//! | [`package`] | the ZIP or directory a document *is* |
+//! | [`iwa`] | the Snappy framing and the object stream inside it |
+//! | [`pb`] | the protobuf wire level every archive is read at |
+//! | [`plist`] | the metadata plists beside the object streams |
+//! | [`metadata`] | identity, lineage, locale, template, build history |
+//! | [`media`] | the media registry and its reference counts |
+//! | [`registry`] | message type numbers, and the evidence for each |
+//!
+//! **The calculation engine**
+//!
+//! | | |
+//! |---|---|
+//! | [`formula`] | reading a formula: the AST, its node types, the reference model |
+//! | [`formula_parse`] | the other direction — `=SUM(B2:B4)` to the nodes the app writes |
+//! | [`calc`] | the dependency graph, and the owners without which nothing recalculates |
+//! | [`create`] | documents from nothing: what the apps were measured needing |
+//!
+//! # What this crate will not do
+//!
+//! It does not lay a document out, render it, or evaluate a formula. A cell
+//! given a formula carries the value the caller supplies until the app
+//! recalculates; a chart draws the grid it was given. Where a write could be
+//! made to *look* right without being right, it is refused instead — with a
+//! [`Refusal`] saying which kind of wrong it would have been.
 
 pub mod annotations;
 pub mod calc;

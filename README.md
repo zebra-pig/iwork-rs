@@ -826,6 +826,9 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | A blank stays blank, and does not shift the row | ✅ | — | ✅ |
 | Copy a chart: theme styles shared, non-styles copied and renumbered | ✅ | — | ✅ |
 | A chart fed by a table is refused, written and copied | — | ✅ | — |
+| **Make a chart follow a table**: the mediator, its formulas and its owner | — | ✅ | — |
+| The entity id and its owner uid are the same bytes, byte-reversed | — | ✅ | — |
+| **The app recalculates a chart from the formulas this crate wrote** | — | ✅ | — |
 | **The app resaves a rewritten and a copied chart, data intact** | ✅ | — | ✅ |
 | Which table and which ranges feed a chart, through function 175 | — | ✅ | — |
 | A chart with no mediator has private data and nothing to follow | ✅ | — | ✅ |
@@ -885,6 +888,10 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | The package form: a directory reads as the same entries, and saves back as a directory | ✅ | ✅ | ✅ |
 | **The app opens a package this crate wrote**, and writes one file back over it | ✅ | ✅ | ✅ |
 | An entry name that would escape the package is refused; a symlink is not an entry | ✅ | ✅ | ✅ |
+| A new document carries a calculation engine and the styles a table needs | ✅ | ✅ | ✅ |
+| **The app opens a table added to a document made from nothing** | ✅ | ✅ | — |
+| A slide made from nothing can be given presenter notes — two objects | — | — | ✅ |
+| **The app reads those notes back** | — | — | ✅ |
 | A document from a template: a new identity, its own lineage, the template recorded | ✅ | ✅ | ✅ |
 | **All three apps open a document made from a template, save it, and leave the identity alone** | ✅ | ✅ | ✅ |
 | An edit leaves every `preview*.jpg` byte for byte | ✅ | ✅ | ✅ |
@@ -1378,6 +1385,11 @@ fuzzing story rather than half of it.
 - **Encrypted documents are refused rather than decrypted** — see the
   password-protected bullet above; there is no key derivation here and none is
   planned.
+
+## Changes
+
+[`CHANGELOG.md`](CHANGELOG.md) — what changed and, because this is a
+reverse-engineered format, **how each claim was established**.
 
 ## Prior art
 

@@ -21,4 +21,13 @@ jobs:
       # No fixtures are committed, so this runs the unit tests and the
       # integration tests skip themselves. See tests/fixtures/README.md.
       - run: cargo test --all-targets
+      # The doc examples are the ones a reader copies, so they compile here.
+      - run: cargo test --doc
+      # A broken intra-doc link is a claim the documentation does not keep.
+      - run: cargo doc --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
       - run: cargo build --release
+      # The package is what a release would upload: no fixtures, no reference
+      # material, and everything the crate needs to build without them.
+      - run: cargo package --allow-dirty --no-verify
