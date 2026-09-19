@@ -240,6 +240,102 @@ pub enum Error {
         /// The password hint, from `.iwph`, when the document carries one.
         hint: Option<String>,
     },
+    /// A write this crate declined, with **why** in a form a program can act
+    /// on.
+    ///
+    /// Refusing precisely is what this crate does instead of guessing, and
+    /// until now the reason was prose: a caller wanting to skip merge-covered
+    /// cells, grow a table that was too small, or stop at a formula had to
+    /// match on the text of a message. [`Refusal`] is that reason as a value;
+    /// `detail` is the sentence, unchanged, and is what `Display` prints.
+    Refused {
+        reason: Refusal,
+        detail: String,
+    },
+}
+
+/// Why a write was declined — see [`Error::Refused`].
+///
+/// Each of these is a case where writing *something* was possible and only one
+/// of the possibilities was right. They are grouped by what a caller can do
+/// about them: change the request ([`Refusal::OutOfBounds`],
+/// [`Refusal::NotACell`], [`Refusal::Ambiguous`]), write something else first
+/// ([`Refusal::NoDonorFormat`], [`Refusal::WrongSlot`]), or stop
+/// ([`Refusal::HoldsFormula`], [`Refusal::Organised`], [`Refusal::Patched`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    /// The row, column or cell is outside the table.
+    OutOfBounds,
+    /// The name given is not a cell reference, a range, or a thing that exists.
+    NotACell,
+    /// A name that matches more than one table — a sheet holds any number of
+    /// them, and two sheets may hold one name.
+    Ambiguous,
+    /// The cell is covered by a merge that begins somewhere else.
+    Merged,
+    /// The cell holds a formula, and taking one out means editing the
+    /// calculation engine.
+    HoldsFormula,
+    /// The cell's text is a `TSWP` storage rather than a table string.
+    HoldsRichText,
+    /// The value's kind is not one this crate writes.
+    UnwritableValue,
+    /// The table carries no format of the kind being written that could be
+    /// copied, and inventing one would be a format the document never defined.
+    NoDonorFormat,
+    /// The format's slot is not the one the cell's value uses, so the app would
+    /// never draw it.
+    WrongSlot,
+    /// The table is categorised, filtered, pivoted, conditionally highlighted,
+    /// or has hidden or collapsed rows — organisation this crate cannot
+    /// maintain across the edit.
+    Organised,
+    /// A formula somewhere names what the edit would move or remove.
+    FormulaReference,
+    /// The object carries version patches, which would go on describing it as
+    /// it used to be.
+    Patched,
+    /// The document has the thing but the app never draws it — a page-layout
+    /// document's body.
+    NotDrawn,
+    /// The document, table, slide or storage named is not there.
+    NotFound,
+    /// The structure a write would need is missing and cannot be invented: a
+    /// layout with no placeholder, a table with no formula list, a deck with no
+    /// notes.
+    Missing,
+}
+
+impl Error {
+    /// A refusal with its reason and its sentence.
+    pub fn refused(reason: Refusal, detail: impl Into<String>) -> Error {
+        Error::Refused {
+            reason,
+            detail: detail.into(),
+        }
+    }
+
+    /// Why this write was declined, when it was declined for a reason a
+    /// program can act on.
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), iwork::Error> {
+    /// # let mut doc = iwork::Document::open("Budget.numbers")?;
+    /// use iwork::Refusal;
+    /// let mut table = doc.table_mut("Q1")?;
+    /// match table.set("B3", 42) {
+    ///     Err(e) if e.refusal() == Some(Refusal::Merged) => {} // skip it
+    ///     Err(e) if e.refusal() == Some(Refusal::OutOfBounds) => {} // grow first
+    ///     other => { other?; }
+    /// }
+    /// # Ok(()) }
+    /// ```
+    pub fn refusal(&self) -> Option<Refusal> {
+        match self {
+            Error::Refused { reason, .. } => Some(*reason),
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Display for Error {
@@ -248,6 +344,9 @@ impl std::fmt::Display for Error {
             Error::Io(e) => write!(f, "{e}"),
             Error::Zip(e) => write!(f, "{e}"),
             Error::Format(m) => write!(f, "{m}"),
+            // The sentence, and only the sentence: a refusal reads exactly as
+            // it did before it had a reason attached.
+            Error::Refused { detail, .. } => write!(f, "{detail}"),
             Error::NoSuchObject(id) => write!(f, "no object with identifier {id}"),
             Error::NoSuchStyle(id) => write!(f, "no text style with identifier {id}"),
             Error::NonDestructiveEdit { drawable, reasons } => write!(

@@ -414,3 +414,121 @@ fn a_page_layout_document_refuses_body_text() {
     let mut plain = fixture!("pages-plain.pages");
     assert!(plain.append_paragraph("x").is_ok());
 }
+
+// -- refusals a program can act on -------------------------------------------
+
+/// The crate refuses precisely; this is that precision as a value.
+///
+/// A caller doing bulk work needs to tell "skip this cell" from "stop": the
+/// sentence says which, and until now only to a human.
+#[test]
+fn a_refusal_carries_a_reason_a_program_can_match() {
+    use iwork::Refusal;
+
+    let mut doc = fixture!("numbers-values.numbers");
+    let cases: Vec<(&str, (usize, usize), Refusal)> = vec![
+        // Past the end of the table.
+        ("Zellarten", (2, 9), Refusal::OutOfBounds),
+        // Covered by a merge that begins elsewhere.
+        ("Zellarten", (8, 4), Refusal::Merged),
+        // Holds a formula, so taking it out is `TSCE` surgery.
+        ("Zellarten", (2, 2), Refusal::HoldsFormula),
+    ];
+    for (table, (row, column), expected) in cases {
+        let error = doc
+            .set_cell(table, row, column, CellValue::from(1))
+            .expect_err("refused");
+        assert_eq!(
+            error.refusal(),
+            Some(expected),
+            "{table} r{row}c{column}: {error}"
+        );
+        // And the sentence is exactly what it always was.
+        assert!(!error.to_string().is_empty());
+    }
+
+    // The value's kind, and a name two sheets share.
+    let error = doc
+        .set_cell("Zellarten", 0, 0, CellValue::Error)
+        .expect_err("not a value this crate writes");
+    assert_eq!(error.refusal(), Some(Refusal::UnwritableValue));
+
+    let mut pivot = fixture!("numbers-pivot.numbers");
+    assert_eq!(
+        pivot.table_mut("Sales").err().unwrap().refusal(),
+        Some(Refusal::Ambiguous)
+    );
+
+    // A page-layout body the app never draws.
+    let mut layout = fixture!("pages-layout.pages");
+    assert_eq!(
+        layout.append_paragraph("x").err().unwrap().refusal(),
+        Some(Refusal::NotDrawn)
+    );
+
+    // A format in a slot the value does not use.
+    let mut formats = fixture!("numbers-formats.numbers");
+    let error = formats
+        .set_format(
+            "Formate",
+            [(2usize, 1usize)],
+            &Format::Currency {
+                code: "EUR".into(),
+                decimals: None,
+            },
+        )
+        .expect_err("a number cell does not use the currency slot");
+    assert_eq!(error.refusal(), Some(Refusal::WrongSlot));
+
+    // An organised table refuses a structural edit.
+    let mut sorted = fixture!("numbers-categories.numbers");
+    if let Some(table) = sorted.tables().first().map(|t| t.name.clone()) {
+        if let Err(error) = sorted.insert_row(&table, 1) {
+            assert!(
+                matches!(
+                    error.refusal(),
+                    Some(Refusal::Organised | Refusal::FormulaReference | Refusal::Merged)
+                ),
+                "{error}"
+            );
+        }
+    }
+}
+
+/// What a caller can now *do* with a reason: fill a block, skipping the cells
+/// the table will not take and stopping at the ones that mean something worse.
+#[test]
+fn a_reason_is_enough_to_decide_what_to_do_next() {
+    use iwork::Refusal;
+
+    let mut doc = fixture!("numbers-values.numbers");
+    let mut skipped = 0;
+    let mut written = 0;
+    for row in 0..12 {
+        for column in 0..6 {
+            match doc.set_cell("Zellarten", row, column, CellValue::from(7)) {
+                Ok(_) => written += 1,
+                // Outside the table, or covered by a merge: not this cell's
+                // fault, move on.
+                Err(e) if matches!(e.refusal(), Some(Refusal::OutOfBounds | Refusal::Merged)) => {
+                    skipped += 1
+                }
+                // A formula or rich text: leave it alone, deliberately.
+                Err(e) if e.refusal().is_some() => skipped += 1,
+                Err(e) => panic!("unexpected: {e}"),
+            }
+        }
+    }
+    assert!(
+        written > 0 && skipped > 0,
+        "{written} written, {skipped} skipped"
+    );
+    for table in doc.tables() {
+        assert!(
+            table.audit().is_empty(),
+            "{}: {:?}",
+            table.name,
+            table.audit()
+        );
+    }
+}

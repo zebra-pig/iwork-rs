@@ -27,6 +27,25 @@ q1.column_width(0, Some(140.0))?;
 doc.save("Sales.numbers")?;
 ```
 
+Every refusal carries a **reason**, not just a sentence. Refusing precisely is
+what this crate does instead of guessing, and a caller doing bulk work needs to
+tell "skip this cell" from "stop":
+
+```rust
+use iwork::Refusal;
+
+match table.set(cell, value) {
+    Err(e) if e.refusal() == Some(Refusal::Merged) => continue,      // covered by a merge
+    Err(e) if e.refusal() == Some(Refusal::OutOfBounds) => grow()?,  // table is too small
+    Err(e) if e.refusal() == Some(Refusal::HoldsFormula) => leave(), // deliberately
+    other => other?,
+}
+```
+
+The sentence is unchanged and is still what `Display` prints; the reason is that
+sentence as a value — `Merged`, `HoldsFormula`, `WrongSlot`, `NoDonorFormat`,
+`Organised`, `Patched`, `NotDrawn`, `Ambiguous` and the rest.
+
 **A sheet is not a grid.** This is where a Numbers document parts company with
 the shape a spreadsheet library usually assumes: a sheet is a *canvas* holding
 any number of tables, with charts, shapes and images beside them. `doc.sheets()`
@@ -711,6 +730,7 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | A text storage is edited through a handle, not an object id | ✅ | ✅ | ✅ |
 | A slide is addressed by position or identifier | — | — | ✅ |
 | A span is a range (`"B2:D2"`), a frame is named, a duration is a field | ✅ | ✅ | ✅ |
+| Every refusal carries a reason a program can match on, not just a sentence | ✅ | ✅ | ✅ |
 | **The app does not draw a page-layout document's body** — so it is refused | ✅ | — | — |
 | A title the layout does not define is refused by name, not invented | — | — | ✅ |
 | A sheet's drawables, and the tables among them, in the sheet's own order | — | ✅ | — |

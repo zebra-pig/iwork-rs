@@ -10,7 +10,7 @@ use crate::pb::{Message, Value};
 use crate::style::{self, CreatedStyle, StyleDeletion, StyleKind, StyleUse, TextStyle};
 use crate::table::{cell_type, CellValue};
 use crate::text;
-use crate::Error;
+use crate::{Error, Refusal};
 
 /// Which app wrote the document.
 ///
@@ -325,13 +325,16 @@ impl SlideHandle<'_> {
         placeholder
             .and_then(|placeholder| placeholder.storage)
             .ok_or_else(|| {
-                Error::Format(format!(
-                    "slide {} is built on the layout {:?}, which gives it no {which} — a \
+                Error::refused(
+                    Refusal::Missing,
+                    format!(
+                        "slide {} is built on the layout {:?}, which gives it no {which} — a \
                      placeholder comes from the layout, and a text box put here instead would \
                      be a box and not a {which}",
-                    slide.number.unwrap_or(slide.index + 1),
-                    slide.layout_name
-                ))
+                        slide.number.unwrap_or(slide.index + 1),
+                        slide.layout_name
+                    ),
+                )
             })
     }
 
@@ -560,11 +563,10 @@ impl TableHandle<'_> {
         let amount = match amount.into() {
             CellValue::Number(decimal) | CellValue::Currency(decimal) => decimal,
             other => {
-                return Err(Error::Format(format!(
-                    "{}: {} is not an amount",
-                    self.table,
-                    other.kind()
-                )))
+                return Err(Error::refused(
+                    Refusal::UnwritableValue,
+                    format!("{}: {} is not an amount", self.table, other.kind()),
+                ))
             }
         };
         self.document
@@ -1681,12 +1683,12 @@ impl Document {
             return Ok(());
         };
         if structure.mode == crate::pages::Mode::PageLayout {
-            return Err(Error::Format(
+            return Err(Error::refused(
+                Refusal::NotDrawn,
                 "this is a page-layout document: it has a body storage and the app never draws \
                  it, so text put there is text nobody sees. Its words live in text boxes — \
                  `add_text_box` makes one — and the storage itself is reachable by identifier \
-                 if that is really what was meant"
-                    .into(),
+                 if that is really what was meant",
             ));
         }
         Ok(())
@@ -1706,10 +1708,13 @@ impl Document {
     pub fn append_paragraph(&mut self, text: &str) -> Result<TextEdit, Error> {
         self.refuse_if_body_is_not_drawn()?;
         let Some(storage) = self.body_storage() else {
-            return Err(Error::Format(format!(
-                "a {} document has no body to append a paragraph to",
-                self.kind.as_str()
-            )));
+            return Err(Error::refused(
+                Refusal::Missing,
+                format!(
+                    "a {} document has no body to append a paragraph to",
+                    self.kind.as_str()
+                ),
+            ));
         };
         let existing = self.storage_text(storage)?;
         let at = text::length(&existing);
@@ -2327,17 +2332,20 @@ impl Document {
                 crate::table::CellRef::Index(row, column)
             );
             if row >= table.rows || column >= table.columns {
-                return Err(Error::Format(format!(
-                    "{where_}: the table is {}×{}",
-                    table.rows, table.columns
-                )));
+                return Err(Error::refused(
+                    Refusal::OutOfBounds,
+                    format!("{where_}: the table is {}×{}", table.rows, table.columns),
+                ));
             }
             if let Some(merge) = table.merge_covering(row, column) {
                 if (merge.row, merge.column) != (row, column) {
-                    return Err(Error::Format(format!(
-                        "{where_}: covered by the merge that begins at row {} column {}",
-                        merge.row, merge.column
-                    )));
+                    return Err(Error::refused(
+                        Refusal::Merged,
+                        format!(
+                            "{where_}: covered by the merge that begins at row {} column {}",
+                            merge.row, merge.column
+                        ),
+                    ));
                 }
             }
             match value {
@@ -2349,15 +2357,18 @@ impl Document {
                 | CellValue::Date(_)
                 | CellValue::Duration(_) => {}
                 other => {
-                    return Err(Error::Format(format!(
-                        "{where_}: this crate does not write {} cells",
-                        other.kind()
-                    )))
+                    return Err(Error::refused(
+                        Refusal::UnwritableValue,
+                        format!("{where_}: this crate does not write {} cells", other.kind()),
+                    ))
                 }
             }
             let row_cells = by_row.entry(row).or_default();
             if row_cells.iter().any(|(at, _)| *at == column) {
-                return Err(Error::Format(format!("{where_}: named twice in one write")));
+                return Err(Error::refused(
+                    Refusal::NotACell,
+                    format!("{where_}: named twice in one write"),
+                ));
             }
             row_cells.push((column, value));
         }
@@ -2431,9 +2442,10 @@ impl Document {
                     );
                     let slots = in_tile.records.len();
                     if column >= slots {
-                        return Err(Error::Format(format!(
-                            "{where_}: the row's offset array names only {slots} columns"
-                        )));
+                        return Err(Error::refused(
+                            Refusal::OutOfBounds,
+                            format!("{where_}: the row's offset array names only {slots} columns"),
+                        ));
                     }
                     let current = in_tile.records[column].clone();
                     let old = match &current {
@@ -2445,16 +2457,22 @@ impl Document {
                         },
                     };
                     if old.formula_id.is_some() {
-                        return Err(Error::Format(format!(
-                            "{where_}: holds a formula, and taking one out means editing the \
+                        return Err(Error::refused(
+                            Refusal::HoldsFormula,
+                            format!(
+                                "{where_}: holds a formula, and taking one out means editing the \
                              calculation engine — not this phase's job"
-                        )));
+                            ),
+                        ));
                     }
                     if old.cell_type == cell_type::RICH_TEXT || old.rich_id.is_some() {
-                        return Err(Error::Format(format!(
-                            "{where_}: holds rich text, whose words are in a TSWP storage \
+                        return Err(Error::refused(
+                            Refusal::HoldsRichText,
+                            format!(
+                                "{where_}: holds rich text, whose words are in a TSWP storage \
                              rather than in the table"
-                        )));
+                            ),
+                        ));
                     }
                     // Nothing to do, and nothing to damage.
                     if current.is_none() && value == CellValue::Empty {
@@ -2480,10 +2498,13 @@ impl Document {
                     touched.push(tile);
                     for id in touched {
                         if patched.iter().any(|&(at, _)| at == id) {
-                            return Err(Error::Format(format!(
-                                "{where_}: object {id} carries version patches, and rewriting \
+                            return Err(Error::refused(
+                                Refusal::Patched,
+                                format!(
+                                    "{where_}: object {id} carries version patches, and rewriting \
                                  it would leave them describing the cell as it used to be"
-                            )));
+                                ),
+                            ));
                         }
                     }
 
@@ -2595,9 +2616,9 @@ impl Document {
             .tables()
             .into_iter()
             .filter(|t| Some(t.identifier) == by_id || t.name == wanted);
-        let first = matches
-            .next()
-            .ok_or_else(|| Error::Format(format!("no table called '{wanted}'")))?;
+        let first = matches.next().ok_or_else(|| {
+            Error::refused(Refusal::NotFound, format!("no table called '{wanted}'"))
+        })?;
         // An id names one table; only a name can be ambiguous.
         if by_id.is_none() {
             let also: Vec<u64> = matches.map(|t| t.identifier).collect();
@@ -2609,10 +2630,13 @@ impl Document {
                     .map(u64::to_string)
                     .collect::<Vec<_>>()
                     .join(", ");
-                return Err(Error::Format(format!(
-                    "'{wanted}' names {} tables ({list}) — write by identifier to say which",
-                    ids.len()
-                )));
+                return Err(Error::refused(
+                    Refusal::Ambiguous,
+                    format!(
+                        "'{wanted}' names {} tables ({list}) — write by identifier to say which",
+                        ids.len()
+                    ),
+                ));
             }
         }
         Ok(first)
@@ -2623,10 +2647,13 @@ impl Document {
         let patched = self.patched_objects();
         for &id in objects {
             if patched.iter().any(|&(patched, _)| patched == id) {
-                return Err(Error::Format(format!(
-                    "{where_}: object {id} carries version patches, and rewriting it would \
+                return Err(Error::refused(
+                    Refusal::Patched,
+                    format!(
+                        "{where_}: object {id} carries version patches, and rewriting it would \
                      leave them describing the cell as it used to be"
-                )));
+                    ),
+                ));
             }
         }
         Ok(())
@@ -2697,15 +2724,20 @@ impl Document {
 
     /// The tile covering `row`, refused if it carries version patches.
     fn tile_for_row(&self, site: &TableSite, row: usize, where_: &str) -> Result<u64, Error> {
-        let tile = *site
-            .tiles
-            .get(&(row / site.tile_size))
-            .ok_or_else(|| Error::Format(format!("{where_}: no tile covers row {row}")))?;
+        let tile = *site.tiles.get(&(row / site.tile_size)).ok_or_else(|| {
+            Error::refused(
+                Refusal::Missing,
+                format!("{where_}: no tile covers row {row}"),
+            )
+        })?;
         if self.patched_objects().iter().any(|&(id, _)| id == tile) {
-            return Err(Error::Format(format!(
-                "{where_}: tile {tile} carries version patches, and rewriting it would \
+            return Err(Error::refused(
+                Refusal::Patched,
+                format!(
+                    "{where_}: tile {tile} carries version patches, and rewriting it would \
                  leave them describing the cell as it used to be"
-            )));
+                ),
+            ));
         }
         Ok(tile)
     }
@@ -2728,10 +2760,13 @@ impl Document {
         let tile_row = row % site.tile_size;
         let in_tile = TileIndex::of(&archive).row(&archive, tile_row, &where_)?;
         if column >= in_tile.records.len() {
-            return Err(Error::Format(format!(
-                "{where_}: the row's offset array names only {} columns",
-                in_tile.records.len()
-            )));
+            return Err(Error::refused(
+                Refusal::OutOfBounds,
+                format!(
+                    "{where_}: the row's offset array names only {} columns",
+                    in_tile.records.len()
+                ),
+            ));
         }
         let record = in_tile.records[column].clone();
         Ok(CellSite {
@@ -2826,9 +2861,12 @@ impl Document {
         // already held reuses its entry — its key is taken and given up in the
         // same breath, and the net is nothing at all.
         if let CellValue::Text(text) = value {
-            let list = site
-                .strings
-                .ok_or_else(|| Error::Format(format!("{where_}: the table has no string list")))?;
+            let list = site.strings.ok_or_else(|| {
+                Error::refused(
+                    Refusal::Missing,
+                    format!("{where_}: the table has no string list"),
+                )
+            })?;
             let (key, fresh) = self.planned_string_key(cache, list, text, where_)?;
             record.string_id = Some(key);
             mutations.push(ListMutation::Intern {
@@ -2839,9 +2877,12 @@ impl Document {
             });
         }
         if let Some(key) = old.string_id {
-            let list = site
-                .strings
-                .ok_or_else(|| Error::Format(format!("{where_}: the table has no string list")))?;
+            let list = site.strings.ok_or_else(|| {
+                Error::refused(
+                    Refusal::Missing,
+                    format!("{where_}: the table has no string list"),
+                )
+            })?;
             mutations.push(ListMutation::Release { list, key });
         }
 
@@ -2871,9 +2912,12 @@ impl Document {
         let slot = slot.expect("checked above");
 
         if record.format_id_in(slot).is_none() {
-            let list = site
-                .formats
-                .ok_or_else(|| Error::Format(format!("{where_}: the table has no format list")))?;
+            let list = site.formats.ok_or_else(|| {
+                Error::refused(
+                    Refusal::Missing,
+                    format!("{where_}: the table has no format list"),
+                )
+            })?;
             let donor = match cache.donors.iter().find(|(at, _)| *at == slot) {
                 Some((_, donor)) => *donor,
                 None => {
@@ -2883,10 +2927,13 @@ impl Document {
                 }
             };
             let donor = donor.ok_or_else(|| {
-                Error::Format(format!(
-                    "{where_}: no cell in this table carries a {slot:?} format to copy, \
+                Error::refused(
+                    Refusal::NoDonorFormat,
+                    format!(
+                        "{where_}: no cell in this table carries a {slot:?} format to copy, \
                      and one invented here would be a format the document never defined"
-                ))
+                    ),
+                )
             })?;
             mutations.push(ListMutation::Retain { list, key: donor });
             record.set_format_id_in(slot, Some(donor));
@@ -3382,11 +3429,14 @@ impl Document {
     pub fn body_mut(&mut self) -> Result<TextHandle<'_>, Error> {
         self.refuse_if_body_is_not_drawn()?;
         let storage = self.body_storage().ok_or_else(|| {
-            Error::Format(format!(
-                "a {} document has no body text — a Pages document does, and a deck's words \
+            Error::refused(
+                Refusal::Missing,
+                format!(
+                    "a {} document has no body text — a Pages document does, and a deck's words \
                  are on its slides",
-                self.kind().as_str()
-            ))
+                    self.kind().as_str()
+                ),
+            )
         })?;
         self.text_mut(storage)
     }
@@ -3418,10 +3468,10 @@ impl Document {
         let wanted = slide.into();
         let slides = self.slides();
         if slides.is_empty() {
-            return Err(Error::Format(format!(
-                "a {} document has no slides",
-                self.kind().as_str()
-            )));
+            return Err(Error::refused(
+                Refusal::NotFound,
+                format!("a {} document has no slides", self.kind().as_str()),
+            ));
         }
         let found = match wanted {
             crate::keynote::SlideRef::Index(index) => slides.get(index).map(|s| s.identifier),
@@ -3431,10 +3481,10 @@ impl Document {
                 .map(|s| s.identifier),
         };
         let identifier = found.ok_or_else(|| {
-            Error::Format(format!(
-                "no slide {wanted} — the deck has {} of them",
-                slides.len()
-            ))
+            Error::refused(
+                Refusal::OutOfBounds,
+                format!("no slide {wanted} — the deck has {} of them", slides.len()),
+            )
         })?;
         Ok(SlideHandle {
             document: self,
@@ -3509,12 +3559,15 @@ impl Document {
                     })
                     .collect::<Vec<_>>()
                     .join(", ");
-                Err(Error::Format(format!(
-                    "{wanted} names {} tables ({where_}) — a sheet holds any number of tables \
+                Err(Error::refused(
+                    Refusal::Ambiguous,
+                    format!(
+                        "{wanted} names {} tables ({where_}) — a sheet holds any number of tables \
                      and two sheets may hold one name, so say which: (\"sheet\", \"table\") or \
                      the identifier",
-                    matches.len()
-                )))
+                        matches.len()
+                    ),
+                ))
             }
         }
     }
@@ -3540,14 +3593,20 @@ impl Document {
     ) -> Result<(), Error> {
         let table = self.table_for_write(wanted)?;
         if column >= table.columns {
-            return Err(Error::Format(format!(
-                "{} c{column}: the table has {} column(s)",
-                table.name, table.columns
-            )));
+            return Err(Error::refused(
+                Refusal::OutOfBounds,
+                format!(
+                    "{} c{column}: the table has {} column(s)",
+                    table.name, table.columns
+                ),
+            ));
         }
         let site = self.table_site(&table)?;
         let bucket = site.column_bucket.ok_or_else(|| {
-            Error::Format(format!("{}: the table has no column header", table.name))
+            Error::refused(
+                Refusal::Missing,
+                format!("{}: the table has no column header", table.name),
+            )
         })?;
         self.refuse_if_patched(&[bucket], &format!("{} c{column}", table.name))?;
         self.set_bucket_size(bucket, column, points.unwrap_or(0.0))
@@ -3566,10 +3625,10 @@ impl Document {
     ) -> Result<(), Error> {
         let table = self.table_for_write(wanted)?;
         if row >= table.rows {
-            return Err(Error::Format(format!(
-                "{} r{row}: the table has {} row(s)",
-                table.name, table.rows
-            )));
+            return Err(Error::refused(
+                Refusal::OutOfBounds,
+                format!("{} r{row}: the table has {} row(s)", table.name, table.rows),
+            ));
         }
         let site = self.table_site(&table)?;
         let bucket = site
@@ -3578,7 +3637,12 @@ impl Document {
             .copied()
             .find(|&id| self.bucket_has(id, row))
             .or_else(|| site.row_bucket.first().copied())
-            .ok_or_else(|| Error::Format(format!("{}: the table has no row header", table.name)))?;
+            .ok_or_else(|| {
+                Error::refused(
+                    Refusal::Missing,
+                    format!("{}: the table has no row header", table.name),
+                )
+            })?;
         self.refuse_if_patched(&[bucket], &format!("{} r{row}", table.name))?;
         self.set_bucket_size(bucket, row, points.unwrap_or(0.0))
     }
@@ -3587,9 +3651,10 @@ impl Document {
     /// row or column has none — which is what a row holding no cells has.
     fn set_bucket_size(&mut self, bucket: u64, index: usize, points: f32) -> Result<(), Error> {
         if !points.is_finite() || points < 0.0 {
-            return Err(Error::Format(format!(
-                "{points} is not a size a row or column can have"
-            )));
+            return Err(Error::refused(
+                Refusal::NotACell,
+                format!("{points} is not a size a row or column can have"),
+            ));
         }
         let mut archive = self.archive_of(bucket)?;
         for field in archive.fields.iter_mut() {
@@ -3651,7 +3716,10 @@ impl Document {
         let table = self.table_for_write(wanted)?;
         let site = self.table_site(&table)?;
         let list = site.formats.ok_or_else(|| {
-            Error::Format(format!("{}: the table has no format list", table.name))
+            Error::refused(
+                Refusal::Missing,
+                format!("{}: the table has no format list", table.name),
+            )
         })?;
         let archive = format.archive()?;
 
@@ -3664,21 +3732,27 @@ impl Document {
                 crate::table::CellRef::Index(row, column)
             );
             if row >= table.rows || column >= table.columns {
-                return Err(Error::Format(format!(
-                    "{where_}: the table is {}×{}",
-                    table.rows, table.columns
-                )));
+                return Err(Error::refused(
+                    Refusal::OutOfBounds,
+                    format!("{where_}: the table is {}×{}", table.rows, table.columns),
+                ));
             }
             let cell = table.cell(row, column).ok_or_else(|| {
-                Error::Format(format!(
-                    "{where_}: is empty, and a format on nothing is not something the app \
+                Error::refused(
+                    Refusal::Missing,
+                    format!(
+                        "{where_}: is empty, and a format on nothing is not something the app \
                      writes — give the cell a value first"
-                ))
+                    ),
+                )
             })?;
             if cell.record.cell_type == cell_type::RICH_TEXT {
-                return Err(Error::Format(format!(
-                    "{where_}: holds rich text, whose formatting is its storage's business"
-                )));
+                return Err(Error::refused(
+                    Refusal::HoldsRichText,
+                    format!(
+                        "{where_}: holds rich text, whose formatting is its storage's business"
+                    ),
+                ));
             }
             // The slot the cell's value actually uses — `format_kind` when it
             // has one, and what its type can use otherwise.
@@ -3694,13 +3768,16 @@ impl Document {
                     ))
                 })?;
             if !format.suits(slot) {
-                return Err(Error::Format(format!(
-                    "{where_}: holds {} and uses the {slot:?} format slot, so a {} format \
+                return Err(Error::refused(
+                    Refusal::WrongSlot,
+                    format!(
+                        "{where_}: holds {} and uses the {slot:?} format slot, so a {} format \
                      would sit in the file and never be drawn — the slot follows the value's \
                      type, and changing it is a value write",
-                    table.value(row, column).kind(),
-                    format.name()
-                )));
+                        table.value(row, column).kind(),
+                        format.name()
+                    ),
+                ));
             }
             slots.push(slot);
         }
@@ -3841,7 +3918,10 @@ impl Document {
         let table = self.table_for_write(wanted)?;
         let site = self.table_site(&table)?;
         let list = site.formats.ok_or_else(|| {
-            Error::Format(format!("{}: the table has no format list", table.name))
+            Error::refused(
+                Refusal::Missing,
+                format!("{}: the table has no format list", table.name),
+            )
         })?;
         self.refuse_if_patched(&[list], &table.name)?;
         let format = crate::table::Format::Currency {
@@ -3913,43 +3993,55 @@ impl Document {
             crate::table::CellRef::Index(row, column)
         );
         if row >= table.rows || column >= table.columns {
-            return Err(Error::Format(format!(
-                "{where_}: the table is {}×{}",
-                table.rows, table.columns
-            )));
+            return Err(Error::refused(
+                Refusal::OutOfBounds,
+                format!("{where_}: the table is {}×{}", table.rows, table.columns),
+            ));
         }
         if let Some(merge) = table.merge_covering(row, column) {
             if (merge.row, merge.column) != (row, column) {
-                return Err(Error::Format(format!(
-                    "{where_}: covered by the merge that begins at row {} column {}",
-                    merge.row, merge.column
-                )));
+                return Err(Error::refused(
+                    Refusal::Merged,
+                    format!(
+                        "{where_}: covered by the merge that begins at row {} column {}",
+                        merge.row, merge.column
+                    ),
+                ));
             }
         }
         if value == CellValue::Empty {
-            return Err(Error::Format(format!(
-                "{where_}: a formula cell cannot be empty — the value is the answer the app \
+            return Err(Error::refused(
+                Refusal::UnwritableValue,
+                format!(
+                    "{where_}: a formula cell cannot be empty — the value is the answer the app \
                  shows until it recalculates, and this crate evaluates nothing"
-            )));
+                ),
+            ));
         }
 
         // The formula first, because it is what the caller most likely got
         // wrong, and nothing has moved yet when it is refused.
         let ast = crate::formula_parse::parse(text, (column as i64, row as i64))
-            .map_err(|e| Error::Format(format!("{where_}: {e}")))?;
+            .map_err(|e| Error::refused(Refusal::NotACell, format!("{where_}: {e}")))?;
         let formula = crate::formula::Formula::from_ast(ast);
         let precedents = crate::calc::precedents_of(&formula, row, column).ok_or_else(|| {
-            Error::Format(format!(
-                "{where_}: the formula reads something this crate cannot resolve to cells \
+            Error::refused(
+                Refusal::FormulaReference,
+                format!(
+                    "{where_}: the formula reads something this crate cannot resolve to cells \
                      of this table, and a formula the engine only half knows about is one the \
                      app would recalculate wrongly"
-            ))
+                ),
+            )
         })?;
 
         let site = self.cell_site(&table, row, column)?;
-        let list = site
-            .formulas
-            .ok_or_else(|| Error::Format(format!("{where_}: the table has no formula list")))?;
+        let list = site.formulas.ok_or_else(|| {
+            Error::refused(
+                Refusal::Missing,
+                format!("{where_}: the table has no formula list"),
+            )
+        })?;
         let old = match &site.record {
             Some(bytes) => crate::table::decode_cell(bytes)
                 .map_err(|e| Error::Format(format!("{where_}: {e}")))?,
@@ -3959,25 +4051,34 @@ impl Document {
             },
         };
         if old.formula_id.is_some() {
-            return Err(Error::Format(format!(
-                "{where_}: already holds a formula, and replacing one means taking its \
+            return Err(Error::refused(
+                Refusal::HoldsFormula,
+                format!(
+                    "{where_}: already holds a formula, and replacing one means taking its \
                  dependency edges out of the calculation engine first"
-            )));
+                ),
+            ));
         }
         if old.cell_type == cell_type::RICH_TEXT || old.rich_id.is_some() {
-            return Err(Error::Format(format!(
-                "{where_}: holds rich text, whose words are in a TSWP storage rather than in \
+            return Err(Error::refused(
+                Refusal::HoldsRichText,
+                format!(
+                    "{where_}: holds rich text, whose words are in a TSWP storage rather than in \
                  the table"
-            )));
+                ),
+            ));
         }
         self.refuse_if_patched(&[list, site.tile], &where_)?;
 
         let table_site = self.table_site(&table)?;
         let mut cache = ListCache::default();
         let write = self.rewrite_record(&mut cache, &table, &table_site, old, &value, &where_)?;
-        let mut record = write
-            .record
-            .ok_or_else(|| Error::Format(format!("{where_}: a formula cell cannot be empty")))?;
+        let mut record = write.record.ok_or_else(|| {
+            Error::refused(
+                Refusal::UnwritableValue,
+                format!("{where_}: a formula cell cannot be empty"),
+            )
+        })?;
         // One reference, taken by the cell this write is about.
         let key = self.define_list_entry(&mut cache, list, 5, formula.encode(), 1)?;
         record.formula_id = Some(key);
@@ -4099,14 +4200,17 @@ impl Document {
         );
         for (row, column) in [from, to] {
             if row >= table.rows || column >= table.columns {
-                return Err(Error::Format(format!(
-                    "{where_}: the table is {}×{}",
-                    table.rows, table.columns
-                )));
+                return Err(Error::refused(
+                    Refusal::OutOfBounds,
+                    format!("{where_}: the table is {}×{}", table.rows, table.columns),
+                ));
             }
         }
         if from == to {
-            return Err(Error::Format(format!("{where_}: the same cell")));
+            return Err(Error::refused(
+                Refusal::NotACell,
+                format!("{where_}: the same cell"),
+            ));
         }
         if let Some(merge) = table.merge_covering(to.0, to.1) {
             if (merge.row, merge.column) != to {
@@ -4140,12 +4244,15 @@ impl Document {
                 Error::Format(format!("{where_}: the source's formula does not decode"))
             })?;
         let precedents = crate::calc::precedents_of(ast, to.0, to.1).ok_or_else(|| {
-            Error::Format(format!(
-                "{where_}: the formula reads something this crate cannot resolve to cells of \
+            Error::refused(
+                Refusal::FormulaReference,
+                format!(
+                    "{where_}: the formula reads something this crate cannot resolve to cells of \
                  this table — another table, a whole row or column, or a stored #REF! — and a \
                  formula the engine only half knows about is one the app would recalculate \
                  wrongly"
-            ))
+                ),
+            )
         })?;
 
         let site = self.cell_site(&table, to.0, to.1)?;
@@ -4158,19 +4265,26 @@ impl Document {
             },
         };
         if old.formula_id.is_some() {
-            return Err(Error::Format(format!(
-                "{where_}: the target already holds a formula, and taking one out means \
+            return Err(Error::refused(
+                Refusal::HoldsFormula,
+                format!(
+                    "{where_}: the target already holds a formula, and taking one out means \
                  editing the calculation engine"
-            )));
+                ),
+            ));
         }
         if old.cell_type == crate::table::cell_type::RICH_TEXT || old.rich_id.is_some() {
-            return Err(Error::Format(format!(
-                "{where_}: the target holds rich text"
-            )));
+            return Err(Error::refused(
+                Refusal::HoldsRichText,
+                format!("{where_}: the target holds rich text"),
+            ));
         }
-        let list = site
-            .formulas
-            .ok_or_else(|| Error::Format(format!("{where_}: the table has no formula list")))?;
+        let list = site.formulas.ok_or_else(|| {
+            Error::refused(
+                Refusal::Missing,
+                format!("{where_}: the table has no formula list"),
+            )
+        })?;
         self.refuse_if_patched(&[site.tile, list], &where_)?;
 
         // The value the target will *show*. Numbers shows whatever is written
@@ -4192,10 +4306,10 @@ impl Document {
             | CellValue::Date(_)
             | CellValue::Duration(_) => {}
             other => {
-                return Err(Error::Format(format!(
-                    "{where_}: this crate does not write {} cells",
-                    other.kind()
-                )))
+                return Err(Error::refused(
+                    Refusal::UnwritableValue,
+                    format!("{where_}: this crate does not write {} cells", other.kind()),
+                ))
             }
         }
 
@@ -4205,9 +4319,12 @@ impl Document {
         let table_site = self.table_site(&table)?;
         let mut cache = ListCache::default();
         let write = self.rewrite_record(&mut cache, &table, &table_site, old, &value, &where_)?;
-        let mut record = write
-            .record
-            .ok_or_else(|| Error::Format(format!("{where_}: a formula cell cannot be empty")))?;
+        let mut record = write.record.ok_or_else(|| {
+            Error::refused(
+                Refusal::UnwritableValue,
+                format!("{where_}: a formula cell cannot be empty"),
+            )
+        })?;
         record.formula_id = Some(formula);
         let mut mutations = write.mutations;
         mutations.push(ListMutation::Retain { list, key: formula });
@@ -4341,58 +4458,80 @@ impl Document {
         let where_ = format!("{}: insert row at {at}", table.name);
 
         if at > table.rows {
-            return Err(Error::Format(format!(
-                "{where_}: the table has {} row(s), so a row goes in at 0..={}",
-                table.rows, table.rows
-            )));
+            return Err(Error::refused(
+                Refusal::OutOfBounds,
+                format!(
+                    "{where_}: the table has {} row(s), so a row goes in at 0..={}",
+                    table.rows, table.rows
+                ),
+            ));
         }
 
         // Everything unproven is refused here, before a byte moves.
         if !table.categories.is_empty() {
-            return Err(Error::Format(format!(
-                "{where_}: the table is categorised, and a category's group nodes address \
+            return Err(Error::refused(
+                Refusal::Organised,
+                format!(
+                    "{where_}: the table is categorised, and a category's group nodes address \
                  rows by index — maintaining them across an insert is unverified here"
-            )));
+                ),
+            ));
         }
         if table.pivot.is_some() {
-            return Err(Error::Format(format!(
+            return Err(Error::refused(
+                Refusal::Organised,
+                format!(
                 "{where_}: the table is a pivot table, whose rows the app builds from its source"
-            )));
+            ),
+            ));
         }
         if table.filter.is_some() {
-            return Err(Error::Format(format!(
-                "{where_}: the table is filtered, and a filter's hidden state addresses rows \
+            return Err(Error::refused(
+                Refusal::Organised,
+                format!(
+                    "{where_}: the table is filtered, and a filter's hidden state addresses rows \
                  by UUID — maintaining it across an insert is unverified here"
-            )));
+                ),
+            ));
         }
         if !table.conditional_styles.is_empty() {
-            return Err(Error::Format(format!(
-                "{where_}: the table carries conditional highlighting, whose rule ranges are \
+            return Err(Error::refused(
+                Refusal::Organised,
+                format!(
+                    "{where_}: the table carries conditional highlighting, whose rule ranges are \
                  row addressed"
-            )));
+                ),
+            ));
         }
         if table.footer_rows > 0 {
-            return Err(Error::Format(format!(
-                "{where_}: the table has {} footer row(s), and where an inserted row falls \
+            return Err(Error::refused(
+                Refusal::Organised,
+                format!(
+                    "{where_}: the table has {} footer row(s), and where an inserted row falls \
                  relative to a footer is not something any fixture here can verify",
-                table.footer_rows
-            )));
+                    table.footer_rows
+                ),
+            ));
         }
         if !table.row_states.user_hidden.is_empty()
             || !table.row_states.filtered.is_empty()
             || !table.row_states.collapsed_groups.is_empty()
             || table.row_extents.iter().any(|extent| extent.hidden())
         {
-            return Err(Error::Format(format!(
-                "{where_}: the table has hidden or collapsed rows, addressed by UUID"
-            )));
+            return Err(Error::refused(
+                Refusal::Organised,
+                format!("{where_}: the table has hidden or collapsed rows, addressed by UUID"),
+            ));
         }
         if let Some(merge) = table.merges.iter().find(|m| m.row + m.rows > at) {
-            return Err(Error::Format(format!(
-                "{where_}: a merge at row {} column {} would shift or straddle the new row, \
+            return Err(Error::refused(
+                Refusal::Merged,
+                format!(
+                    "{where_}: a merge at row {} column {} would shift or straddle the new row, \
                  and a merge is stored as an absolute-row formula this crate does not rewrite",
-                merge.row, merge.column
-            )));
+                    merge.row, merge.column
+                ),
+            ));
         }
         if let Some(reason) = self.row_insert_would_break_a_formula(&table, at) {
             return Err(Error::Format(format!("{where_}: {reason}")));
@@ -4445,7 +4584,10 @@ impl Document {
             })
             .collect();
         if tile_entries.is_empty() {
-            return Err(Error::Format(format!("{where_}: the table has no tiles")));
+            return Err(Error::refused(
+                Refusal::Missing,
+                format!("{where_}: the table has no tiles"),
+            ));
         }
         for (position, (tile_id, _)) in tile_entries.iter().enumerate() {
             if *tile_id != position as u64 {
@@ -4456,10 +4598,12 @@ impl Document {
             }
         }
 
-        let header_storage = store
-            .bytes(1)
-            .and_then(decode_nested)
-            .ok_or_else(|| Error::Format(format!("{where_}: the data store has no row headers")))?;
+        let header_storage = store.bytes(1).and_then(decode_nested).ok_or_else(|| {
+            Error::refused(
+                Refusal::Missing,
+                format!("{where_}: the data store has no row headers"),
+            )
+        })?;
         let buckets: Vec<u64> = header_storage
             .all(2)
             .filter_map(|value| match value {
@@ -4593,13 +4737,19 @@ impl Document {
             .filter_map(|entry| entry.bytes(2).and_then(crate::table::reference))
             .collect();
         if tile_ids.is_empty() {
-            return Err(Error::Format(format!("{where_}: the table has no tiles")));
+            return Err(Error::refused(
+                Refusal::Missing,
+                format!("{where_}: the table has no tiles"),
+            ));
         }
         let bucket = store
             .bytes(2)
             .and_then(crate::table::reference)
             .ok_or_else(|| {
-                Error::Format(format!("{where_}: the data store has no column headers"))
+                Error::refused(
+                    Refusal::Missing,
+                    format!("{where_}: the data store has no column headers"),
+                )
             })?;
         let uid_map = model_archive
             .bytes(46)
@@ -4836,19 +4986,25 @@ impl Document {
             crate::table::CellRef::Index(row, column)
         );
         if rows == 0 || columns == 0 {
-            return Err(Error::Format(format!("{where_}: an empty range")));
+            return Err(Error::refused(
+                Refusal::NotACell,
+                format!("{where_}: an empty range"),
+            ));
         }
         if rows * columns == 1 {
-            return Err(Error::Format(format!(
-                "{where_}: one cell is not a merge to make — the app writes such a range only \
+            return Err(Error::refused(
+                Refusal::NotACell,
+                format!(
+                    "{where_}: one cell is not a merge to make — the app writes such a range only \
                  when a merge is being taken apart"
-            )));
+                ),
+            ));
         }
         if row + rows > table.rows || column + columns > table.columns {
-            return Err(Error::Format(format!(
-                "{where_}: the table is {}×{}",
-                table.rows, table.columns
-            )));
+            return Err(Error::refused(
+                Refusal::OutOfBounds,
+                format!("{where_}: the table is {}×{}", table.rows, table.columns),
+            ));
         }
         // A merge spans both axes, so both axes' hidden states are its
         // business — unlike a delete, which only ever moves one.
@@ -4860,10 +5016,13 @@ impl Document {
                 && column < merge.column + merge.columns
                 && merge.column < column + columns;
             if overlaps {
-                return Err(Error::Format(format!(
-                    "{where_}: it overlaps the merge at row {} column {}",
-                    merge.row, merge.column
-                )));
+                return Err(Error::refused(
+                    Refusal::Merged,
+                    format!(
+                        "{where_}: it overlaps the merge at row {} column {}",
+                        merge.row, merge.column
+                    ),
+                ));
             }
         }
 
@@ -4874,10 +5033,13 @@ impl Document {
             .bytes(47)
             .and_then(crate::pb::decode_nested)
             .ok_or_else(|| {
-                Error::Format(format!(
-                    "{where_}: the table has no merge owner, and one made from nothing would \
+                Error::refused(
+                    Refusal::Missing,
+                    format!(
+                        "{where_}: the table has no merge owner, and one made from nothing would \
                      need an owner UUID this crate cannot derive"
-                ))
+                    ),
+                )
             })?;
         let node = merge_range_node(&table, row, column, rows, columns)?;
 
@@ -4933,7 +5095,12 @@ impl Document {
             .merges
             .iter()
             .find(|merge| merge.row == row && merge.column == column)
-            .ok_or_else(|| Error::Format(format!("{where_}: no merge begins there")))?;
+            .ok_or_else(|| {
+                Error::refused(
+                    Refusal::NotFound,
+                    format!("{where_}: no merge begins there"),
+                )
+            })?;
         let node = merge_range_node(&table, merge.row, merge.column, merge.rows, merge.columns)?;
 
         let model = table.model;
@@ -4942,7 +5109,12 @@ impl Document {
         let mut owner = model_archive
             .bytes(47)
             .and_then(crate::pb::decode_nested)
-            .ok_or_else(|| Error::Format(format!("{where_}: the table has no merge owner")))?;
+            .ok_or_else(|| {
+                Error::refused(
+                    Refusal::Missing,
+                    format!("{where_}: the table has no merge owner"),
+                )
+            })?;
         let mut store = owner
             .bytes(2)
             .and_then(crate::pb::decode_nested)
@@ -5022,27 +5194,35 @@ impl Document {
         };
 
         if at >= count {
-            return Err(Error::Format(format!(
-                "{where_}: the table has {count} {what}(s)"
-            )));
+            return Err(Error::refused(
+                Refusal::OutOfBounds,
+                format!("{where_}: the table has {count} {what}(s)"),
+            ));
         }
         if count == 1 {
-            return Err(Error::Format(format!(
-                "{where_}: it is the table's only {what}, and a table with none is not \
+            return Err(Error::refused(
+                Refusal::OutOfBounds,
+                format!(
+                    "{where_}: it is the table's only {what}, and a table with none is not \
                  something the app makes"
-            )));
+                ),
+            ));
         }
         if at < headers as usize {
-            return Err(Error::Format(format!(
-                "{where_}: it is one of the table's {headers} header {what}(s), and whether \
+            return Err(Error::refused(
+                Refusal::Organised,
+                format!(
+                    "{where_}: it is one of the table's {headers} header {what}(s), and whether \
                  the count follows the {what} or the next one becomes a header is not \
                  something any fixture here can settle"
-            )));
+                ),
+            ));
         }
         if footers > 0 && at >= count - footers as usize {
-            return Err(Error::Format(format!(
-                "{where_}: it is one of the table's {footers} footer row(s)"
-            )));
+            return Err(Error::refused(
+                Refusal::Organised,
+                format!("{where_}: it is one of the table's {footers} footer row(s)"),
+            ));
         }
         self.refuse_if_organised(&table, row, &where_)?;
         if let Some(merge) = table.merges.iter().find(|m| {
@@ -5052,21 +5232,27 @@ impl Document {
                 m.column + m.columns > at
             }
         }) {
-            return Err(Error::Format(format!(
+            return Err(Error::refused(
+                Refusal::Merged,
+                format!(
                 "{where_}: a merge at row {} column {} would shift or straddle it, and a merge \
                  is stored as an absolute formula this crate does not rewrite",
                 merge.row, merge.column
-            )));
+            ),
+            ));
         }
         if let Some((formula_row, formula_column, _)) = table
             .formula_cells()
             .into_iter()
             .find(|(r, c, _)| if row { *r == at } else { *c == at })
         {
-            return Err(Error::Format(format!(
-                "{where_}: r{formula_row}c{formula_column} holds a formula, and removing one \
+            return Err(Error::refused(
+                Refusal::HoldsFormula,
+                format!(
+                    "{where_}: r{formula_row}c{formula_column} holds a formula, and removing one \
                  means taking its dependency edges out of the calculation engine"
-            )));
+                ),
+            ));
         }
         if let Some(reason) = self.delete_would_break_a_formula(&table, at, row) {
             return Err(Error::Format(format!("{where_}: {reason}")));
@@ -5150,28 +5336,40 @@ impl Document {
         where_: &str,
     ) -> Result<(), Error> {
         if !table.categories.is_empty() {
-            return Err(Error::Format(format!(
-                "{where_}: the table is categorised, and a category's groups are addressed by \
+            return Err(Error::refused(
+                Refusal::Organised,
+                format!(
+                    "{where_}: the table is categorised, and a category's groups are addressed by \
                  row index"
-            )));
+                ),
+            ));
         }
         if table.pivot.is_some() {
-            return Err(Error::Format(format!(
-                "{where_}: the table is a pivot table, whose shape the app builds from its \
+            return Err(Error::refused(
+                Refusal::Organised,
+                format!(
+                    "{where_}: the table is a pivot table, whose shape the app builds from its \
                  source"
-            )));
+                ),
+            ));
         }
         if table.filter.is_some() {
-            return Err(Error::Format(format!(
-                "{where_}: the table is filtered, and a filter names the column it tests and \
+            return Err(Error::refused(
+                Refusal::Organised,
+                format!(
+                    "{where_}: the table is filtered, and a filter names the column it tests and \
                  the rows it hides"
-            )));
+                ),
+            ));
         }
         if !table.conditional_styles.is_empty() {
-            return Err(Error::Format(format!(
-                "{where_}: the table carries conditional highlighting, whose rule ranges are \
+            return Err(Error::refused(
+                Refusal::Organised,
+                format!(
+                    "{where_}: the table carries conditional highlighting, whose rule ranges are \
                  row and column addressed"
-            )));
+                ),
+            ));
         }
         let (states, extents) = match row {
             true => (&table.row_states, &table.row_extents),
@@ -5182,9 +5380,12 @@ impl Document {
             || !states.collapsed_groups.is_empty()
             || extents.iter().any(|extent| extent.hidden())
         {
-            return Err(Error::Format(format!(
+            return Err(Error::refused(
+                Refusal::Organised,
+                format!(
                 "{where_}: the table has hidden or collapsed rows or columns, addressed by UUID"
-            )));
+            ),
+            ));
         }
         Ok(())
     }
@@ -5313,54 +5514,74 @@ impl Document {
         let where_ = format!("{}: insert column at {at}", table.name);
 
         if at > table.columns {
-            return Err(Error::Format(format!(
-                "{where_}: the table has {} column(s), so a column goes in at 0..={}",
-                table.columns, table.columns
-            )));
+            return Err(Error::refused(
+                Refusal::OutOfBounds,
+                format!(
+                    "{where_}: the table has {} column(s), so a column goes in at 0..={}",
+                    table.columns, table.columns
+                ),
+            ));
         }
         if table.columns >= MAX_COLUMNS {
-            return Err(Error::Format(format!(
+            return Err(Error::refused(
+                Refusal::OutOfBounds,
+                format!(
                 "{where_}: the table already has {} columns, which is what a row's offset array \
                  holds — one more would fall off the end of every row",
                 table.columns
-            )));
+            ),
+            ));
         }
         if !table.categories.is_empty() {
-            return Err(Error::Format(format!(
-                "{where_}: the table is categorised, and a category is built on a column — \
+            return Err(Error::refused(
+                Refusal::Organised,
+                format!(
+                    "{where_}: the table is categorised, and a category is built on a column — \
                  which column it is is stored by index"
-            )));
+                ),
+            ));
         }
         if table.pivot.is_some() {
-            return Err(Error::Format(format!(
-                "{where_}: the table is a pivot table, whose columns the app builds from its \
+            return Err(Error::refused(
+                Refusal::Organised,
+                format!(
+                    "{where_}: the table is a pivot table, whose columns the app builds from its \
                  source"
-            )));
+                ),
+            ));
         }
         if table.filter.is_some() {
-            return Err(Error::Format(format!(
-                "{where_}: the table is filtered, and a filter names the column it tests"
-            )));
+            return Err(Error::refused(
+                Refusal::Organised,
+                format!("{where_}: the table is filtered, and a filter names the column it tests"),
+            ));
         }
         if !table.conditional_styles.is_empty() {
-            return Err(Error::Format(format!(
-                "{where_}: the table carries conditional highlighting, whose rule ranges are \
+            return Err(Error::refused(
+                Refusal::Organised,
+                format!(
+                    "{where_}: the table carries conditional highlighting, whose rule ranges are \
                  column addressed"
-            )));
+                ),
+            ));
         }
         if !table.column_states.user_hidden.is_empty()
             || table.column_extents.iter().any(|extent| extent.hidden())
         {
-            return Err(Error::Format(format!(
-                "{where_}: the table has hidden columns, addressed by UUID"
-            )));
+            return Err(Error::refused(
+                Refusal::Organised,
+                format!("{where_}: the table has hidden columns, addressed by UUID"),
+            ));
         }
         if let Some(merge) = table.merges.iter().find(|m| m.column + m.columns > at) {
-            return Err(Error::Format(format!(
+            return Err(Error::refused(
+                Refusal::Merged,
+                format!(
                 "{where_}: a merge at row {} column {} would shift or straddle the new column, \
                  and a merge is stored as an absolute formula this crate does not rewrite",
                 merge.row, merge.column
-            )));
+            ),
+            ));
         }
         if let Some(reason) = self.column_insert_would_break_a_formula(&table, at) {
             return Err(Error::Format(format!("{where_}: {reason}")));
@@ -5482,7 +5703,10 @@ impl Document {
             .filter_map(|entry| entry.bytes(2).and_then(crate::table::reference))
             .collect();
         if tile_ids.is_empty() {
-            return Err(Error::Format(format!("{where_}: the table has no tiles")));
+            return Err(Error::refused(
+                Refusal::Missing,
+                format!("{where_}: the table has no tiles"),
+            ));
         }
 
         // The column headers are **one bucket**, not a list of them: the
@@ -5492,7 +5716,10 @@ impl Document {
             .bytes(2)
             .and_then(crate::table::reference)
             .ok_or_else(|| {
-                Error::Format(format!("{where_}: the data store has no column headers"))
+                Error::refused(
+                    Refusal::Missing,
+                    format!("{where_}: the data store has no column headers"),
+                )
             })?;
 
         let uid_map = model_archive
@@ -5830,7 +6057,10 @@ impl Document {
             })
             .collect();
         if tile_entries.is_empty() {
-            return Err(Error::Format(format!("{where_}: the table has no tiles")));
+            return Err(Error::refused(
+                Refusal::Missing,
+                format!("{where_}: the table has no tiles"),
+            ));
         }
         // Tile *k* covers rows `k * tile_size ..`, so the tiles have to be the
         // run 0, 1, 2… for an absolute row index to mean anything.
@@ -5855,10 +6085,12 @@ impl Document {
         }
 
         // One row-header bucket.
-        let header_storage = store
-            .bytes(1)
-            .and_then(decode_nested)
-            .ok_or_else(|| Error::Format(format!("{where_}: the data store has no row headers")))?;
+        let header_storage = store.bytes(1).and_then(decode_nested).ok_or_else(|| {
+            Error::refused(
+                Refusal::Missing,
+                format!("{where_}: the data store has no row headers"),
+            )
+        })?;
         let buckets: Vec<u64> = header_storage
             .all(2)
             .filter_map(|value| match value {
@@ -6249,10 +6481,13 @@ impl Document {
             .flatten()
         {
             if self.patched_objects().iter().any(|&(id, _)| id == object) {
-                return Err(Error::Format(format!(
-                    "drawable {identifier}: object {object} carries version patches, and \
+                return Err(Error::refused(
+                    Refusal::Patched,
+                    format!(
+                        "drawable {identifier}: object {object} carries version patches, and \
                      rewriting it would leave them describing where it used to be"
-                )));
+                    ),
+                ));
             }
         }
 
@@ -7609,12 +7844,15 @@ impl Document {
     pub fn set_presenter_notes(&mut self, slide: u64, text: &str) -> Result<TextEdit, Error> {
         let show = self
             .show()
-            .ok_or_else(|| Error::Format("not a Keynote document".into()))?;
+            .ok_or_else(|| Error::refused(Refusal::NotFound, "not a Keynote document"))?;
         let found = show.slide(slide).ok_or(Error::NoSuchObject(slide))?;
         let node = found.node;
-        let storage = found
-            .note_storage
-            .ok_or_else(|| Error::Format(format!("slide {slide} has no presenter notes")))?;
+        let storage = found.note_storage.ok_or_else(|| {
+            Error::refused(
+                Refusal::Missing,
+                format!("slide {slide} has no presenter notes"),
+            )
+        })?;
 
         let edit = self.set_text(storage, text)?;
 
