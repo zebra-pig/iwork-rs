@@ -1336,6 +1336,13 @@ filters that decide which rows are shown and in what order, the categories that
 group them, the conditional-highlighting rules that recolour them, the custom
 formats that reformat them, and the pivot tables that summarise them.
 
+**Three parts of it can be written**, and what each cost is below under
+*Writing the organisation*: the sort rules, the filter switch, and the number a
+conditional highlight compares against. What cannot: a filter *rule*, a
+category, a pivot — each of those is a condition Numbers compiles into a `TSCE`
+formula, and this corpus carries one compiled filter condition to learn from,
+which is one sample and not a pattern.
+
 **None of this is addressable by index.** Cells are; organisation is not. Every
 row, column, group and owner carries a `TSP.UUID` (`{1: lower, 2: upper}`),
 because a sort or a filter moves indexes and a UUID survives it.
@@ -1580,6 +1587,57 @@ A set is reached by key from the table's CONDITIONAL_STYLE `TableDataList`
 and one key. The fixture's four rules come back as predicate 7 and 9 against
 `"0"` and predicate 36 against `"↑"` and `"↓"`, which is what its inspector
 shows.
+
+#### Writing the organisation
+
+Three of it, and the reason each stops where it does.
+
+**Sort rules** are the easy one and are written whole.
+`TST.TableSortOrderArchive` is *inline* in the model at field 44 —
+`{1: type, 2: repeated {1: column, 2: descending}}` — and a table with no rules
+still carries the archive with its type alone. Nothing else in the document
+moves: one stream, the model's. The `type` a table already has is kept; every
+one in the corpus is `0`, "the whole table".
+
+**The rules are not the order of the rows.** Numbers keeps them as *what to
+sort by* and applies them when asked. Nothing here reorders a row, and a table
+whose rows this crate shuffled would disagree with its own rules the moment the
+app looked.
+
+**A filter's switch** is two varints at the head of `TST.FilterSetArchive`:
+`{1: match_any, 2: enabled}`, the two controls the Organise pane shows. Field
+2's default is **true**, so "on" is written explicitly rather than left out.
+
+And here is the finding that matters, because it is the opposite of what a
+reader would assume: **switching a filter off does not un-hide its rows.** With
+the filter written off, Numbers opened the document, edited a cell and saved —
+the switch came back *off*, and the ten rows the filter had hidden were still
+hidden. Which rows are hidden is **stored**, in the per-row hiding state and the
+row hidden-state extent, and the app recomputes it when the filter is next
+touched in its own interface, not when the document opens. The same shape as a
+formula's cached value and a chart's grid: a cache the app maintains rather than
+rebuilds.
+
+A filter *rule* is not written at all. The condition is a `TSCE` formula
+Numbers compiles from the user's choice — "does not contain –" comes out as
+`IF(LEN("–")≠LEN(A3),TRUE,IF(ISERROR(FIND.CASEINSENSITIVE("–",A3)),TRUE,…))` —
+and this corpus has exactly one of them.
+
+**A conditional highlight's threshold** can be changed, and the interesting part
+is how many places it lives in. Each rule keeps it **twice**: as an immediate
+value (`{1: kind, 2: {1: double, 2: low, 3: high}}` — the same three numbers a
+`NUMBER` node carries at 4, 42 and 43) and as a `NUMBER` node inside the formula
+that does the comparing. And the *set* keeps each rule twice over: the pre-pivot
+shape at repeated field 2, and the current shape wrapped in field 3, where the
+rule proper sits one level further in. All four places are rewritten together,
+because a document whose copies disagree is one whose highlighting depends on
+which the reader believes.
+
+Only predicates **7** and **9** — greater-than and less-than — are touched. The
+same fixture's other set tests text with predicate 36, and what that compares is
+not established here, so its number is not this crate's to rewrite. Numbers
+opened a document with `=#CELL>0` rewritten to `=#CELL>500`, edited a cell,
+saved, and the new threshold was in what it wrote back.
 
 #### Custom cell formats — `TSK.CustomFormatListArchive` (222)
 

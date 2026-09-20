@@ -1862,6 +1862,12 @@ fn cell_value(message: &Message) -> Option<CellValue> {
     }
 }
 
+/// Field numbers of `TST.TableModelArchive` this crate writes by name.
+pub mod model_field {
+    /// `TST.TableSortOrderArchive`, inline: `{1: type, 2: repeated rule}`.
+    pub const SORT_ORDER: u32 = 44;
+}
+
 /// One rule of `TST.TableSortOrderArchive` — a column and a direction.
 ///
 /// `TableModelArchive` field 44. The archive's own `type` field says whether the
@@ -4470,4 +4476,219 @@ fn find_sheet(document: &crate::Document, wanted: &str) -> Result<u64, crate::Er
 fn seed_from_uuid() -> u64 {
     let hex = crate::metadata::uuid().replace('-', "");
     u64::from_str_radix(&hex[0..16], 16).unwrap_or(0x9E37_79B9_7F4A_7C15)
+}
+
+// -- changing what a highlight compares against ------------------------------
+
+/// `TST.ConditionalStyleSetArchive` field numbers this crate writes.
+mod conditional_field {
+    /// The pre-pivot rules, one per repeated entry.
+    pub const OLD_RULE: u32 = 2;
+    /// The current rules, wrapped: `{1: repeated rule}`.
+    pub const NEW_RULES: u32 = 3;
+    /// Inside a current rule: the immediate value it compares against.
+    pub const VALUE: u32 = 5;
+    /// …and the formula that does the comparing.
+    pub const FORMULA: u32 = 7;
+}
+
+/// The predicate types this crate will change a number in.
+///
+/// Seven is "greater than" and nine "less than" — read off
+/// `numbers-rules.numbers`, whose `Overview` table highlights what is above
+/// zero in one style and below it in another. The others are left alone: a
+/// predicate whose *meaning* is not established is one whose number this crate
+/// has no business rewriting, and 36 — the one the same fixture uses for "begins
+/// with ↑" — compares text.
+const NUMERIC_PREDICATES: [i64; 2] = [7, 9];
+
+/// Change the number a conditional highlight compares against.
+///
+/// A highlight rule keeps its threshold **twice**: as an immediate value on the
+/// rule, and as a `NUMBER` node inside the `TSCE` formula that does the
+/// comparing — `=#CELL>0`, whose first node is a `LINKED_CELL_REF` standing for
+/// the cell being tested. And the rule itself is kept twice over: Numbers
+/// 15.3.1 writes both the pre-pivot shape (repeated field 2) and the current
+/// one (field 3), with the same rules in each. All of it is rewritten, because
+/// a document where the two disagree is one whose highlighting depends on which
+/// the reader believes.
+///
+/// What this does **not** do is make a rule, or a style for one to apply. Both
+/// are copies of things a document already has, and a document with no
+/// highlighting has neither.
+pub fn set_conditional_threshold(
+    document: &mut crate::Document,
+    set: u64,
+    rule: usize,
+    value: Decimal,
+) -> Result<(), crate::Error> {
+    use crate::{Error, Refusal};
+
+    let mut archive = document.archive(set)?;
+    let decoded = ConditionalStyles::decode(set, None, &archive);
+    let found = decoded.rules.get(rule).ok_or_else(|| {
+        Error::refused(
+            Refusal::NotFound,
+            format!(
+                "conditional style set {set} has {} rule(s)",
+                decoded.rules.len()
+            ),
+        )
+    })?;
+    if !NUMERIC_PREDICATES.contains(&found.predicate.kind) {
+        return Err(Error::refused(
+            Refusal::UnwritableValue,
+            format!(
+                "rule {rule} of set {set} is predicate {}, and what that one compares is not \\
+                 established here — only {:?} are, which are greater-than and less-than",
+                found.predicate.kind, NUMERIC_PREDICATES
+            ),
+        ));
+    }
+
+    let bytes = encode_decimal128(value).map_err(Error::Format)?;
+    let low = u64::from_le_bytes(bytes[..8].try_into().expect("eight bytes"));
+    let high = u64::from_le_bytes(bytes[8..].try_into().expect("eight bytes"));
+    let double = value.to_f64();
+
+    // Every `NUMBER` node of a formula, rewritten. A comparison against a
+    // literal has exactly one, and a rule with none or several is refused
+    // rather than half-rewritten.
+    let retune_formula = |raw: &[u8]| -> Option<Vec<u8>> {
+        let formula = decode_nested(raw)?;
+        let ast = formula.bytes(1).and_then(decode_nested)?;
+        let mut nodes: Vec<Message> = ast
+            .all(1)
+            .filter_map(|value| match value {
+                Value::Bytes(raw) => decode_nested(raw),
+                _ => None,
+            })
+            .collect();
+        let numbers: Vec<usize> = nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| node.varint(1) == Some(u64::from(crate::formula::node::NUMBER)))
+            .map(|(at, _)| at)
+            .collect();
+        if numbers.len() != 1 {
+            return None;
+        }
+        let node = &mut nodes[numbers[0]];
+        node.set_in_order(4, Value::Fixed64(double.to_le_bytes()));
+        node.set_in_order(42, Value::Varint(low));
+        node.set_in_order(43, Value::Varint(high));
+        let mut rebuilt = Message::default();
+        for node in &nodes {
+            rebuilt.append_in_order(1, Value::Bytes(node.encode()));
+        }
+        let mut out = formula.clone();
+        out.set_in_order(1, Value::Bytes(rebuilt.encode()));
+        Some(out.encode())
+    };
+
+    let mut rewritten = 0;
+    // The pre-pivot slot: the rule's formula is at `1.1`.
+    let mut old = 0usize;
+    for field in archive.fields.iter_mut() {
+        if field.number != conditional_field::OLD_RULE {
+            continue;
+        }
+        let at = old;
+        old += 1;
+        if at != rule {
+            continue;
+        }
+        let Value::Bytes(raw) = &field.value else {
+            continue;
+        };
+        let Some(mut entry) = decode_nested(raw) else {
+            continue;
+        };
+        let Some(mut inner) = entry.bytes(1).and_then(decode_nested) else {
+            continue;
+        };
+        let Some(formula) = inner.bytes(1).map(<[u8]>::to_vec) else {
+            continue;
+        };
+        // In this slot the formula sits where a wrapper's field 1 does, so it
+        // is the node array itself rather than a `FormulaArchive`.
+        let mut wrapper = Message::default();
+        wrapper.set_in_order(1, Value::Bytes(formula));
+        let Some(next) = retune_formula(&wrapper.encode()) else {
+            continue;
+        };
+        let next = decode_nested(&next).expect("just encoded");
+        inner.set_in_order(1, Value::Bytes(next.bytes(1).expect("the nodes").to_vec()));
+        entry.set_in_order(1, Value::Bytes(inner.encode()));
+        field.value = Value::Bytes(entry.encode());
+        rewritten += 1;
+    }
+
+    // The current slot: value and formula, both on the rule.
+    if let Some(mut wrapper) = archive
+        .bytes(conditional_field::NEW_RULES)
+        .and_then(decode_nested)
+    {
+        let mut at = 0usize;
+        for field in wrapper.fields.iter_mut() {
+            if field.number != 1 {
+                continue;
+            }
+            let index = at;
+            at += 1;
+            if index != rule {
+                continue;
+            }
+            let Value::Bytes(raw) = &field.value else {
+                continue;
+            };
+            let Some(mut entry) = decode_nested(raw) else {
+                continue;
+            };
+            // The rule proper is one level in: the wrapper's entry is
+            // `{1: the rule}`, and the rule is what carries the predicate type,
+            // the value and the formula.
+            let Some(mut rule_message) = entry.bytes(1).and_then(decode_nested) else {
+                continue;
+            };
+            // The immediate value: a double and the decimal128 halves, the same
+            // three numbers a `NUMBER` node carries at 4, 42 and 43.
+            if let Some(mut held) = rule_message
+                .bytes(conditional_field::VALUE)
+                .and_then(decode_nested)
+            {
+                if let Some(mut number) = held.bytes(2).and_then(decode_nested) {
+                    number.set_in_order(1, Value::Fixed64(double.to_le_bytes()));
+                    number.set_in_order(2, Value::Varint(low));
+                    number.set_in_order(3, Value::Varint(high));
+                    held.set_in_order(2, Value::Bytes(number.encode()));
+                    rule_message
+                        .set_in_order(conditional_field::VALUE, Value::Bytes(held.encode()));
+                }
+            }
+            if let Some(formula) = rule_message
+                .bytes(conditional_field::FORMULA)
+                .map(<[u8]>::to_vec)
+            {
+                if let Some(next) = retune_formula(&formula) {
+                    rule_message.set_in_order(conditional_field::FORMULA, Value::Bytes(next));
+                }
+            }
+            entry.set_in_order(1, Value::Bytes(rule_message.encode()));
+            field.value = Value::Bytes(entry.encode());
+            rewritten += 1;
+        }
+        archive.set_in_order(conditional_field::NEW_RULES, Value::Bytes(wrapper.encode()));
+    }
+
+    if rewritten == 0 {
+        return Err(crate::Error::refused(
+            crate::Refusal::UnwritableValue,
+            format!(
+                "rule {rule} of set {set} compares against something other than one number, \\
+                 and rewriting part of a condition is worse than leaving it alone"
+            ),
+        ));
+    }
+    document.set_archive_for(set, &archive)
 }

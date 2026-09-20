@@ -586,6 +586,13 @@ impl TableHandle<'_> {
         self.document.set_format(&self.table, cells, format)
     }
 
+    /// What the table sorts by, replacing whatever it sorted by before.
+    ///
+    /// The rules are stored, not applied: see [`Document::set_sort_rules`].
+    pub fn sort_by(&mut self, rules: &[crate::table::SortRule]) -> Result<(), Error> {
+        self.document.set_sort_rules(&self.table, rules)
+    }
+
     /// A column's width in points, or `None` for the table's default.
     ///
     /// The axis is in the name rather than in the reader's memory: `width(0,
@@ -3983,6 +3990,153 @@ impl Document {
             .map(|(row, column, amount)| (row, column, CellValue::Currency(amount)))
             .collect();
         self.write_cells_with(&table, cells, cache)
+    }
+
+    // -- how a table is organised --------------------------------------------
+
+    /// Give a table its **sort rules**, replacing whatever it had.
+    ///
+    /// A sort rule is a column and a direction, and the whole list lives inline
+    /// in `TableModelArchive` field 44 — `TST.TableSortOrderArchive`, which is
+    /// `{1: type, 2: repeated {1: column, 2: descending}}`. A table with no
+    /// rules still carries the archive with its type alone, which is what an
+    /// empty list writes.
+    ///
+    /// **The rules are not the order of the rows.** Numbers keeps them as *what
+    /// to sort by* and applies them when asked — through Sort Now, or
+    /// continuously when the table is set to sort itself. Nothing here moves a
+    /// row: [`Document::insert_row`] and [`Document::delete_row`] are what do
+    /// that, and a table whose rows this crate reorders would disagree with its
+    /// own rules the moment the app looked.
+    ///
+    /// The `type` the table already carries is kept. Every one in the corpus is
+    /// `0`, which is "the whole table" — the other values name a row range and
+    /// nothing here has seen one.
+    pub fn set_sort_rules(
+        &mut self,
+        wanted: &str,
+        rules: &[crate::table::SortRule],
+    ) -> Result<(), Error> {
+        let table = self.table_for_write(wanted)?;
+        let where_ = format!("{}: sort rules", table.name);
+        for rule in rules {
+            if rule.column >= table.columns {
+                return Err(Error::refused(
+                    Refusal::OutOfBounds,
+                    format!(
+                        "{where_}: column {} of a table with {}",
+                        rule.column, table.columns
+                    ),
+                ));
+            }
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for rule in rules {
+            if !seen.insert(rule.column) {
+                return Err(Error::refused(
+                    Refusal::NotACell,
+                    format!(
+                        "{where_}: column {} is named twice, and which of the two directions \
+                         was meant is not this crate's to guess",
+                        rule.column
+                    ),
+                ));
+            }
+        }
+        self.refuse_if_patched(&[table.model], &where_)?;
+
+        let mut archive = self.archive_of(table.model)?;
+        let existing = archive
+            .bytes(crate::table::model_field::SORT_ORDER)
+            .and_then(crate::pb::decode_nested);
+        let mut order = Message::default();
+        // The type the table already had, or "the whole table" for one that had
+        // no archive at all.
+        order.set_in_order(
+            1,
+            Value::Varint(existing.as_ref().and_then(|o| o.varint(1)).unwrap_or(0)),
+        );
+        for rule in rules {
+            let mut entry = Message::default();
+            entry.set_in_order(1, Value::Varint(rule.column as u64));
+            entry.set_in_order(2, Value::Varint(u64::from(rule.descending)));
+            order.append_in_order(2, Value::Bytes(entry.encode()));
+        }
+        archive.set_in_order(
+            crate::table::model_field::SORT_ORDER,
+            Value::Bytes(order.encode()),
+        );
+        self.set_archive_of(table.model, &archive)
+    }
+
+    /// Turn a table's filters on or off, and say whether **all** its rules must
+    /// match or **any** of them.
+    ///
+    /// The two switches of the Organise pane, and the two varints at the head
+    /// of `TST.FilterSetArchive`: `{1: match_any, 2: enabled}`. The rules
+    /// themselves are not touched — writing one means writing the `TSCE`
+    /// formula Numbers compiles a filter into, and this corpus carries exactly
+    /// one of those to learn from, so a rule built here would be an
+    /// extrapolation from a single sample. Refused by name below.
+    ///
+    /// **The switch does not by itself change which rows are visible**, and that
+    /// was measured rather than assumed. With the filter written off, Numbers
+    /// opened the document, edited a cell and saved: the switch came back
+    /// *off*, and the ten rows the filter had hidden were still hidden. Which
+    /// rows are hidden is **stored**, in the per-row hiding state and the
+    /// row hidden-state extent, and the app recomputes it when the filter is
+    /// next touched in its own interface — not when the document opens. The
+    /// same shape as a formula's cached value and a chart's grid: a cache the
+    /// app maintains, not one it rebuilds on load.
+    ///
+    /// So this writes what the Organise pane shows, and nothing else. Clearing
+    /// the hidden state as well would mean rewriting the UUID-keyed extent that
+    /// [`Document::insert_row`] refuses to maintain for exactly the same
+    /// reason.
+    pub fn set_filter_enabled(
+        &mut self,
+        wanted: &str,
+        enabled: bool,
+        match_any: Option<bool>,
+    ) -> Result<(), Error> {
+        let table = self.table_for_write(wanted)?;
+        let where_ = format!("{}: filter", table.name);
+        let filter = table.filter.as_ref().ok_or_else(|| {
+            Error::refused(
+                Refusal::Missing,
+                format!(
+                    "{where_}: the table has no filter set with rules in it, and a filter \
+                     made from nothing would need the TSCE formula Numbers compiles one into \
+                     — this corpus has one of those to learn from, which is not enough"
+                ),
+            )
+        })?;
+        self.refuse_if_patched(&[filter.identifier], &where_)?;
+
+        let mut archive = self.archive_of(filter.identifier)?;
+        // Field 2's default is **true**, so "on" is written explicitly rather
+        // than left out: an absent field and a false one are different things
+        // everywhere else in this format and the same thing here only by
+        // accident.
+        archive.set_in_order(2, Value::Varint(u64::from(enabled)));
+        if let Some(any) = match_any {
+            archive.set_in_order(1, Value::Varint(u64::from(any)));
+        }
+        self.set_archive_of(filter.identifier, &archive)
+    }
+
+    /// Change the number a conditional highlight compares against.
+    ///
+    /// See [`crate::table::set_conditional_threshold`]: the threshold is kept
+    /// twice on each rule and the rules twice over in the set, and all of it is
+    /// rewritten together.
+    pub fn set_conditional_threshold(
+        &mut self,
+        set: u64,
+        rule: usize,
+        value: crate::table::Decimal,
+    ) -> Result<(), Error> {
+        crate::table::set_conditional_threshold(self, set, rule, value)
     }
 
     // -- writing a formula ---------------------------------------------------

@@ -759,6 +759,45 @@ three of the four written now. What is left is the one that should be left.
 Filled in as phases complete: what was proven, by which test, against which
 fixture, and what the app accepted.
 
+- 2026-09-20 — **The organisation layer, and where it stops.** Sort rules,
+  filters, categories, conditional highlighting and pivots were read in detail
+  and written not at all. Three of them are written now, and the boundary is
+  drawn where the evidence runs out rather than where the work got hard.
+
+  **Sort rules** are one inline archive on the model — `{1: type, 2: repeated
+  {1: column, 2: descending}}` — and go in whole, one stream touched. They are
+  *what to sort by* and not the order of the rows, which is why nothing here
+  moves a row.
+
+  **A filter's switch** is two varints, and writing it turned up the finding of
+  the day: **switching a filter off does not un-hide its rows.** The app opened
+  a document with the filter written off, edited a cell and saved; the switch
+  came back off and the ten hidden rows were still hidden. Which rows are hidden
+  is *stored*, in the per-row hiding state and the UUID-keyed extent, and the
+  app recomputes it when the filter is next touched in its own interface. The
+  same shape as a formula's cached value and a chart's grid.
+
+  A filter **rule** is not written. Numbers compiles "does not contain –" into
+  `IF(LEN("–")≠LEN(A3),TRUE,IF(ISERROR(FIND.CASEINSENSITIVE(…))))`, and this
+  corpus has exactly one compiled condition. One sample is not a pattern, and a
+  filter built from it would hide the wrong rows quietly.
+
+  **A conditional highlight's threshold** can be changed, and the work was in
+  finding out how many copies of it there are: each rule keeps the number twice
+  — an immediate value and a `NUMBER` node inside its formula — and the *set*
+  keeps each rule twice over, in the pre-pivot shape at repeated field 2 and the
+  current shape wrapped in field 3, where the rule proper sits one level further
+  in than it looks. The first attempt rewrote three of the four copies and
+  reported success while changing nothing the reader could see; the fix was to
+  find the missing level rather than to trust the shape. Only predicates 7 and 9
+  are touched.
+
+  All three are held to the bar the app allows: there is no scripting property
+  for a sort rule, a filter switch or a highlight, so the measure is that
+  Numbers **opens the document, rewrites it and saves** — and what it then wrote
+  contains what this crate wrote. `tests/organise.rs`, eight tests, three of
+  them through the app.
+
 - 2026-09-19 — **The mediator, which was the last hard half — and it had gone
   soft.** Phase 14's open item said it needed "the `TSCE` half — formulas built
   from nothing, and function 175". By the time it was picked up, the first half

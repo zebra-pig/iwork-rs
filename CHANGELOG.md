@@ -44,6 +44,22 @@ The release that makes the crate usable from code rather than from a shell.
   `Refusal::HoldsFormula`, `Refusal::OutOfBounds` and a dozen more — so a caller
   can skip, grow or stop without matching on the text of a message.
 
+### The organisation layer, in the three places it could be written honestly
+
+- **Sort rules**, whole: one inline archive on the model. They say what to sort
+  *by* — nothing here reorders a row.
+- **A filter's switch** and its all/any mode. Its *rules* are not written:
+  Numbers compiles a filter condition into a `TSCE` formula and this corpus
+  carries one of those to learn from, which is a sample and not a pattern.
+- **A conditional highlight's threshold**, in all four places a rule keeps it —
+  the immediate value and the formula's literal, in each of the two shapes the
+  set stores its rules in — for the two predicates whose meaning is established.
+
+And a finding that is the opposite of what a reader would assume: **switching a
+filter off does not un-hide its rows.** Which rows are hidden is stored, not
+worked out on open; the app recomputes it when the filter is next touched in its
+own interface.
+
 ### Shapes the format insists on
 
 - **A sheet is not a grid.** A Numbers sheet holds any number of tables, with

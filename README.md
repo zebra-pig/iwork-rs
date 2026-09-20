@@ -718,6 +718,11 @@ Everything below is asserted by `cargo test` when you supply fixtures.
 | Every cell record consumed to the byte (every one in the corpus) | ✅ | ✅ | — |
 | **Every cell agrees with the app** (2943 compared) | — | ✅ | — |
 | Sort rules; filter sets with their rules and on/off switch | — | ✅ | — |
+| Write a table's sort rules, and take them away | — | ✅ | — |
+| Turn a filter off and on, and switch it between all and any | — | ✅ | — |
+| **Switching a filter off does not un-hide its rows** — the hiding is stored | — | ✅ | — |
+| Change what a conditional highlight compares against, in all four copies | — | ✅ | — |
+| **The app keeps all three through a save of its own** | — | ✅ | — |
 | Hidden rows and columns, with *why* (user vs filter) | — | ✅ | — |
 | Categories: source column, groups, rows per group, SUM summaries | — | ✅ | — |
 | Pivot tables: source, row/column/value fields, summary functions | — | ✅ | — |
@@ -1215,6 +1220,22 @@ fuzzing story rather than half of it.
   tables this crate builds: a new table is given the two `TSCE` owners a formula
   needs, and **Numbers recalculates a formula written into a document made from
   nothing**.
+- **The organisation layer is written in three places and read everywhere
+  else.** Sort rules go in whole — they are one inline archive on the model, and
+  they say what to sort *by*, not what order the rows are in, so nothing here
+  moves a row. A filter's switch and its all/any mode go in; **its rules do
+  not**, because Numbers compiles a filter condition into a `TSCE` formula and
+  this corpus carries exactly one of those to learn from. And a conditional
+  highlight's threshold can be changed — in all four places a rule keeps it —
+  for the two predicates whose meaning is established, greater-than and
+  less-than. Categories and pivots stay read-only for the same reason filters
+  do.
+- **Switching a filter off does not un-hide its rows.** Which rows are hidden is
+  *stored*, not worked out when the document opens: with the filter written off,
+  Numbers opened the document, edited a cell and saved, and the ten hidden rows
+  were still hidden. The app recomputes them when the filter is next touched in
+  its own interface. Clearing the hidden state as well means rewriting the
+  UUID-keyed extent that `insert_row` refuses to maintain, for the same reason.
 - **A page-layout document's body is refused, not written.** Pages has two
   modes, and the crate reads both: word processing, where text flows from page
   to page, and page layout, where every word is in a text box. A page-layout
