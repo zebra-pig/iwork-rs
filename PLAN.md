@@ -16,6 +16,40 @@ the crate, and Numbers evaluates formulas we can read back as an oracle.
    the harness (phase 0), confirm it loads and — where readable back via
    AppleScript — that the edit took effect. `iwork check` learns every new
    invariant discovered this way.
+
+   **1a. A document the app rejects is a defect, and fixing it comes first.**
+   This is not a rule about tidiness; it is the only rule that keeps the rest
+   of this repository honest. The checks here prove that bytes are
+   structurally sound and survive an independent decode. They cannot prove an
+   app will accept the result, and the difference is real: documents that pass
+   every check in this repository — `iwork check` included — have crashed
+   Pages on opening.
+
+   So whenever such a document is found, by anyone, in any way, the work in
+   hand stops and **all four of these happen before anything else ships**:
+
+   1. **Find the invariant.** Not a workaround, not a field copied until the
+      crash goes away: the rule the app's own documents hold to exactly, and
+      which this one broke. Bisect the document until the smallest difference
+      is in hand — that is how the Pages stylesheet finding was made, and it
+      is the only way such things are found.
+   2. **Teach `iwork check` to assert it**, so the next document that breaks
+      it is caught here rather than by the app.
+   3. **Maintain it on write**, so the writer that produced the bad document
+      cannot produce another.
+   4. **Leave the case behind as a test**, named after the shape that caused
+      it, and — where the app is what proves the fix — behind
+      `IWORK_APP_CHECK=1`.
+
+   A refusal is an acceptable outcome of step 3 and a workaround is not: if
+   the invariant cannot be maintained, the write is refused by name with the
+   reason attached ([`Refusal`]), which is a thing a caller can act on. What
+   is never acceptable is a write that is known to produce documents the app
+   will not open, left in place because the failure is rare or the fix is
+   awkward.
+
+   The checker gets sharper every time this happens, and is still not a
+   substitute for opening the file.
 2. **Nothing is lost, nothing is touched.** Wire-level editing stays: unknown
    objects pass through untouched, unchanged streams keep their exact bytes,
    a no-op save reproduces every entry byte for byte. Every phase re-runs the

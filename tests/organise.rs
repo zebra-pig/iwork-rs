@@ -338,3 +338,42 @@ fn numbers_keeps_a_rewritten_threshold() {
     );
     let _ = std::fs::remove_file(&out);
 }
+
+/// The filter switch, through the app.
+///
+/// Ground rule 1a's other half: a write with no app round-trip is a write
+/// nobody has watched the app accept. Off unless `IWORK_APP_CHECK=1`.
+#[test]
+fn numbers_keeps_a_filter_switched_off() {
+    if std::env::var("IWORK_APP_CHECK").as_deref() != Ok("1") {
+        eprintln!("IWORK_APP_CHECK is not 1 — skipping the app round trip");
+        return;
+    }
+    let mut doc = fixture!("numbers-rules.numbers");
+    let table = "30-Day History Table";
+    doc.set_filter_enabled(table, false, Some(true)).unwrap();
+    let out = std::env::temp_dir().join("iwork-filter-switch.numbers");
+    let _ = std::fs::remove_file(&out);
+    doc.save(&out).unwrap();
+
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/edit-and-save.sh");
+    let output = std::process::Command::new(&script)
+        .args([out.to_str().unwrap(), table, "A1", "1"])
+        .output()
+        .unwrap_or_else(|e| panic!("{}: {e}", script.display()));
+    assert!(
+        output.status.success(),
+        "Numbers would not open a document with the filter switched off:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let after = Document::open(&out).unwrap();
+    let filter = after.table(table).unwrap().filter.expect("still a filter");
+    assert!(!filter.enabled, "the app turned the filter back on");
+    assert!(filter.match_any, "the app did not keep the match mode");
+    assert!(
+        !filter.rules.is_empty(),
+        "the app dropped the rules the switch left alone"
+    );
+    let _ = std::fs::remove_file(&out);
+}

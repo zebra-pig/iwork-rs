@@ -1325,6 +1325,16 @@ fuzzing story rather than half of it.
   written by this crate needs trying in the app before it is trusted —
   `scripts/app-check.sh` is how, and `IWORK_APP_CHECK=1 cargo test` runs it over
   every fixture, on a machine that has the apps.
+
+  **And when such a document is found, fixing it comes first.** That is a rule
+  of this repository, not an aspiration — `PLAN.md` ground rule 1a states it in
+  full. A document the app rejects, or silently rewrites, stops the work in
+  hand: find the invariant the app's own documents hold to (by bisecting the
+  document until the smallest difference is in hand), teach `iwork check` to
+  assert it, maintain it on write, and leave the case behind as a test named
+  after the shape that caused it. Refusing the write by name is an acceptable
+  outcome; leaving a writer in place that is known to produce documents the app
+  will not open is not.
 - **A comment can be written; a reply cannot.** `iwork add-comment` attaches one
   to a range of text: the comment, its author — added to the document's one
   author storage if that name is not there yet — and the two entries in the

@@ -381,3 +381,56 @@ fn a_column_is_deleted_across_every_tile() {
     assert!(table.audit().is_empty(), "{:?}", table.audit());
     assert!(doc.problems().is_empty(), "{:?}", doc.problems());
 }
+
+/// The app reads back a table with a column deleted.
+///
+/// `delete_row` had an app round-trip and `delete_column` did not, which is a
+/// write nobody had watched the app accept — ground rule 1a. Off unless
+/// `IWORK_APP_CHECK=1`.
+#[test]
+fn numbers_reads_back_a_table_with_a_column_deleted() {
+    if std::env::var("IWORK_APP_CHECK").as_deref() != Ok("1") {
+        eprintln!("IWORK_APP_CHECK is not 1 — skipping the app round trip");
+        return;
+    }
+    let _ = fixture!("numbers-formats.numbers");
+    let mut doc = open("numbers-formats.numbers").unwrap();
+    // Column C holds the notes; B the values. Taking B out moves C into its
+    // place, which is what the app has to agree about.
+    let before: Vec<String> = {
+        let table = doc.table("Formate").unwrap();
+        (0..table.rows).map(|row| table.value(row, 2).to_text()).collect()
+    };
+    doc.delete_column("Formate", 1).unwrap();
+    let out = std::env::temp_dir().join("iwork-delete-column.numbers");
+    let _ = std::fs::remove_file(&out);
+    doc.save(&out).unwrap();
+
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/table-oracle.sh");
+    let output = std::process::Command::new(&script)
+        .arg(&out)
+        .output()
+        .unwrap_or_else(|e| panic!("{}: {e}", script.display()));
+    assert!(
+        output.status.success(),
+        "Numbers would not open a document with a column deleted:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(
+        text.contains("table\tFormate\t17\t2"),
+        "the app did not see two columns:\n{text}"
+    );
+    // What was column C is column B to the app now.
+    for (row, value) in before.iter().enumerate() {
+        if value.is_empty() {
+            continue;
+        }
+        assert!(
+            text.contains(&format!("\tB{}\t", row + 1)),
+            "row {} lost its moved cell:\n{text}",
+            row + 1
+        );
+    }
+    let _ = std::fs::remove_file(&out);
+}

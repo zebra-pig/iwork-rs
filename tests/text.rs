@@ -1192,3 +1192,59 @@ fn an_edit_through_a_tracked_change_is_refused_by_name() {
         Err(Error::TrackedChanges { .. })
     ));
 }
+
+/// The app reads back text this crate pointed at a style it also made.
+///
+/// `create_text_style` had an app round-trip and `apply_text_style` did not:
+/// the style existed in a document the app opened, and whether the *run*
+/// pointing at it survived was never watched. Ground rule 1a. Off unless
+/// `IWORK_APP_CHECK=1`.
+#[test]
+fn pages_resaves_text_pointed_at_a_style_this_crate_applied() {
+    if std::env::var("IWORK_APP_CHECK").as_deref() != Ok("1") {
+        eprintln!("IWORK_APP_CHECK is not 1 — skipping the app round trip");
+        return;
+    }
+    let path = fixture!("pages-styled.pages");
+    let mut doc = Document::open(&path).unwrap();
+    let storage = doc.body_storage().expect("a body");
+    let template = doc
+        .text_styles()
+        .into_iter()
+        .find(|style| style.kind == iwork::StyleKind::Paragraph)
+        .expect("a paragraph style to copy")
+        .identifier;
+    let made = doc.create_text_style(template, "Kicker").unwrap();
+    doc.apply_text_style(storage, 0..4, made.identifier).unwrap();
+    let before = doc.storage_text(storage).unwrap();
+
+    let out = std::env::temp_dir().join("iwork-applied-style.pages");
+    let _ = std::fs::remove_file(&out);
+    doc.save(&out).unwrap();
+
+    // The app loads the document into its own model and writes it back out;
+    // a run pointing at a style it will not accept does not survive that.
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/resave.sh");
+    let output = std::process::Command::new(&script)
+        .arg(&out)
+        .output()
+        .unwrap_or_else(|e| panic!("{}: {e}", script.display()));
+    assert!(
+        output.status.success(),
+        "Pages would not resave a document with an applied style:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let after = Document::open(&out).unwrap();
+    assert_eq!(
+        after.storage_text(storage).unwrap(),
+        before,
+        "the app rewrote the text the style was applied to"
+    );
+    assert!(
+        after.text_styles().iter().any(|s| s.identifier == made.identifier),
+        "the app dropped the style"
+    );
+    assert!(after.problems().is_empty(), "{:?}", after.problems());
+    let _ = std::fs::remove_file(&out);
+}
