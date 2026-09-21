@@ -2178,12 +2178,27 @@ pub fn add_image(
     let parent = container.parent();
     let neighbour = container.neighbour();
 
+    // **One stored file per distinct content.** iWork's media registry is
+    // keyed by digest, and a package holding the same bytes twice under two
+    // names is one the app aborts on: Keynote dies in `TSPersistence` before
+    // it draws anything, and no error reaches the user. So the digest decides
+    // whether this is a new file or another reference to one already here.
+    let digest = crate::media::sha1(bytes);
+    let existing = document
+        .data_files()
+        .into_iter()
+        .find(|file| file.digest == digest)
+        .map(|file| file.identifier);
+
     let mut grow = crate::create::Grow::new(document);
     // The data identifier comes out of the same counter as the objects. A
     // `DataReference` and an object reference are told apart by where they
     // sit, not by their value, so sharing the counter is what keeps a data
     // identifier from ever being read as an object.
-    let data = grow.allocate();
+    let data = match existing {
+        Some(identifier) => identifier,
+        None => grow.allocate(),
+    };
     let image = grow.allocate();
     grow.beside_with(
         neighbour,
@@ -2202,7 +2217,9 @@ pub fn add_image(
     )?;
     grow.finish()?;
 
-    document.register_media(data, bytes, preferred_name, natural)?;
+    if existing.is_none() {
+        document.register_media(data, bytes, preferred_name, natural)?;
+    }
     hold(document, &container, image)?;
     document.declare_external_references();
     Ok(image)

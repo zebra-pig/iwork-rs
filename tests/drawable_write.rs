@@ -674,3 +674,167 @@ fn pages_and_keynote_resave_a_document_with_an_added_box() {
     kept(&out, "Ellipse durch Keynote hindurch", (300.0, 200.0));
     let _ = std::fs::remove_dir_all(&out);
 }
+
+/// A one-pixel PNG, so a test can add a picture without a fixture corpus.
+fn tiny_png() -> Vec<u8> {
+    const PNG: &[u8] = &[
+        0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, b'I', b'H', b'D',
+        b'R', 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f,
+        0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0a, b'I', b'D', b'A', b'T', 0x78, 0x9c, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, b'I',
+        b'E', b'N', b'D', 0xae, 0x42, 0x60, 0x82,
+    ];
+    PNG.to_vec()
+}
+
+/// **The same picture, added twice, is stored once.**
+///
+/// iWork's media registry is keyed by content: one `Data/` file per distinct
+/// set of bytes, and every user points at it. A package that holds the same
+/// content twice under two names is not merely wasteful — Keynote *aborts* on
+/// it, inside `TSPersistence`, before it draws anything and without a word to
+/// the user. `iwork check` called such a deck clean until this case arrived.
+#[test]
+fn the_same_picture_added_twice_is_stored_once() {
+    let png = tiny_png();
+    let frame = iwork::drawable::Frame {
+        x: 0.0,
+        y: 0.0,
+        width: 200.0,
+        height: 200.0,
+    };
+
+    let mut deck = Document::new(Kind::Keynote).unwrap();
+    deck.add_slide(None).unwrap();
+    deck.slide_mut(0)
+        .unwrap()
+        .add_image(&png, "first.png", frame)
+        .unwrap();
+    deck.slide_mut(1)
+        .unwrap()
+        .add_image(&png, "second.png", frame)
+        .unwrap();
+
+    // One registry entry, one file — and two images pointing at it.
+    let files = deck.data_files();
+    assert_eq!(files.len(), 1, "one file per distinct content: {files:?}");
+    assert!(deck.problems().is_empty(), "{:?}", deck.problems());
+
+    let out = scratch("iwork-one-picture-twice.key");
+    deck.save(&out).unwrap();
+    let saved = Document::open(&out).unwrap();
+    assert_eq!(saved.data_files().len(), 1);
+    assert_eq!(
+        saved
+            .package()
+            .names()
+            .filter(|name| name.starts_with("Data/"))
+            .count(),
+        1,
+        "the package carries one Data/ entry"
+    );
+    assert!(saved.problems().is_empty(), "{:?}", saved.problems());
+}
+
+/// And the checker says so when a document *does* hold the same bytes twice.
+#[test]
+fn a_duplicated_picture_is_a_problem_the_checker_names() {
+    let png = tiny_png();
+    let frame = iwork::drawable::Frame {
+        x: 0.0,
+        y: 0.0,
+        width: 200.0,
+        height: 200.0,
+    };
+    let mut deck = Document::new(Kind::Keynote).unwrap();
+    deck.slide_mut(0)
+        .unwrap()
+        .add_image(&png, "only.png", frame)
+        .unwrap();
+
+    // Put the duplicate in the registry by hand — a second `DataInfo` naming
+    // the same digest, which is the shape this crate used to write and the
+    // shape a document from elsewhere may still arrive in.
+    let metadata = deck
+        .objects()
+        .find(|(_, object)| object.message_type() == 11006)
+        .map(|(_, object)| object.identifier)
+        .expect("a TSP.PackageMetadata");
+    let mut archive = deck.archive(metadata).unwrap();
+    let entry = archive
+        .all(4)
+        .find_map(|value| match value {
+            iwork::pb::Value::Bytes(raw) => Some(raw.clone()),
+            _ => None,
+        })
+        .expect("one DataInfo");
+    let mut copy = iwork::pb::Message::decode(&entry).unwrap();
+    copy.set_in_order(1, iwork::pb::Value::Varint(9_999));
+    copy.set_in_order(4, iwork::pb::Value::Bytes(b"copy.png".to_vec()));
+    archive.fields.push(iwork::pb::Field {
+        number: 4,
+        value: iwork::pb::Value::Bytes(copy.encode()),
+    });
+    deck.set_archive_for(metadata, &archive).unwrap();
+
+    let problems = deck.problems();
+    assert!(
+        problems.iter().any(|p| p.contains("same bytes")),
+        "the checker should name the duplicate: {problems:?}"
+    );
+}
+
+/// Keynote opens a deck that uses one picture on two slides.
+/// Off unless `IWORK_APP_CHECK=1`.
+#[test]
+fn keynote_opens_a_deck_that_uses_one_picture_twice() {
+    if std::env::var("IWORK_APP_CHECK").as_deref() != Ok("1") {
+        eprintln!("IWORK_APP_CHECK is not 1 — skipping the app round trip");
+        return;
+    }
+    let png = tiny_png();
+    let frame = iwork::drawable::Frame {
+        x: 100.0,
+        y: 100.0,
+        width: 400.0,
+        height: 400.0,
+    };
+    let mut deck = Document::new(Kind::Keynote).unwrap();
+    deck.add_slide(None).unwrap();
+    deck.slide_mut(0)
+        .unwrap()
+        .add_text_box(
+            "Zweimal dasselbe Bild",
+            iwork::drawable::Frame {
+                x: 100.0,
+                y: 600.0,
+                width: 1200.0,
+                height: 120.0,
+            },
+        )
+        .unwrap();
+    deck.slide_mut(0)
+        .unwrap()
+        .add_image(&png, "first.png", frame)
+        .unwrap();
+    deck.slide_mut(1)
+        .unwrap()
+        .add_image(&png, "second.png", frame)
+        .unwrap();
+
+    let out = scratch("iwork-one-picture-twice-app.key");
+    deck.save(&out).unwrap();
+
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/app-check.sh");
+    let output = std::process::Command::new(&script)
+        .arg(&out)
+        .arg("Zweimal dasselbe Bild")
+        .output()
+        .unwrap_or_else(|e| panic!("{}: {e}", script.display()));
+    assert!(
+        output.status.success(),
+        "Keynote would not open a deck using one picture twice:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

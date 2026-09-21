@@ -8113,6 +8113,32 @@ impl Document {
             }
         }
 
+        // **The media registry is keyed by content.** iWork stores one file
+        // per distinct set of bytes and points every user at it; a package
+        // carrying the same content twice is one the app aborts on rather
+        // than opens — Keynote dies inside `TSPersistence`, before it draws,
+        // with nothing said to the user. Found by a deck this crate wrote,
+        // which `iwork check` had called clean.
+        let mut by_digest: BTreeMap<Vec<u8>, Vec<String>> = BTreeMap::new();
+        for file in self.data_files() {
+            if file.digest.is_empty() {
+                continue;
+            }
+            by_digest
+                .entry(file.digest.clone())
+                .or_default()
+                .push(file.stored_name.clone());
+        }
+        for (digest, names) in by_digest.iter().filter(|(_, names)| names.len() > 1) {
+            let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+            problems.push(format!(
+                "{} media files hold the same bytes (sha1 {hex}): {} — the registry is keyed by \
+                 content, and a duplicate is what the app aborts on",
+                names.len(),
+                names.join(", ")
+            ));
+        }
+
         let highest = seen.keys().copied().max().unwrap_or(0);
         match self.last_object_identifier() {
             Some(mark) if mark < highest => problems.push(format!(
