@@ -1215,7 +1215,8 @@ fn pages_resaves_text_pointed_at_a_style_this_crate_applied() {
         .expect("a paragraph style to copy")
         .identifier;
     let made = doc.create_text_style(template, "Kicker").unwrap();
-    doc.apply_text_style(storage, 0..4, made.identifier).unwrap();
+    doc.apply_text_style(storage, 0..4, made.identifier)
+        .unwrap();
     let before = doc.storage_text(storage).unwrap();
 
     let out = std::env::temp_dir().join("iwork-applied-style.pages");
@@ -1242,7 +1243,10 @@ fn pages_resaves_text_pointed_at_a_style_this_crate_applied() {
         "the app rewrote the text the style was applied to"
     );
     assert!(
-        after.text_styles().iter().any(|s| s.identifier == made.identifier),
+        after
+            .text_styles()
+            .iter()
+            .any(|s| s.identifier == made.identifier),
         "the app dropped the style"
     );
     assert!(after.problems().is_empty(), "{:?}", after.problems());

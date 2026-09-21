@@ -35,7 +35,11 @@ fn scratch(name: &str) -> PathBuf {
 fn a_flipped_bit_does_not_panic() {
     let mut seed = 0x243f_6a88_85a3_08d3;
     let mut checked = 0usize;
-    for name in ["numbers-values.numbers", "pages-plain.pages", "keynote-slides.key"] {
+    for name in [
+        "numbers-values.numbers",
+        "pages-plain.pages",
+        "keynote-slides.key",
+    ] {
         let Ok(original) = std::fs::read(fixtures().join(name)) else {
             continue;
         };
@@ -68,12 +72,18 @@ fn a_truncated_file_does_not_panic() {
 fn corrupt_object_streams_do_not_panic() {
     let mut seed = 0xdead_beef_cafe_f00d;
     let mut reached = 0usize;
-    for name in ["numbers-values.numbers", "pages-plain.pages", "keynote-slides.key"] {
+    for name in [
+        "numbers-values.numbers",
+        "pages-plain.pages",
+        "keynote-slides.key",
+    ] {
         let Ok(package) = iwork::package::Package::read(fixtures().join(name)) else {
             continue;
         };
         for entry in package.iwa_names() {
-            let Some(raw) = package.get(&entry) else { continue };
+            let Some(raw) = package.get(&entry) else {
+                continue;
+            };
             let Ok(stream) = iwork::iwa::decompress(raw) else {
                 continue;
             };

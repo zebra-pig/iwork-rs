@@ -399,7 +399,9 @@ fn numbers_reads_back_a_table_with_a_column_deleted() {
     // place, which is what the app has to agree about.
     let before: Vec<String> = {
         let table = doc.table("Formate").unwrap();
-        (0..table.rows).map(|row| table.value(row, 2).to_text()).collect()
+        (0..table.rows)
+            .map(|row| table.value(row, 2).to_text())
+            .collect()
     };
     doc.delete_column("Formate", 1).unwrap();
     let out = std::env::temp_dir().join("iwork-delete-column.numbers");
