@@ -7,6 +7,10 @@ All three apps share one file format. It has never been documented by Apple,
 so [`FORMAT.md`](FORMAT.md) writes down what it actually is, derived from real
 documents and checked by the tests in this repository.
 
+```
+cargo add iwork
+```
+
 ```rust
 // A spreadsheet from nothing: no template, no Apple software.
 let mut doc = iwork::Document::new_spreadsheet("Sales", "Q1", 4, 2)?;
@@ -216,8 +220,12 @@ here writes that cache.
 
 ## CLI
 
+The crate ships a binary as well as a library, so `cargo install iwork` puts
+`iwork` on your path. It is the tool the format was worked out with: it reports
+what is in a document and, for text, changes it.
+
 ```
-cargo install --path .
+cargo install iwork          # or: cargo install --path .
 
 iwork inspect   Report.pages              # package form, previews, components,
                                           # media, object census

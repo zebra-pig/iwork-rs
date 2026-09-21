@@ -4,9 +4,11 @@ What changed, and — because this is a reverse-engineered format — **how it w
 established**. An entry that cannot say what the app did is an entry about
 bytes nobody has watched being read.
 
-## 0.2.0 — unreleased
+## 0.2.0 — 2026-09-21
 
-The release that makes the crate usable from code rather than from a shell.
+The release that makes the crate usable from code rather than from a shell,
+and the first one published to crates.io — 0.1.0 below is the repository's own
+history, and was never uploaded.
 
 ### A spreadsheet library, not a byte editor
 
