@@ -440,7 +440,7 @@ pub enum Fill {
 }
 
 impl Fill {
-    fn decode(message: &Message) -> Fill {
+    pub(crate) fn decode(message: &Message) -> Fill {
         if let Some(colour) = message.bytes(1).and_then(decode_nested) {
             if let Some(colour) = Color::decode(&colour) {
                 return Fill::Color(colour);

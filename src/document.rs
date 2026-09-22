@@ -6613,6 +6613,30 @@ impl Document {
 
     /// A drawable's fill, stroke, shadow, reflection and opacity, resolved up
     /// the style chain.
+    /// Every `TST.CellStyleArchive` in the document — how its tables' cells
+    /// are painted.
+    ///
+    /// Numbers names these by role in the stylesheet
+    /// (`tableCell-0-headerRowStyle`, `-bodyStyle`, and so on) and every table
+    /// built on the same table style shares them.
+    pub fn cell_styles(&self) -> Vec<crate::table::CellStyle> {
+        crate::table::cell_styles(self)
+    }
+
+    /// Paint a cell style, or with `None` stop it painting.
+    ///
+    /// See [`crate::table::set_cell_style_fill`]: this repaints **every**
+    /// table whose style names the cell style, because that is what a shared
+    /// style is. The fill is the only property of a cell style this crate
+    /// writes; the rest of the archive is left exactly as it was.
+    pub fn set_cell_style_fill(
+        &mut self,
+        style: u64,
+        colour: Option<crate::drawable::Color>,
+    ) -> Result<(), Error> {
+        crate::table::set_cell_style_fill(self, style, colour)
+    }
+
     pub fn object_style(&self, identifier: u64) -> Option<crate::drawable::ObjectStyle> {
         crate::drawable::object_style(self, identifier)
     }

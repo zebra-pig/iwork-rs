@@ -4692,3 +4692,160 @@ pub fn set_conditional_threshold(
     }
     document.set_archive_for(set, &archive)
 }
+
+/// `TST.CellStyleArchive` — how a table cell is painted.
+///
+/// Numbers keeps these in the document stylesheet under names a table's style
+/// refers to by role: `tableCell-0-headerRowStyle`, `-bodyStyle`,
+/// `-footerRowStyle`, `-headerColumnStyle`, and the category levels. Every
+/// table built on that table style shares them, which is why changing one
+/// repaints every table using it — a fact this crate states rather than hides.
+///
+/// Only the two properties whose shape has been confirmed against documents
+/// Numbers wrote are carried here: the **fill** and the four **insets**. The
+/// archive holds more, and a field nobody has watched the app write is not
+/// guessed at.
+#[derive(Debug, Clone)]
+pub struct CellStyle {
+    pub identifier: u64,
+    /// The stylesheet name, e.g. `tableCell-0-headerRowStyle`.
+    pub name: Option<String>,
+    /// What paints the cell. `Fill::None` and absence are different things:
+    /// a body cell in a Numbers table carries an *empty* fill archive, which
+    /// is a fill that is there and paints nothing.
+    pub fill: Option<crate::drawable::Fill>,
+    /// Top, left, bottom, right insets in points. Numbers writes 4 all round.
+    pub insets: Option<[f32; 4]>,
+}
+
+/// `TST.CellStyleArchive.properties`.
+mod cell_style_field {
+    /// `TSS.StyleArchive.super`, holding the name and the stylesheet.
+    pub const SUPER: u32 = 1;
+    pub const NAME: u32 = 2;
+    /// The property bag.
+    pub const PROPERTIES: u32 = 11;
+    /// `TSD.FillArchive`. Present and empty on a cell that paints nothing.
+    pub const FILL: u32 = 1;
+    /// `TSD.PaddingArchive` — top, left, bottom, right.
+    pub const INSETS: u32 = 9;
+}
+
+/// Every cell style in the document, in the order the streams hold them.
+pub fn cell_styles(document: &crate::Document) -> Vec<CellStyle> {
+    let identifiers: Vec<u64> = document
+        .objects()
+        .filter(|(_, object)| object.message_type() == crate::create::TYPE_CELL_STYLE)
+        .map(|(_, object)| object.identifier)
+        .collect();
+    identifiers
+        .into_iter()
+        .filter_map(|identifier| {
+            let archive = document.archive(identifier).ok()?;
+            Some(CellStyle {
+                identifier,
+                name: archive
+                    .bytes(cell_style_field::SUPER)
+                    .and_then(|raw| Message::decode(raw).ok())
+                    .and_then(|s| s.bytes(cell_style_field::NAME).map(<[u8]>::to_vec))
+                    .and_then(|b| String::from_utf8(b).ok()),
+                fill: properties_of(&archive)
+                    .and_then(|p| p.bytes(cell_style_field::FILL).map(<[u8]>::to_vec))
+                    .and_then(|raw| Message::decode(&raw).ok())
+                    .map(|m| crate::drawable::Fill::decode(&m)),
+                insets: properties_of(&archive)
+                    .and_then(|p| p.bytes(cell_style_field::INSETS).map(<[u8]>::to_vec))
+                    .and_then(|raw| Message::decode(&raw).ok())
+                    .map(|m| {
+                        let at = |field: u32| match m.get(field) {
+                            Some(Value::Fixed32(b)) => f32::from_le_bytes(*b),
+                            _ => 0.0,
+                        };
+                        [at(1), at(2), at(3), at(4)]
+                    }),
+            })
+        })
+        .collect()
+}
+
+fn properties_of(archive: &Message) -> Option<Message> {
+    archive
+        .bytes(cell_style_field::PROPERTIES)
+        .and_then(|raw| Message::decode(raw).ok())
+}
+
+/// Paint a cell style, or stop it painting.
+///
+/// `colour` of `None` leaves an **empty** fill archive, which is what Numbers
+/// writes for a cell that paints nothing — not a missing field. The colour
+/// message is built the way every `TSP.Color` in the corpus is built: model 1,
+/// channels 3–6, and the two trailing fields Numbers always writes with it.
+///
+/// This repaints **every table** whose style names this cell style. Styles are
+/// shared; there is no per-cell fill here, because pointing one cell at a style
+/// of its own means writing a cell's style index, and that is a different
+/// piece of work.
+///
+/// # What this needs to be visible
+///
+/// **A document whose table styles Numbers wrote.** Open a `.numbers` file and
+/// repaint `tableCell-0-headerRowStyle`, and Numbers draws the new colour:
+/// asked for the header cell's background afterwards it answered
+/// `5959,17617,36075` where it had answered `45231,46004,45746`.
+///
+/// A document from [`crate::Document::new_spreadsheet`] carries all the same
+/// named cell styles, and painting them changes **nothing on screen**. Its
+/// `TST.TableStyleArchive` is a stub: the one Numbers writes is 8 344 bytes,
+/// of which 4 037 are the stroke definitions that draw gridlines and borders,
+/// and nothing in the stub routes a table's rows to the cell styles by role.
+/// Until that archive is understood, a table built from nothing draws
+/// unstyled whatever its cell styles say — which is stated here rather than
+/// left for a caller to discover.
+pub fn set_cell_style_fill(
+    document: &mut crate::Document,
+    style: u64,
+    colour: Option<crate::drawable::Color>,
+) -> Result<(), crate::Error> {
+    let mut archive = document.archive(style)?;
+    let object_type = document
+        .objects()
+        .find(|(_, object)| object.identifier == style)
+        .map(|(_, object)| object.message_type());
+    if object_type != Some(crate::create::TYPE_CELL_STYLE) {
+        return Err(crate::Error::refused(
+            crate::Refusal::WrongSlot,
+            format!(
+                "object {style} is {} and not a TST.CellStyleArchive",
+                object_type
+                    .map(|t| t.to_string())
+                    .unwrap_or_else(|| "missing".into())
+            ),
+        ));
+    }
+
+    let mut properties = archive
+        .bytes(cell_style_field::PROPERTIES)
+        .and_then(|raw| Message::decode(raw).ok())
+        .unwrap_or_default();
+
+    let fill = match colour {
+        None => Message::default(),
+        Some(colour) => {
+            let mut c = Message::default();
+            // Model 1 — the sRGB arm every colour in the corpus uses.
+            c.set_in_order(1, Value::Varint(1));
+            crate::style::set_channels(&mut c, colour.red, colour.green, colour.blue, colour.alpha);
+            c.set_in_order(12, Value::Varint(1));
+            c.set_in_order(13, Value::Fixed32(1.0f32.to_le_bytes()));
+            let mut fill = Message::default();
+            fill.set_in_order(1, Value::Bytes(c.encode()));
+            fill
+        }
+    };
+    properties.set_in_order(cell_style_field::FILL, Value::Bytes(fill.encode()));
+    archive.set_in_order(
+        cell_style_field::PROPERTIES,
+        Value::Bytes(properties.encode()),
+    );
+    document.set_archive_for(style, &archive)
+}
