@@ -6637,6 +6637,39 @@ impl Document {
         crate::table::set_cell_style_fill(self, style, colour)
     }
 
+    /// Paint a drawable, or with `None` leave it painting nothing.
+    ///
+    /// The identifier is the **drawable**, not its style. The first paint
+    /// gives it a style of its own, parented to the one it was sharing, which
+    /// is what the app does and the only form that survives the app's own
+    /// save — see [`crate::drawable::set_fill`].
+    pub fn set_object_fill(
+        &mut self,
+        drawable: u64,
+        colour: Option<crate::drawable::Color>,
+    ) -> Result<(), Error> {
+        crate::drawable::set_fill(self, drawable, colour)
+    }
+
+    /// Outline a drawable: colour, and width in points.
+    ///
+    /// See [`crate::drawable::set_stroke`].
+    pub fn set_object_stroke(
+        &mut self,
+        drawable: u64,
+        colour: crate::drawable::Color,
+        width: f32,
+    ) -> Result<(), Error> {
+        crate::drawable::set_stroke(self, drawable, colour, width)
+    }
+
+    /// How opaque a drawable is, 0.0 to 1.0.
+    ///
+    /// See [`crate::drawable::set_opacity`].
+    pub fn set_object_opacity(&mut self, drawable: u64, opacity: f32) -> Result<(), Error> {
+        crate::drawable::set_opacity(self, drawable, opacity)
+    }
+
     pub fn object_style(&self, identifier: u64) -> Option<crate::drawable::ObjectStyle> {
         crate::drawable::object_style(self, identifier)
     }

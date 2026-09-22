@@ -2259,3 +2259,357 @@ fn put_on_page(archive: &mut Message, page: u64, shape: u64) {
     let group = crate::create::message(vec![crate::create::varint(PAGE_INDEX, page), entry]);
     archive.append_in_order(PAGE_GROUPS, Value::Bytes(group.encode()));
 }
+
+// -- writing a style ---------------------------------------------------------
+
+/// A property of an object style this crate can write.
+///
+/// The numbering differs between a shape and a media style — a media style has
+/// no fill, and everything after it shifts down by one — which is why this is
+/// an enum resolved against the archive rather than a bare field number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Property {
+    Fill,
+    Stroke,
+    Opacity,
+}
+
+/// The path from a style archive's root to one property, or a refusal naming
+/// what the object turned out to be.
+///
+/// A `TSWP.ShapeStyleArchive` wraps the `TSD` one at field 1; a bare
+/// `TSD.ShapeStyleArchive` or `TSD.MediaStyleArchive` *is* the `TSD` one. The
+/// property bag is field 11 of whichever it is.
+fn property_path(
+    document: &crate::Document,
+    style: u64,
+    property: Property,
+) -> Result<Vec<u32>, crate::Error> {
+    let Some((_, object)) = document.object(style) else {
+        return Err(crate::Error::refused(
+            crate::Refusal::NotFound,
+            format!("object {style} is not in this document"),
+        ));
+    };
+    let (mut path, shape) = match object.message_type() {
+        TYPE_WP_SHAPE_STYLE => (vec![1u32], StyleShape::Shape),
+        TYPE_SHAPE_STYLE => (Vec::new(), StyleShape::Shape),
+        TYPE_MEDIA_STYLE => (Vec::new(), StyleShape::Media),
+        other => {
+            return Err(crate::Error::refused(
+                crate::Refusal::WrongSlot,
+                format!(
+                    "object {style} is message type {other}, not a shape or media style — \
+                     a drawable's style identifier is the one to pass here"
+                ),
+            ))
+        }
+    };
+    let field = match (shape, property) {
+        (StyleShape::Media, Property::Fill) => {
+            return Err(crate::Error::refused(
+                crate::Refusal::WrongSlot,
+                format!("style {style} is a media style, and a media style has no fill"),
+            ))
+        }
+        (StyleShape::Shape, Property::Fill) => 1,
+        (StyleShape::Shape, Property::Stroke) => 2,
+        (StyleShape::Shape, Property::Opacity) => 3,
+        (StyleShape::Media, Property::Stroke) => 1,
+        (StyleShape::Media, Property::Opacity) => 2,
+    };
+    path.extend_from_slice(&[11, field]);
+    Ok(path)
+}
+
+/// Write one property into a style archive, refusing rather than inventing the
+/// message it would have to live in.
+fn set_property(
+    document: &mut crate::Document,
+    style: u64,
+    property: Property,
+    value: Option<Value>,
+) -> Result<(), crate::Error> {
+    let path = property_path(document, style, property)?;
+    let mut archive = document.archive(style)?;
+    crate::style::set_path(&mut archive, &path, value).map_err(|why| {
+        crate::Error::refused(
+            crate::Refusal::Missing,
+            format!("style {style}: {why} (writing {property:?})"),
+        )
+    })?;
+
+    // **`override_count` is not decoration.** `TSS` keeps the number of
+    // properties a style sets locally, and a style whose bag has entries while
+    // its count says zero is one the app treats as overriding nothing:
+    // Keynote, handed a variation with a colour and a count of 0, saved the
+    // document back with the properties stripped out. The count is maintained
+    // here from the bag itself, so the two can never disagree.
+    let bag = path[..path.len() - 1].to_vec();
+    let overrides = crate::style::get_path(&archive, &bag)
+        .and_then(|value| match value {
+            Value::Bytes(raw) => decode_nested(&raw),
+            _ => None,
+        })
+        .map(|properties| properties.fields.len() as u64)
+        .unwrap_or(0);
+    let mut count_path = bag[..bag.len() - 1].to_vec();
+    count_path.push(10);
+    let _ = crate::style::set_path(&mut archive, &count_path, Some(Value::Varint(overrides)));
+    document.set_archive_for(style, &archive)
+}
+
+/// Build the `TSP.Color` every colour in the corpus is built as: model 1,
+/// channels 3–6, and the two trailing fields iWork always writes with it.
+pub(crate) fn colour_message(colour: Color) -> Message {
+    let mut message = Message::default();
+    message.set_in_order(1, Value::Varint(1));
+    crate::style::set_channels(
+        &mut message,
+        colour.red,
+        colour.green,
+        colour.blue,
+        colour.alpha,
+    );
+    message.set_in_order(12, Value::Varint(1));
+    message.set_in_order(13, Value::Fixed32(1.0f32.to_le_bytes()));
+    message
+}
+
+/// Which field of a drawable's concrete class holds its style reference.
+fn style_field(kind: Kind) -> Option<u32> {
+    match kind {
+        Kind::Image => Some(image_field::STYLE),
+        Kind::Movie => Some(19),
+        Kind::Mask | Kind::Group | Kind::Table => None,
+        _ => Some(2),
+    }
+}
+
+/// How many drawables in the document point at this style.
+fn users_of(document: &crate::Document, style: u64) -> usize {
+    document
+        .drawables()
+        .iter()
+        .filter(|d| d.style == Some(style))
+        .count()
+}
+
+/// Whether a style archive is a *variation* — one that exists to hold one
+/// object's changes and names the style it varies as its parent.
+fn is_variation(document: &crate::Document, style: u64) -> bool {
+    let Some((_, object)) = document.object(style) else {
+        return false;
+    };
+    let base: Vec<u32> = match object.message_type() {
+        TYPE_WP_SHAPE_STYLE => vec![1, 1, 3, 1],
+        _ => vec![1, 3, 1],
+    };
+    document
+        .archive(style)
+        .ok()
+        .and_then(|archive| reference_at(&archive, &base))
+        .is_some()
+}
+
+/// The style to paint this drawable through, giving it one of its own if it
+/// is currently sharing.
+///
+/// **Why a drawable cannot simply have its shared style painted.** A document
+/// from nothing points every shape at a *theme preset* — `line-style-preset-0`
+/// and its siblings — and a preset is the theme's, not the object's. Painting
+/// one was measured: Keynote opened the deck, and on saving it wrote the
+/// preset back out as a stub with the colour gone, because it regenerates its
+/// presets from the theme.
+///
+/// What Keynote does instead is give the object its own archive naming the
+/// preset as parent, carrying only what differs:
+///
+/// ```text
+/// 1.1.3 -> the style it varies      1.1.4  1      (this is a variation)
+/// 1.1.5 -> the stylesheet           1.10   2      (two properties differ)
+/// 1.11  { 3: 0.5, 5: { 1: 0.4 } }                 (opacity and reflection)
+/// ```
+///
+/// That is what this makes, once, the first time a drawable is painted.
+fn own_style(document: &mut crate::Document, drawable: u64) -> Result<u64, crate::Error> {
+    let Some(found) = document.drawable(drawable) else {
+        return Err(crate::Error::refused(
+            crate::Refusal::NotFound,
+            format!("no drawable {drawable} in this document"),
+        ));
+    };
+    let Some(current) = found.style else {
+        return Err(crate::Error::refused(
+            crate::Refusal::NotDrawn,
+            format!(
+                "drawable {drawable} is a {:?}, which has no object style to paint",
+                found.kind
+            ),
+        ));
+    };
+    // Already its own, and nobody else's: paint it where it stands.
+    if users_of(document, current) == 1 && is_variation(document, current) {
+        return Ok(current);
+    }
+
+    let Some(field) = style_field(found.kind) else {
+        return Err(crate::Error::refused(
+            crate::Refusal::NotDrawn,
+            format!("a {:?} carries no style reference", found.kind),
+        ));
+    };
+    let Some((_, object)) = document.object(current) else {
+        return Err(crate::Error::refused(
+            crate::Refusal::NotFound,
+            format!("style {current} is not in this document"),
+        ));
+    };
+    let message_type = object.message_type();
+    let wrapped = message_type == TYPE_WP_SHAPE_STYLE;
+
+    // The stylesheet the parent belongs to, carried over rather than guessed.
+    let parent_archive = document.archive(current)?;
+    let stylesheet = reference_at(
+        &parent_archive,
+        if wrapped { &[1, 1, 5, 1] } else { &[1, 5, 1] },
+    );
+
+    // `super`: the parent, the variation flag, and the stylesheet.
+    let mut sup = Message::default();
+    sup.set_in_order(3, Value::Bytes(crate::style::reference(current).encode()));
+    sup.set_in_order(4, Value::Varint(1));
+    if let Some(stylesheet) = stylesheet {
+        sup.set_in_order(
+            5,
+            Value::Bytes(crate::style::reference(stylesheet).encode()),
+        );
+    }
+
+    let mut tsd = Message::default();
+    tsd.set_in_order(1, Value::Bytes(sup.encode()));
+    tsd.set_in_order(10, Value::Varint(0));
+    // The bag starts empty: a variation carries only what differs.
+    tsd.set_in_order(11, Value::Bytes(Message::default().encode()));
+
+    let archive = if wrapped {
+        let mut outer = Message::default();
+        outer.set_in_order(1, Value::Bytes(tsd.encode()));
+        outer
+    } else {
+        tsd
+    };
+
+    let mut grow = crate::create::Grow::new(document);
+    let variation = grow.allocate();
+    grow.beside(current, variation, message_type, &archive)?;
+    grow.finish()?;
+
+    // Point the drawable at it. The style sits on the concrete class, which is
+    // the message one level above the drawable archive.
+    let mut owner = document.archive(drawable)?;
+    let mut path = found.path.clone();
+    path.pop();
+    path.push(field);
+    crate::style::set_path(
+        &mut owner,
+        &path,
+        Some(Value::Bytes(crate::style::reference(variation).encode())),
+    )
+    .map_err(|why| {
+        crate::Error::refused(
+            crate::Refusal::Missing,
+            format!("drawable {drawable}: {why} (pointing at its own style)"),
+        )
+    })?;
+    document.set_archive_for(drawable, &owner)?;
+    // The variation lands beside the style it varies, in the stylesheet, and
+    // the drawable is somewhere else — a slide, a sheet, a page. A reference
+    // across components has to be declared or the app is handed an object it
+    // was never told to load.
+    document.declare_external_references();
+    Ok(variation)
+}
+
+/// Paint a drawable, or with `None` leave it painting nothing.
+///
+/// The argument is the **drawable**, not its style. A document from nothing
+/// points every shape at a shared theme preset, and painting a preset does
+/// not survive: Keynote regenerates its presets on save and the colour is
+/// gone. So the first paint gives the drawable a style of its own — see
+/// [`own_style`] — and paints that, which is what the app does.
+pub fn set_fill(
+    document: &mut crate::Document,
+    drawable: u64,
+    colour: Option<Color>,
+) -> Result<(), crate::Error> {
+    let style = own_style(document, drawable)?;
+    let fill = match colour {
+        None => Message::default(),
+        Some(colour) => {
+            let mut fill = Message::default();
+            fill.set_in_order(1, Value::Bytes(colour_message(colour).encode()));
+            fill
+        }
+    };
+    set_property(
+        document,
+        style,
+        Property::Fill,
+        Some(Value::Bytes(fill.encode())),
+    )
+}
+
+/// Outline a drawable: colour and width in points, solid.
+///
+/// A width of `0.0` is what iWork writes for "no outline"; the stroke archive
+/// stays, because removing it altogether is a shape without the field every
+/// other shape in the corpus carries.
+pub fn set_stroke(
+    document: &mut crate::Document,
+    drawable: u64,
+    colour: Color,
+    width: f32,
+) -> Result<(), crate::Error> {
+    if !width.is_finite() || width < 0.0 {
+        return Err(crate::Error::refused(
+            crate::Refusal::UnwritableValue,
+            format!("a stroke is {width} points wide"),
+        ));
+    }
+    let style = own_style(document, drawable)?;
+    let mut stroke = Message::default();
+    stroke.set_in_order(1, Value::Bytes(colour_message(colour).encode()));
+    stroke.set_in_order(2, Value::Fixed32(width.to_le_bytes()));
+    // `{1: 1}` is the solid pattern, with no dash entries and no count.
+    let mut pattern = Message::default();
+    pattern.set_in_order(1, Value::Varint(1));
+    stroke.set_in_order(6, Value::Bytes(pattern.encode()));
+    set_property(
+        document,
+        style,
+        Property::Stroke,
+        Some(Value::Bytes(stroke.encode())),
+    )
+}
+
+/// How opaque the drawable is, 0.0 to 1.0.
+pub fn set_opacity(
+    document: &mut crate::Document,
+    drawable: u64,
+    opacity: f32,
+) -> Result<(), crate::Error> {
+    if !(0.0..=1.0).contains(&opacity) {
+        return Err(crate::Error::refused(
+            crate::Refusal::UnwritableValue,
+            format!("opacity is 0.0 to 1.0, not {opacity}"),
+        ));
+    }
+    let style = own_style(document, drawable)?;
+    set_property(
+        document,
+        style,
+        Property::Opacity,
+        Some(Value::Fixed32(opacity.to_le_bytes())),
+    )
+}

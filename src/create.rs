@@ -596,10 +596,18 @@ pub(crate) fn pages(paper: Paper) -> Blueprint {
         TYPE_SHAPE_STYLE,
         message(vec![nested(
             1,
-            vec![nested(
-                1,
-                vec![string(2, TEXT_BOX_IDENTIFIER), reference(5, stylesheet)],
-            )],
+            vec![
+                nested(
+                    1,
+                    vec![string(2, TEXT_BOX_IDENTIFIER), reference(5, stylesheet)],
+                ),
+                // The property bag, with a fill that is *present and paints
+                // nothing* — `{11: {1: <empty>}}`, byte for byte what a shape
+                // style in a document Keynote wrote carries. Without it there
+                // is nowhere for a colour to go, and this crate refuses to
+                // invent the message rather than write into one it has seen.
+                nested(11, vec![bytes(1, Vec::new())]),
+            ],
         )]),
     );
     // And one for an image, which is drawn with a media style rather than a
@@ -607,10 +615,16 @@ pub(crate) fn pages(paper: Paper) -> Blueprint {
     let image_style = blueprint.add(
         styles,
         TYPE_MEDIA_STYLE,
-        message(vec![nested(
-            1,
-            vec![string(2, IMAGE_IDENTIFIER), reference(5, stylesheet)],
-        )]),
+        message(vec![
+            nested(
+                1,
+                vec![string(2, IMAGE_IDENTIFIER), reference(5, stylesheet)],
+            ),
+            // The same bag, one level up because a media style is the `TSD`
+            // archive rather than a wrapper around it, and numbered one lower
+            // because it has no fill: field 1 here is the stroke.
+            nested(11, vec![bytes(1, Vec::new())]),
+        ]),
     );
     // A calculation engine, which every Pages document the app makes carries
     // whether or not it has a table — `pages-plain` and `pages-styled` have one
@@ -1883,10 +1897,14 @@ fn theme_presets(
                 TYPE_SHAPE_STYLE,
                 message(vec![nested(
                     1,
-                    vec![nested(
-                        1,
-                        vec![string(2, &identifier), reference(5, stylesheet)],
-                    )],
+                    vec![
+                        nested(1, vec![string(2, &identifier), reference(5, stylesheet)]),
+                        // The property bag, carrying a fill that is present
+                        // and paints nothing — what a shape style in a deck
+                        // Keynote wrote carries, and the only place a colour
+                        // written later has to go.
+                        nested(11, vec![bytes(1, Vec::new())]),
+                    ],
                 )]),
             );
             named.push((identifier, style));
@@ -1906,10 +1924,12 @@ fn theme_presets(
             let style = blueprint.add(
                 component,
                 TYPE_MEDIA_STYLE,
-                message(vec![nested(
-                    1,
-                    vec![string(2, &identifier), reference(5, stylesheet)],
-                )]),
+                message(vec![
+                    nested(1, vec![string(2, &identifier), reference(5, stylesheet)]),
+                    // The same bag one level up, numbered one lower: a media
+                    // style has no fill, so field 1 here is the stroke.
+                    nested(11, vec![bytes(1, Vec::new())]),
+                ]),
             );
             named.push((identifier, style));
             style
