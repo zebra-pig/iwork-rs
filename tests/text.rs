@@ -11,7 +11,7 @@
 use std::path::{Path, PathBuf};
 
 use iwork::text::Anchoring;
-use iwork::{style::StyleKind, Document, Error};
+use iwork::{style::StyleKind, Document, Error, Kind};
 
 fn generated(name: &str) -> Option<PathBuf> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1211,7 +1211,7 @@ fn pages_resaves_text_pointed_at_a_style_this_crate_applied() {
     let template = doc
         .text_styles()
         .into_iter()
-        .find(|style| style.kind == iwork::StyleKind::Paragraph)
+        .find(|style| style.kind == StyleKind::Paragraph)
         .expect("a paragraph style to copy")
         .identifier;
     let made = doc.create_text_style(template, "Kicker").unwrap();
@@ -1251,4 +1251,65 @@ fn pages_resaves_text_pointed_at_a_style_this_crate_applied() {
     );
     assert!(after.problems().is_empty(), "{:?}", after.problems());
     let _ = std::fs::remove_file(&out);
+}
+
+/// **Where styling actually works, measured in the app.**
+///
+/// The crate can create a text style and point a run at it, and the archives
+/// come out right either way — but whether the *app draws it* depends on
+/// where the style came from, and the difference is stark enough to be worth
+/// a test that says so.
+///
+/// In a document Pages wrote, pointing paragraphs at its own `Title`,
+/// `Heading` and `Body` works: asked afterwards for the size of every
+/// paragraph, Pages answered `30.0 18.0 11.0 18.0 11.0` — exactly the roles
+/// applied, in order.
+///
+/// In a document from [`Document::new`], the same crate calls are accepted,
+/// `iwork check` is clean, Pages opens it — and Pages draws every paragraph
+/// at `12.0`, because a blank document's stylesheet holds one paragraph style
+/// (`Body`), and a style copied from it is not one Pages honours.
+///
+/// This test asserts the shape of that: what a real document has to point at,
+/// and what a blank one does not.
+#[test]
+fn a_blank_document_has_one_paragraph_style_and_a_real_one_has_a_hierarchy() {
+    let blank = Document::new(Kind::Pages).unwrap();
+    let named: Vec<String> = blank
+        .text_styles()
+        .into_iter()
+        .filter(|s| s.kind == StyleKind::Paragraph)
+        .filter_map(|s| s.name)
+        .collect();
+    // `Body`, plus the table styles a table added to such a document needs.
+    // What is *not* there is any document structure to point a heading at.
+    assert!(named.iter().any(|n| n == "Body"), "{named:?}");
+    for role in ["Title", "Heading", "Heading 2", "Heading 3", "Caption"] {
+        assert!(
+            !named.iter().any(|n| n == role),
+            "a blank Pages document has no {role}; if it now does, check whether \
+             Pages draws a heading this crate wrote from nothing — and if it \
+             does, this test has done its job: {named:?}"
+        );
+    }
+
+    let real = match generated("pages-styled.pages") {
+        Some(path) => Document::open(&path).unwrap(),
+        None => {
+            eprintln!("no pages-styled.pages — skipping (run scripts/make-fixtures.sh)");
+            return;
+        }
+    };
+    let named: Vec<String> = real
+        .text_styles()
+        .into_iter()
+        .filter(|s| s.kind == StyleKind::Paragraph)
+        .filter_map(|s| s.name)
+        .collect();
+    for role in ["Title", "Heading", "Heading 2", "Body"] {
+        assert!(
+            named.iter().any(|n| n == role),
+            "a document Pages wrote carries {role}: {named:?}"
+        );
+    }
 }
