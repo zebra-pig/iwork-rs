@@ -52,6 +52,19 @@ fn encrypted(path: &Path) -> bool {
     iwork::Package::read(path).is_ok_and(|package| package.contains(".iwpv2"))
 }
 
+/// The corpus is generated, never committed, so a sweep over it skips where
+/// it is absent — the same rule `tests/fixtures.rs` states as "so a fresh
+/// clone is green". The counting assertions below keep their teeth wherever
+/// the corpus *is* present, which is the only place they could say anything.
+macro_rules! corpus {
+    () => {
+        if pages_fixtures().is_empty() {
+            eprintln!("no .pages corpus — skipping (run scripts/make-fixtures.sh)");
+            return;
+        }
+    };
+}
+
 fn pages_fixtures() -> Vec<PathBuf> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/generated");
     let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -93,6 +106,7 @@ fn only_a_pages_document_has_a_structure() {
 /// pair — the break.
 #[test]
 fn sections_tile_the_body_with_the_break_between_them() {
+    corpus!();
     let mut checked = 0usize;
     for path in pages_fixtures() {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
@@ -140,6 +154,7 @@ fn sections_tile_the_body_with_the_break_between_them() {
 /// the reason a zone can be named left, centre or right at all.
 #[test]
 fn every_section_template_carries_three_headers_and_three_footers() {
+    corpus!();
     let mut templates = 0usize;
     for path in pages_fixtures() {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
@@ -180,6 +195,7 @@ fn every_section_template_carries_three_headers_and_three_footers() {
 /// and the corpus has one document on each side of it.
 #[test]
 fn a_page_layout_document_is_the_one_with_page_templates() {
+    corpus!();
     let mut modes = BTreeMap::new();
     for path in pages_fixtures() {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
@@ -339,6 +355,7 @@ fn column_widths_are_fractions_that_add_up() {
 /// document that was not given one still has none.
 #[test]
 fn footnotes_and_bookmarks_exist_exactly_where_they_were_made() {
+    corpus!();
     let mut checked = 0usize;
     for path in pages_fixtures() {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
@@ -391,6 +408,7 @@ fn footnotes_and_bookmarks_exist_exactly_where_they_were_made() {
 /// once reported, now measured from the observed side.
 #[test]
 fn footnote_bodies_are_kind_2_storages_and_only_where_footnotes_are() {
+    corpus!();
     let mut storages = 0usize;
     for path in pages_fixtures() {
         let name = path.file_name().unwrap().to_string_lossy().to_string();

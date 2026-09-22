@@ -19,6 +19,21 @@ fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/generated")
 }
 
+/// The corpus is generated, never committed, so these skip where it is absent
+/// — on CI, and on a clean checkout before `scripts/make-fixtures.sh` has run.
+macro_rules! corpus {
+    ($name:expr) => {{
+        let path = fixtures().join($name);
+        match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                eprintln!("no {} — skipping (run scripts/make-fixtures.sh)", $name);
+                return;
+            }
+        }
+    }};
+}
+
 /// xorshift64, so a failing case can be reproduced from its seed.
 fn next(seed: &mut u64) -> u64 {
     *seed ^= *seed << 13;
@@ -35,6 +50,8 @@ fn scratch(name: &str) -> PathBuf {
 fn a_flipped_bit_does_not_panic() {
     let mut seed = 0x243f_6a88_85a3_08d3;
     let mut checked = 0usize;
+    // The first one decides whether there is a corpus at all.
+    let _ = corpus!("numbers-values.numbers");
     for name in [
         "numbers-values.numbers",
         "pages-plain.pages",
@@ -59,7 +76,7 @@ fn a_flipped_bit_does_not_panic() {
 
 #[test]
 fn a_truncated_file_does_not_panic() {
-    let original = std::fs::read(fixtures().join("numbers-values.numbers")).expect("fixture");
+    let original = corpus!("numbers-values.numbers");
     for n in 1..=400 {
         let out = scratch("truncated.numbers");
         std::fs::write(&out, &original[..original.len() * n / 400]).unwrap();
@@ -72,6 +89,7 @@ fn a_truncated_file_does_not_panic() {
 fn corrupt_object_streams_do_not_panic() {
     let mut seed = 0xdead_beef_cafe_f00d;
     let mut reached = 0usize;
+    let _ = corpus!("numbers-values.numbers");
     for name in [
         "numbers-values.numbers",
         "pages-plain.pages",

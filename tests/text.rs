@@ -39,6 +39,20 @@ fn encrypted(path: &Path) -> bool {
     iwork::Package::read(path).is_ok_and(|package| package.contains(".iwpv2"))
 }
 
+/// The corpus is generated, never committed, so a sweep over it skips where
+/// it is absent — the same rule `tests/fixtures.rs` states as "so a fresh
+/// clone is green". The counting assertions in these sweeps keep their teeth
+/// wherever the corpus *is* present, which is the only place they could ever
+/// have said anything.
+macro_rules! corpus {
+    () => {
+        if every_fixture().is_empty() {
+            eprintln!("no corpus — skipping (run scripts/make-fixtures.sh)");
+            return;
+        }
+    };
+}
+
 fn every_fixture() -> Vec<PathBuf> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/generated");
     let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -100,6 +114,7 @@ fn reopen(doc: &Document, name: &str) -> Document {
 /// onto one index and the paragraph table stops sitting on paragraph starts.
 #[test]
 fn an_edit_anywhere_leaves_a_document_that_checks_out() {
+    corpus!();
     let mut edited = 0;
     for path in every_fixture() {
         let doc = Document::open(&path).unwrap();
@@ -665,6 +680,7 @@ fn styling_past_the_end_of_the_text_is_refused() {
 /// point of the inventory is that there is nowhere for one to hide.
 #[test]
 fn no_storage_in_the_corpus_carries_an_unknown_table() {
+    corpus!();
     let mut seen: std::collections::BTreeSet<u32> = Default::default();
     for path in every_fixture() {
         let doc = Document::open(&path).unwrap();
@@ -866,6 +882,7 @@ fn a_run_reports_its_named_style_and_its_overrides() {
 /// tripwire for the day a third placeholder turns up, not the check.
 #[test]
 fn a_character_anchored_entry_sits_on_a_placeholder() {
+    corpus!();
     let mut checked = 0;
     for path in every_fixture() {
         let doc = Document::open(&path).unwrap();
