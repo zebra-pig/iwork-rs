@@ -2575,7 +2575,7 @@ pub fn set_transition(
         transition_field::DURATION,
         Value::Fixed64(
             edit.duration
-                .or(Some(was.duration).filter(|_| !was.is_none()))
+                .or((!was.is_none()).then_some(was.duration))
                 .unwrap_or(DEFAULT_TRANSITION_DURATION)
                 .to_le_bytes(),
         ),
