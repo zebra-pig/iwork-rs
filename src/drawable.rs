@@ -2536,8 +2536,9 @@ fn own_style(document: &mut crate::Document, drawable: u64) -> Result<u64, crate
 /// The argument is the **drawable**, not its style. A document from nothing
 /// points every shape at a shared theme preset, and painting a preset does
 /// not survive: Keynote regenerates its presets on save and the colour is
-/// gone. So the first paint gives the drawable a style of its own — see
-/// [`own_style`] — and paints that, which is what the app does.
+/// gone. So the first paint gives the drawable a style of its own, naming the
+/// preset as its parent and carrying only what differs, and paints that —
+/// which is what the app does. A second paint reuses it.
 pub fn set_fill(
     document: &mut crate::Document,
     drawable: u64,
