@@ -2151,6 +2151,186 @@ fn derived_uuid(entry: &Message, identifier: u64) -> (u64, u64) {
     let upper = u64::from_le_bytes(digest[8..16].try_into().expect("sha1 is 20 bytes"));
     (lower, upper)
 }
+/// Give every slide the placeholders its layout defines, where it has none.
+///
+/// A deck made from nothing builds its first slide before any of this, and a
+/// slide without its layout's placeholders is one Keynote has to repair on
+/// load. Every one of the 83 slides in this corpus that Keynote wrote carries
+/// a placeholder for every role its layout defines, so the blueprint's own
+/// slide carries them too rather than being the one exception.
+pub(crate) fn give_slides_their_placeholders(document: &mut crate::Document) -> Result<(), Error> {
+    let Some(deck) = show(document) else {
+        return Ok(());
+    };
+    for slide in deck.slides {
+        let Some(layout) = slide.layout else { continue };
+        let (Ok(layout_archive), Ok(mut archive)) =
+            (document.archive(layout), document.archive(slide.identifier))
+        else {
+            continue;
+        };
+        // Only the roles the layout defines and the slide is missing.
+        let wanted: Vec<u32> = [
+            slide_field::TITLE_PLACEHOLDER,
+            slide_field::BODY_PLACEHOLDER,
+            slide_field::SLIDE_NUMBER_PLACEHOLDER,
+            slide_field::OBJECT_PLACEHOLDER,
+        ]
+        .into_iter()
+        .filter(|role| layout_archive.get(*role).is_some() && archive.get(*role).is_none())
+        .collect();
+        if wanted.is_empty() {
+            continue;
+        }
+
+        let mut next = document.next_object_identifier();
+        let (copies, roles) =
+            placeholders_from_layout(document, layout, slide.identifier, &mut next)?;
+        let roles: Vec<(u32, u64)> = roles
+            .into_iter()
+            .filter(|(role, _)| wanted.contains(role))
+            .collect();
+        if roles.is_empty() {
+            continue;
+        }
+        document.set_last_object_identifier(next - 1)?;
+
+        for (role, target) in &roles {
+            archive.set_in_order(
+                *role,
+                Value::Bytes(crate::style::reference(*target).encode()),
+            );
+            archive.fields.push(crate::pb::Field {
+                number: slide_field::OWNED_DRAWABLES,
+                value: Value::Bytes(crate::style::reference(*target).encode()),
+            });
+        }
+
+        // The copies are the closure of every role the layout defines, and a
+        // slide missing one is generally missing all of them — so they all go
+        // in, beside the slide, which is the stream they have to be in.
+        let mut grow = crate::create::Grow::new(document);
+        for (identifier, message_type, sub) in copies {
+            grow.beside(slide.identifier, identifier, message_type, &sub)?;
+        }
+        grow.finish()?;
+        document.set_archive_for(slide.identifier, &archive)?;
+    }
+    document.declare_external_references();
+    Ok(())
+}
+
+/// Objects to add to a slide's component, and the placeholder roles to point
+/// at them: `(identifier, message type, archive)` and `(field, identifier)`.
+type CopiedPlaceholders = (Vec<(u64, u32, Message)>, Vec<(u32, u64)>);
+
+/// The placeholders a slide must carry of its own, copied from its layout.
+///
+/// **Why a slide cannot simply point at the layout's.** A `KN.SlideArchive`
+/// this crate wrote carried four fields — style, transition, layout,
+/// in-document — where one Keynote wrote carries its own title, body,
+/// slide-number and object placeholders as well. On a deck made from nothing
+/// that went unnoticed: its single layout defines no slide-number placeholder,
+/// so there was nothing missing. Every layout in every Apple theme defines
+/// one, and a slide added to such a deck is one **Keynote cannot fully load** —
+/// it opens the file and resaves it, but `text items of <slide>` is
+/// unanswerable until Keynote has repaired the document by minting the
+/// placeholder itself. `iwork check` called it clean.
+///
+/// So the slide gets its own, copied rather than invented: the placeholder
+/// object and every object it names that lives in the layout's stream, with
+/// the layout's own identifier remapped to the new slide — which is what
+/// makes them the slide's placeholders and not a second reference to the
+/// layout's.
+fn placeholders_from_layout(
+    document: &crate::Document,
+    layout: u64,
+    slide: u64,
+    next: &mut u64,
+) -> Result<CopiedPlaceholders, Error> {
+    const ROLES: [u32; 4] = [
+        slide_field::TITLE_PLACEHOLDER,
+        slide_field::BODY_PLACEHOLDER,
+        slide_field::SLIDE_NUMBER_PLACEHOLDER,
+        slide_field::OBJECT_PLACEHOLDER,
+    ];
+    let archive = document.archive(layout)?;
+    let Some((stream, _)) = document.object(layout) else {
+        return Err(Error::NoSuchObject(layout));
+    };
+    let stream = stream.to_string();
+    let in_stream = |id: u64| {
+        document
+            .object(id)
+            .is_some_and(|(name, _)| name == stream.as_str())
+    };
+
+    // Everything reachable from the layout's placeholders that lives in the
+    // layout's own stream. Anything outside it — a style in the theme's
+    // stylesheet, say — is shared and stays shared.
+    let mut seeds: Vec<(u32, u64)> = Vec::new();
+    let mut wanted: Vec<u64> = Vec::new();
+    for role in ROLES {
+        let Some(Value::Bytes(raw)) = archive.get(role) else {
+            continue;
+        };
+        let Some(target) = Message::decode(raw).ok().and_then(|m| m.varint(1)) else {
+            continue;
+        };
+        if !in_stream(target) {
+            continue;
+        }
+        seeds.push((role, target));
+        wanted.push(target);
+    }
+    if seeds.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+
+    let mut closure: Vec<u64> = Vec::new();
+    let mut queue = wanted;
+    while let Some(id) = queue.pop() {
+        if id == layout || closure.contains(&id) || !in_stream(id) {
+            continue;
+        }
+        closure.push(id);
+        if closure.len() > 256 {
+            return Err(Error::Format(format!(
+                "layout {layout}: more than 256 objects hang off its placeholders, which is \
+                 not a shape this crate has seen"
+            )));
+        }
+        if let Ok(sub) = document.archive(id) {
+            queue.extend(crate::style::references(&sub));
+        }
+    }
+    closure.sort_unstable();
+
+    // The layout becomes the slide: a placeholder names its owner, and these
+    // are the slide's now.
+    let mut map: BTreeMap<u64, u64> = BTreeMap::new();
+    map.insert(layout, slide);
+    for id in &closure {
+        map.insert(*id, *next);
+        *next += 1;
+    }
+
+    let mut copies = Vec::new();
+    for id in &closure {
+        let Some((_, object)) = document.object(*id) else {
+            continue;
+        };
+        let message_type = object.message_type();
+        let mut sub = document.archive(*id)?;
+        remap_references(&mut sub, &map, MAX_DEPTH);
+        copies.push((map[id], message_type, sub));
+    }
+    let roles = seeds
+        .into_iter()
+        .map(|(role, target)| (role, map[&target]))
+        .collect();
+    Ok((copies, roles))
+}
 
 /// Add a slide to the end of a deck, drawn from one of its layouts.
 ///
@@ -2186,18 +2366,33 @@ pub fn add_slide(
     let last_node = deck.slides.last().map(|slide| slide.node);
     let master_id = master.identifier;
 
+    // The slide's own placeholders, copied from the layout before anything is
+    // allocated — a slide without them is one Keynote cannot fully load.
+    let slide = document.next_object_identifier();
+    let mut next = slide + 1;
+    let (placeholders, roles) = placeholders_from_layout(document, master_id, slide, &mut next)?;
+    document.set_last_object_identifier(next - 1)?;
+
+    let mut archive = crate::create::keynote_slide(style, Some(master_id));
+    for (role, target) in &roles {
+        archive.set_in_order(
+            *role,
+            Value::Bytes(crate::style::reference(*target).encode()),
+        );
+        // A slide owns its drawables, and a placeholder is one of them.
+        archive.fields.push(crate::pb::Field {
+            number: slide_field::OWNED_DRAWABLES,
+            value: Value::Bytes(crate::style::reference(*target).encode()),
+        });
+    }
+
+    // `slide` and the placeholder copies were reserved above, so `Grow` only
+    // allocates the node.
     let mut grow = crate::create::Grow::new(document);
-    let slide = grow.allocate();
     let node = grow.allocate();
-    grow.component(
-        "Slide",
-        true,
-        vec![(
-            slide,
-            TYPE_SLIDE,
-            crate::create::keynote_slide(style, Some(master_id)),
-        )],
-    )?;
+    let mut objects = vec![(slide, TYPE_SLIDE, archive)];
+    objects.extend(placeholders);
+    grow.component("Slide", true, objects)?;
     // The node goes beside the last slide's node, which is in `Document`.
     let neighbour = last_node
         .ok_or_else(|| Error::Format("this deck has no slide to put a new one after".into()))?;

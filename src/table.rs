@@ -4539,7 +4539,7 @@ pub fn set_conditional_threshold(
         return Err(Error::refused(
             Refusal::UnwritableValue,
             format!(
-                "rule {rule} of set {set} is predicate {}, and what that one compares is not \\
+                "rule {rule} of set {set} is predicate {}, and what that one compares is not \
                  established here — only {:?} are, which are greater-than and less-than",
                 found.predicate.kind, NUMERIC_PREDICATES
             ),
@@ -4685,7 +4685,7 @@ pub fn set_conditional_threshold(
         return Err(crate::Error::refused(
             crate::Refusal::UnwritableValue,
             format!(
-                "rule {rule} of set {set} compares against something other than one number, \\
+                "rule {rule} of set {set} compares against something other than one number, \
                  and rewriting part of a condition is worse than leaving it alone"
             ),
         ));

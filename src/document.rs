@@ -563,10 +563,20 @@ impl TableHandle<'_> {
         let amount = match amount.into() {
             CellValue::Number(decimal) | CellValue::Currency(decimal) => decimal,
             other => {
+                // Name the table and the cell the way every other refusal in
+                // this file does — "Sales B3", not the raw identifier.
+                let table = self
+                    .document
+                    .tables()
+                    .into_iter()
+                    .find(|t| t.identifier.to_string() == self.table || t.name == self.table)
+                    .map(|t| t.name)
+                    .unwrap_or_else(|| self.table.clone());
+                let at = crate::table::CellRef::Index(row, column);
                 return Err(Error::refused(
                     Refusal::UnwritableValue,
-                    format!("{}: {} is not an amount", self.table, other.kind()),
-                ))
+                    format!("{table} {at}: {} is not an amount", other.kind()),
+                ));
             }
         };
         self.document
@@ -1380,6 +1390,12 @@ impl Document {
         // owners here is what makes a document made from nothing a spreadsheet
         // rather than a grid of literals.
         crate::calc::give_tables_their_owners(&mut document)?;
+        // And a slide made from nothing gets the placeholders its layout
+        // defines, which every slide Keynote writes carries and which a slide
+        // without is one Keynote has to repair on load.
+        if kind == Kind::Keynote {
+            crate::keynote::give_slides_their_placeholders(&mut document)?;
+        }
         // The owners went in after the package was assembled, so the engine's
         // stream no longer matches the bytes the document was built from. A
         // document nobody has edited has to report no changed streams —
@@ -6611,8 +6627,6 @@ impl Document {
             .find(|d| d.identifier == identifier)
     }
 
-    /// A drawable's fill, stroke, shadow, reflection and opacity, resolved up
-    /// the style chain.
     /// Every `TST.CellStyleArchive` in the document — how its tables' cells
     /// are painted.
     ///
@@ -6670,6 +6684,19 @@ impl Document {
         crate::drawable::set_opacity(self, drawable, opacity)
     }
 
+    /// A **style's** fill, stroke, shadow, reflection and opacity, resolved up
+    /// the style chain.
+    ///
+    /// The identifier is the style, not the drawable — take it from
+    /// [`crate::drawable::Drawable::style`]. Its siblings that *write*
+    /// ([`Document::set_object_fill`] and the rest) take a drawable instead,
+    /// because painting one gives it a style of its own; this reads whatever
+    /// the drawable currently points at.
+    ///
+    /// Handed a drawable's own identifier it walks from there, finds no
+    /// property bag on a `ShapeInfoArchive`, and answers with every field
+    /// `None` rather than an error — so a caller reading back what it just
+    /// wrote has to hop through `drawable(id).style` first.
     pub fn object_style(&self, identifier: u64) -> Option<crate::drawable::ObjectStyle> {
         crate::drawable::object_style(self, identifier)
     }
@@ -8746,6 +8773,58 @@ impl Document {
                             ));
                         }
                     }
+                }
+            }
+
+            // **A slide carries a placeholder for every one its layout
+            // defines, and carries its own.** A slide missing them is one
+            // Keynote cannot fully load: it opens the file and resaves it,
+            // but asking the slide for its text items fails until Keynote has
+            // repaired the document by minting the placeholder itself. This
+            // checker called such a deck clean, which is why the rule is here.
+            let Some(layout) = slide.layout else {
+                continue;
+            };
+            let Ok(layout_archive) = self.archive(layout) else {
+                continue;
+            };
+            let Ok(slide_archive) = self.archive(slide.identifier) else {
+                continue;
+            };
+            for (role, what) in [
+                (crate::keynote::slide_field::TITLE_PLACEHOLDER, "title"),
+                (crate::keynote::slide_field::BODY_PLACEHOLDER, "body"),
+                (
+                    crate::keynote::slide_field::SLIDE_NUMBER_PLACEHOLDER,
+                    "slide number",
+                ),
+            ] {
+                if layout_archive.get(role).is_none() {
+                    continue;
+                }
+                let Some(Value::Bytes(raw)) = slide_archive.get(role) else {
+                    problems.push(format!(
+                        "slide {} has no {what} placeholder, and its layout {layout} defines \
+                         one — Keynote cannot read the slide's text items until it has \
+                         repaired the document itself",
+                        slide.identifier
+                    ));
+                    continue;
+                };
+                let target = Message::decode(raw).ok().and_then(|m| m.varint(1));
+                match target.and_then(|id| self.object(id).map(|(stream, _)| stream.to_string())) {
+                    Some(stream) if !slide.stream.is_empty() && stream != slide.stream => {
+                        problems.push(format!(
+                            "slide {}'s {what} placeholder is in {stream}, not {} — a \
+                             placeholder has to be the slide's own",
+                            slide.identifier, slide.stream
+                        ));
+                    }
+                    None => problems.push(format!(
+                        "slide {}'s {what} placeholder names nothing",
+                        slide.identifier
+                    )),
+                    _ => {}
                 }
             }
         }

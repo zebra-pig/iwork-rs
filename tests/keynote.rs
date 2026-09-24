@@ -1905,3 +1905,158 @@ fn keynote_resaves_a_build_this_crate_wrote() {
     assert!(after.problems().is_empty(), "{:?}", after.problems());
     let _ = std::fs::remove_dir_all(&out);
 }
+
+/// A theme Keynote ships, if this machine has Keynote installed. Not the
+/// generated corpus — these are Apple's own, and CI has neither.
+fn bundled_theme() -> Option<PathBuf> {
+    let root =
+        Path::new("/Applications/Keynote Creator Studio.app/Contents/SharedSupport/Templates");
+    let entries = std::fs::read_dir(root).ok()?;
+    let mut found: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|e| e.path().join("Wide.kth"))
+        .filter(|p| p.exists())
+        .collect();
+    found.sort();
+    found.into_iter().next()
+}
+
+/// **A slide carries its layout's placeholders, or Keynote cannot load it.**
+///
+/// A `KN.SlideArchive` this crate wrote carried four fields — style,
+/// transition, layout, in-document — where one Keynote wrote carries its own
+/// title, body and slide-number placeholders too. On a deck made from nothing
+/// that went unnoticed, because its single layout defines no slide-number
+/// placeholder and so nothing was missing. Every layout in every Apple theme
+/// defines one, and a slide added to such a deck was one Keynote opened,
+/// resaved, and could not answer `text items of <slide>` about — `iwork check`
+/// called it clean, and the app harness reported `REFUSED`.
+///
+/// The placeholders are copied from the layout now, with the layout's own
+/// identifier remapped to the slide, which is what makes them the slide's.
+#[test]
+fn a_slide_added_to_a_theme_carries_that_theme_s_placeholders() {
+    let Some(theme) = bundled_theme() else {
+        eprintln!("no bundled Keynote themes on this machine — skipping");
+        return;
+    };
+    let mut doc = Document::from_template(&theme).unwrap();
+    let before = doc.slides().len();
+    doc.add_slide(None).unwrap();
+    assert_eq!(doc.slides().len(), before + 1);
+
+    let slide = doc.slides().last().cloned().expect("the new slide");
+    let layout = slide.layout.expect("a slide built on a layout");
+    let layout_archive = doc.archive(layout).unwrap();
+    let slide_archive = doc.archive(slide.identifier).unwrap();
+
+    let stream = doc
+        .object(slide.identifier)
+        .map(|(s, _)| s.to_string())
+        .expect("the slide has a stream");
+
+    let mut checked = 0;
+    for role in [
+        iwork::keynote::slide_field::TITLE_PLACEHOLDER,
+        iwork::keynote::slide_field::BODY_PLACEHOLDER,
+        iwork::keynote::slide_field::SLIDE_NUMBER_PLACEHOLDER,
+    ] {
+        if layout_archive.get(role).is_none() {
+            continue;
+        }
+        checked += 1;
+        let target = match slide_archive.get(role) {
+            Some(iwork::pb::Value::Bytes(raw)) => iwork::pb::Message::decode(raw)
+                .ok()
+                .and_then(|m| m.varint(1))
+                .unwrap_or_else(|| panic!("field {role} names nothing")),
+            other => panic!("the slide has no field {role}: {other:?}"),
+        };
+        // Its own, in its own stream — not a second reference to the layout's.
+        let (where_, _) = doc.object(target).expect("the placeholder exists");
+        assert_eq!(
+            where_, stream,
+            "field {role} points into {where_}, not the slide's own {stream}"
+        );
+    }
+    assert!(checked >= 2, "a bundled theme defines placeholders to copy");
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+}
+
+/// And with them, `title` and `body` write — which is what `examples/deck.rs`
+/// has always promised a themed deck would do.
+#[test]
+fn title_and_body_write_on_a_slide_added_to_a_theme() {
+    let Some(theme) = bundled_theme() else {
+        eprintln!("no bundled Keynote themes on this machine — skipping");
+        return;
+    };
+    let mut doc = Document::from_template(&theme).unwrap();
+    doc.add_slide(None).unwrap();
+    let index = doc.slides().len() - 1;
+
+    doc.slide_mut(index)
+        .unwrap()
+        .title("Rollmaterial Q3")
+        .unwrap();
+    doc.slide_mut(index)
+        .unwrap()
+        .body("Verfügbarkeit 91,4 %")
+        .unwrap();
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+
+    let out = std::env::temp_dir().join("iwork-themed-slide.key");
+    let _ = std::fs::remove_file(&out);
+    doc.save(&out).unwrap();
+    let back = Document::open(&out).unwrap();
+    let words: String = back
+        .text_storages()
+        .iter()
+        .map(|s| s.text.clone())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        words.contains("Rollmaterial Q3"),
+        "the title is in the file"
+    );
+    assert!(words.contains("Verfügbarkeit 91,4 %"), "the body is too");
+    let _ = std::fs::remove_file(&out);
+}
+
+/// Keynote opens it and reads the title back. Off unless `IWORK_APP_CHECK=1`.
+#[test]
+fn keynote_opens_a_themed_deck_this_crate_added_a_slide_to() {
+    if std::env::var("IWORK_APP_CHECK").as_deref() != Ok("1") {
+        eprintln!("IWORK_APP_CHECK is not 1 — skipping the app round trip");
+        return;
+    }
+    let Some(theme) = bundled_theme() else {
+        eprintln!("no bundled Keynote themes on this machine — skipping");
+        return;
+    };
+    let mut doc = Document::from_template(&theme).unwrap();
+    doc.add_slide(None).unwrap();
+    let index = doc.slides().len() - 1;
+    doc.slide_mut(index)
+        .unwrap()
+        .title("Rollmaterial Q3")
+        .unwrap();
+
+    let out = std::env::temp_dir().join("iwork-themed-slide-app.key");
+    let _ = std::fs::remove_file(&out);
+    doc.save(&out).unwrap();
+
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/app-check.sh");
+    let output = std::process::Command::new(&script)
+        .arg(&out)
+        .arg("Rollmaterial Q3")
+        .output()
+        .unwrap_or_else(|e| panic!("{}: {e}", script.display()));
+    assert!(
+        output.status.success(),
+        "Keynote would not read the title out of a themed deck:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = std::fs::remove_file(&out);
+}
