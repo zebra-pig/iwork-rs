@@ -4847,5 +4847,7 @@ pub fn set_cell_style_fill(
         cell_style_field::PROPERTIES,
         Value::Bytes(properties.encode()),
     );
+    // The count has to follow the bag, or Numbers deletes the bag on save.
+    crate::style::refresh_override_count(&mut archive, &[], &[cell_style_field::PROPERTIES]);
     document.set_archive_for(style, &archive)
 }

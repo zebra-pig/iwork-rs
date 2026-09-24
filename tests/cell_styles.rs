@@ -211,3 +211,120 @@ fn a_table_from_nothing_has_the_styles_and_not_the_archive_that_uses_them() {
          does, delete this test"
     );
 }
+
+/// **`override_count` decides whether the app keeps the bag at all.**
+///
+/// Every `TST.CellStyleArchive` Numbers writes carries `10 = 4` beside its
+/// four-entry property bag. A document from this crate carried none, and
+/// Numbers' own save deleted field 11 from all seventeen cell styles — the
+/// fill, and the four-point insets nobody had asked it to touch, 91 bytes
+/// down to 30. The count is written now, and the bags survive.
+#[test]
+fn a_cell_style_carries_the_override_count_the_app_writes() {
+    let doc = Document::new_spreadsheet("Blatt", "Tabelle", 2, 2).unwrap();
+    for style in doc.cell_styles() {
+        let archive = doc.archive(style.identifier).unwrap();
+        let count = iwork::style::get_path(&archive, iwork::style::OVERRIDE_COUNT);
+        assert!(
+            matches!(count, Some(iwork::pb::Value::Varint(n)) if n > 0),
+            "{:?} has no override count: {count:?} — Numbers deletes the bag of a \
+             style that claims to override nothing",
+            style.name
+        );
+        // And it agrees with the bag it describes.
+        assert_eq!(
+            count,
+            Some(iwork::pb::Value::Varint(4)),
+            "{:?}: Numbers writes 4 beside a four-entry bag",
+            style.name
+        );
+    }
+}
+
+/// Painting bumps the count, because painting adds a property.
+#[test]
+fn painting_a_cell_style_keeps_the_count_in_step_with_the_bag() {
+    let mut doc = Document::new_spreadsheet("Blatt", "Tabelle", 2, 2).unwrap();
+    let header = named(&doc, "tableCell-0-headerRowStyle")
+        .expect("a header row style")
+        .identifier;
+    doc.set_cell_style_fill(
+        header,
+        Some(Color {
+            red: 0.12,
+            green: 0.22,
+            blue: 0.38,
+            alpha: 1.0,
+        }),
+    )
+    .unwrap();
+
+    let archive = doc.archive(header).unwrap();
+    let bag = match iwork::style::get_path(&archive, &[11]) {
+        Some(iwork::pb::Value::Bytes(raw)) => iwork::pb::Message::decode(&raw).unwrap(),
+        other => panic!("no property bag: {other:?}"),
+    };
+    let count = match iwork::style::get_path(&archive, iwork::style::OVERRIDE_COUNT) {
+        Some(iwork::pb::Value::Varint(n)) => n as usize,
+        other => panic!("no override count: {other:?}"),
+    };
+    assert_eq!(
+        count,
+        bag.fields.len(),
+        "the count follows the bag, so the two cannot disagree"
+    );
+}
+
+/// **The acceptance test: Numbers' own save keeps the paint.**
+/// Off unless `IWORK_APP_CHECK=1`.
+#[test]
+fn numbers_keeps_a_cell_fill_through_its_own_save() {
+    if std::env::var("IWORK_APP_CHECK").as_deref() != Ok("1") {
+        eprintln!("IWORK_APP_CHECK is not 1 — skipping the resave");
+        return;
+    }
+    let mut doc = Document::new_spreadsheet("Blatt", "Tabelle", 3, 3).unwrap();
+    let body = named(&doc, "tableCell-0-bodyStyle").unwrap().identifier;
+    let blue = Color {
+        red: 0.92,
+        green: 0.94,
+        blue: 0.97,
+        alpha: 1.0,
+    };
+    doc.set_cell_style_fill(body, Some(blue)).unwrap();
+    doc.table_mut("Tabelle")
+        .unwrap()
+        .set_block("A1", &[vec!["Region", "Einheiten", "Ertrag"]])
+        .unwrap();
+
+    let out = std::env::temp_dir().join("iwork-painted-cells.numbers");
+    let _ = std::fs::remove_file(&out);
+    doc.save(&out).unwrap();
+
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/resave.sh");
+    let output = std::process::Command::new(&script)
+        .arg(&out)
+        .output()
+        .unwrap_or_else(|e| panic!("{}: {e}", script.display()));
+    assert!(
+        output.status.success(),
+        "Numbers would not resave it:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let after = Document::open(&out).unwrap();
+    match named(&after, "tableCell-0-bodyStyle").and_then(|s| s.fill) {
+        Some(Fill::Color(c)) => {
+            assert!((c.red - 0.92).abs() < 1e-4, "Numbers kept the fill: {c:?}");
+            assert!((c.blue - 0.97).abs() < 1e-4, "{c:?}");
+        }
+        other => panic!("Numbers deleted the fill: {other:?}"),
+    }
+    // And the insets the crate wrote and never asked Numbers to touch.
+    assert_eq!(
+        named(&after, "tableCell-0-bodyStyle").and_then(|s| s.insets),
+        Some([4.0, 4.0, 4.0, 4.0])
+    );
+    let _ = std::fs::remove_file(&out);
+}

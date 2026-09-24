@@ -118,7 +118,8 @@ pub const STYLESHEET: &[u32] = &[1, 5, 1];
 /// Set on a variation style — the anonymous kind. Naming one of these and
 /// listing it among the named styles is what Pages refuses to open.
 pub const IS_VARIATION: &[u32] = &[1, 4];
-/// How many properties the style overrides. Not maintained by this crate.
+/// How many properties the style overrides. See [`refresh_override_count`],
+/// which maintains it — a count that disagrees with the bags costs the bags.
 pub const OVERRIDE_COUNT: &[u32] = &[10];
 
 /// A string carried somewhere inside a style archive, with the field path it
@@ -436,6 +437,48 @@ pub fn set_channels(colour: &mut Message, red: f32, green: f32, blue: f32, alpha
     for (field, value) in [(3, red), (4, green), (5, blue), (6, alpha)] {
         colour.set_in_order(field, Value::Fixed32(value.to_le_bytes()));
     }
+}
+
+/// `TSS.StyleArchive.override_count` — how many properties a style sets.
+///
+/// **It is not decoration.** A style whose property bag holds entries while
+/// this says zero — or says nothing at all — is one the apps treat as
+/// overriding nothing, and they throw the bag away. Measured three times, in
+/// three archives:
+///
+/// * a Keynote shape variation carrying a colour with a count of 0 came back
+///   from Keynote's own save with the properties stripped;
+/// * every `TST.CellStyleArchive` Numbers writes carries `10 = 4` beside its
+///   four-entry bag, and a table style from this crate carrying none had all
+///   seventeen of its cell styles' bags deleted on save — including insets
+///   this crate never asked to change;
+/// * every `TSWP.ParagraphStyleArchive` Pages writes carries one, and a style
+///   made here without one is not drawn.
+///
+/// So it is maintained from the bags themselves, and cannot disagree with
+/// them. The field itself is [`OVERRIDE_COUNT`].
+///
+/// Count the properties in `bags` and write the total to `OVERRIDE_COUNT`.
+///
+/// `at` is the path to the archive the count lives on — empty for an archive
+/// that *is* the `TSS` one, `[1]` for a wrapper such as
+/// `TSWP.ShapeStyleArchive`. `bags` are the property-bag field numbers on
+/// that same archive: 11 for most, 11 and 12 for a paragraph style, which
+/// keeps character and paragraph properties apart.
+pub fn refresh_override_count(archive: &mut Message, at: &[u32], bags: &[u32]) {
+    let mut total = 0u64;
+    for bag in bags {
+        let mut path = at.to_vec();
+        path.push(*bag);
+        if let Some(Value::Bytes(raw)) = get_path(archive, &path) {
+            if let Some(properties) = pb::decode_nested(&raw) {
+                total += properties.fields.len() as u64;
+            }
+        }
+    }
+    let mut path = at.to_vec();
+    path.push(OVERRIDE_COUNT[0]);
+    let _ = set_path(archive, &path, Some(Value::Varint(total)));
 }
 
 /// Read a string field at `path`, if it holds readable text.

@@ -7435,6 +7435,10 @@ impl Document {
         let mut archive = style.archive;
         style::set_path(&mut archive, path, value)
             .map_err(|e| Error::Format(format!("style {identifier}: {e}")))?;
+        // Adding a property changes how many the style overrides, and a count
+        // that disagrees with the bags is one the app resolves by throwing the
+        // bags away. See `style::refresh_override_count`.
+        style::refresh_override_count(&mut archive, &[], &[11, 12]);
         self.set_archive(identifier, &archive)
     }
 

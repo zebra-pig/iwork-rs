@@ -834,6 +834,11 @@ fn paragraph_style(stylesheet: u64, list: u64) -> Message {
                 reference(5, stylesheet),
             ],
         ),
+        // `override_count`, and it is not decoration: a style whose bags hold
+        // properties while this says nothing is one the app treats as
+        // overriding nothing — Pages draws the paragraph as if the style set
+        // nothing at all. Five character properties below, two paragraph.
+        varint(crate::style::OVERRIDE_COUNT[0], 7),
         nested(
             property::FONT_SIZE[0],
             vec![
@@ -1668,6 +1673,8 @@ fn table_text_style(identifier: &str, name: &str, stylesheet: u64, list: u64) ->
                 reference(5, stylesheet),
             ],
         ),
+        // Three character properties below, two paragraph. See `OVERRIDE_COUNT`.
+        varint(crate::style::OVERRIDE_COUNT[0], 5),
         nested(
             property::FONT_SIZE[0],
             vec![
@@ -1704,6 +1711,11 @@ fn named_style(identifier: &str, stylesheet: u64) -> Message {
 fn cell_style(identifier: &str, stylesheet: u64) -> Message {
     message(vec![
         nested(1, vec![string(2, identifier), reference(5, stylesheet)]),
+        // `10 = 4` is what every `TST.CellStyleArchive` Numbers writes carries
+        // beside its four-entry bag. Without it Numbers deletes the bag on
+        // save — the fill *and* the insets below, which nobody asked it to
+        // touch.
+        varint(crate::style::OVERRIDE_COUNT[0], 4),
         nested(
             11,
             vec![
