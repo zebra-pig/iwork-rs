@@ -4,7 +4,62 @@ What changed, and — because this is a reverse-engineered format — **how it w
 established**. An entry that cannot say what the app did is an entry about
 bytes nobody has watched being read.
 
-## 0.2.1 — unreleased
+## 0.2.1 — 2026-09-23
+
+**Anyone writing pictures with 0.2.0 should take this one.** A document that
+used the same image twice made Keynote abort on opening — not refuse, abort,
+inside `TSPersistence`, before it drew anything and with nothing said to the
+user. `iwork check` had called such a deck clean.
+
+### Fixed
+
+- **One stored file per picture.** iWork's media registry is keyed by content:
+  one `Data/` entry per distinct set of bytes, every user pointing at it.
+  `add_image` allocated a fresh entry per call, so the same PNG on two slides
+  was stored twice and the app aborted. The digest was already being computed
+  for the `DataInfo` and simply never consulted. `iwork check` now names any
+  two registry entries holding the same bytes, and a deck built from one
+  picture used twice opens.
+
+### Added
+
+- **Drawables can be painted** — `set_object_fill`, `set_object_stroke` and
+  `set_object_opacity`. This is the first styling in the crate that both apps
+  draw in a document built **from nothing**, and two things had to be found
+  before it would stick, both by making the app save the file again:
+  - a drawable needs a style *of its own*. A document from nothing points
+    every shape at a theme preset, and Keynote regenerates presets on save —
+    the colour was gone. The first paint now makes the variation the app
+    itself makes, naming the preset as parent and carrying only what differs;
+  - **`override_count` is not decoration.** A bag holding a colour while the
+    count said nothing differed came back from the app's save stripped. It is
+    maintained from the bag now, so the two cannot disagree.
+- **Cell styles can be read** — `cell_styles()` gives each
+  `TST.CellStyleArchive` its role name, fill and insets. `set_cell_style_fill`
+  writes the fill, and Numbers draws it in a document Numbers wrote: asked for
+  a header cell's background after a repaint it answered `5959,17617,36075`
+  where it had answered `45231,46004,45746`.
+
+### The shape of what is still missing
+
+One cause, stated plainly because it is the next piece of work: **a document
+this crate builds from nothing has a stub stylesheet, and the apps draw styles
+that came from a real document while ignoring ones this crate invents.** Pages
+gets one paragraph style, `Body`, and draws every paragraph of a generated
+report at 12 pt where its own styles give `30 / 18 / 11`. Numbers gets the
+named cell styles and a `TST.TableStyleArchive` of a few hundred bytes where
+the real one is 8 344, of which 4 037 are the strokes behind gridlines. Both
+are asserted as tests that say to delete themselves when it changes.
+
+### Also
+
+- 2 000 corrupted documents per run say rubbish comes back as an `Err` rather
+  than a panic — flipped bits, truncation, and corrupted object streams
+  repackaged around the damage, which is the only shape that reaches the
+  parser.
+- Fifteen fixture sweeps demanded a corpus and failed where there is none.
+  They skip now, which is the rule this repository already had written down.
+
 
 ## 0.2.0 — 2026-09-21
 
