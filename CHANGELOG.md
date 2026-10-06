@@ -4,6 +4,8 @@ What changed, and — because this is a reverse-engineered format — **how it w
 established**. An entry that cannot say what the app did is an entry about
 bytes nobody has watched being read.
 
+## 0.2.3 — unreleased
+
 ## 0.2.2 — 2026-10-06
 
 Two more documents the apps opened and then quietly mangled, both found by
