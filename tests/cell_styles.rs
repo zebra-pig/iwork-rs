@@ -150,15 +150,23 @@ fn painting_something_that_is_not_a_cell_style_is_refused() {
     );
 }
 
-/// **The limitation, asserted.** A document from nothing carries every named
-/// cell style, and painting one is accepted and read back — and Numbers still
-/// draws the table unstyled, because its `TST.TableStyleArchive` is a stub.
-/// This test exists so that the day the archive is written properly, it fails
-/// and someone comes back to delete it.
+/// **A table made from nothing is drawn as a table.**
+///
+/// It used not to be. The `TST.TableStyleArchive` this crate wrote was a name
+/// and a stylesheet reference; the one Numbers writes carries 63 properties,
+/// and gridlines, borders and the line under a header are among them — they
+/// are `TST.TableStylePropertiesArchive`, not properties of cells. The test
+/// that stood here asserted the stub and said to delete itself the day it
+/// grew. It grew.
+///
+/// What is asserted is the default Numbers gives a new table, value for value:
+/// gridlines and the border on, a header row and header column in their greys,
+/// a body that paints nothing.
 #[test]
-fn a_table_from_nothing_has_the_styles_and_not_the_archive_that_uses_them() {
-    let mut doc = Document::new_spreadsheet("Blatt", "Tabelle", 3, 2).unwrap();
+fn a_table_from_nothing_carries_the_look_numbers_gives_one() {
+    let doc = Document::new_spreadsheet("Blatt", "Tabelle", 3, 2).unwrap();
 
+    // The roles, under the names the app's own schema gives them.
     let names: Vec<String> = doc
         .cell_styles()
         .into_iter()
@@ -169,47 +177,250 @@ fn a_table_from_nothing_has_the_styles_and_not_the_archive_that_uses_them() {
         "tableCell-0-headerRowStyle",
         "tableCell-0-headerColumnStyle",
         "tableCell-0-footerRowStyle",
+        "tableCell-0-categoryLevel1Row",
+        "tableCell-0-labelLevel1Row",
+        "tableCell-0-pivotBodySummaryRow",
+        "tableCell-0-pivotBodySummaryColumn",
+        "tableCell-0-pivotHeaderColumnSummary",
     ] {
         assert!(names.iter().any(|n| n == role), "{role} missing: {names:?}");
     }
-    // Every one of them starts unpainted.
-    assert!(
-        doc.cell_styles()
-            .iter()
-            .all(|s| matches!(s.fill, Some(Fill::None) | None)),
-        "a table from nothing paints nothing"
-    );
+    for invented in ["groupLevel1Style", "pivotHeaderStyle", "pivotValueStyle"] {
+        assert!(
+            !names.iter().any(|n| n.ends_with(invented)),
+            "{invented} is a name no document Numbers wrote carries"
+        );
+    }
 
-    let header = named(&doc, "tableCell-0-headerRowStyle")
-        .expect("a header row style")
-        .identifier;
-    doc.set_cell_style_fill(
-        header,
-        Some(Color {
-            red: 0.11,
-            green: 0.35,
-            blue: 0.62,
-            alpha: 1.0,
-        }),
-    )
-    .unwrap();
-    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+    // Header row grey, header column grey, body and footer present and empty.
+    match named(&doc, "tableCell-0-headerRowStyle").and_then(|s| s.fill) {
+        Some(Fill::Color(c)) => assert!((c.red - 0.743_613_24).abs() < 1e-6, "{c:?}"),
+        other => panic!("the header row is painted: {other:?}"),
+    }
+    match named(&doc, "tableCell-0-headerColumnStyle").and_then(|s| s.fill) {
+        Some(Fill::Color(c)) => assert!((c.red - 0.862_404_9).abs() < 1e-6, "{c:?}"),
+        other => panic!("the header column is painted: {other:?}"),
+    }
+    for role in ["tableCell-0-bodyStyle", "tableCell-0-footerRowStyle"] {
+        assert!(
+            matches!(named(&doc, role).and_then(|s| s.fill), Some(Fill::None)),
+            "{role} carries a fill that paints nothing"
+        );
+    }
 
-    // The table style is the piece that is missing. Numbers writes 8 344
-    // bytes here; this is two orders of magnitude short of that, and the
-    // difference is what draws gridlines, borders and the per-role routing.
+    // The table style: gridlines and the border on, sixteen strokes by role,
+    // and a count that is the number of properties in the bag.
     let style = doc
         .objects()
         .find(|(_, object)| object.message_type() == 6003)
         .map(|(_, object)| object.identifier)
         .expect("a TST.TableStyleArchive");
-    let size = doc.archive(style).unwrap().encode().len();
-    assert!(
-        size < 1_000,
-        "the table style is still a stub at {size} bytes — if this has grown, \
-         check whether Numbers now draws a table built from nothing, and if it \
-         does, delete this test"
+    let archive = doc.archive(style).unwrap();
+    let bag = match iwork::style::get_path(&archive, &[11]) {
+        Some(iwork::pb::Value::Bytes(raw)) => iwork::pb::Message::decode(&raw).unwrap(),
+        other => panic!("the table style has no properties: {other:?}"),
+    };
+    for (field, what) in [
+        (33u32, "v_strokes_visible"),
+        (34, "h_strokes_visible"),
+        (35, "hr_separator_visible"),
+        (38, "table_border_visible"),
+    ] {
+        assert_eq!(bag.varint(field), Some(1), "{what} is on");
+    }
+    for field in 46..=61u32 {
+        assert!(bag.bytes(field).is_some(), "stroke {field} is there");
+    }
+    assert_eq!(
+        iwork::style::get_path(&archive, iwork::style::OVERRIDE_COUNT),
+        Some(iwork::pb::Value::Varint(bag.fields.len() as u64)),
+        "override_count is the number of properties in the bag"
     );
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+}
+
+/// **The body text style goes in the body's slot.**
+///
+/// `TST.TableModelArchive` names its slots: 24 is `body_text_style`, 25 the
+/// header row's, 26 the header column's, 27 the footer's. This crate wrote its
+/// bold "Table Header" style into 24 and its plain one into the other three —
+/// the body in bold and the headers not. Nothing showed it, because the styles
+/// carried no `override_count` and Numbers was discarding what they said.
+#[test]
+fn the_body_of_a_table_is_set_in_the_regular_face_and_its_headers_in_the_bold() {
+    let doc = Document::new_spreadsheet("Blatt", "Tabelle", 3, 2).unwrap();
+    let model = doc
+        .objects()
+        .find(|(_, object)| object.message_type() == 6001)
+        .map(|(_, object)| object.identifier)
+        .expect("a table model");
+    let archive = doc.archive(model).unwrap();
+    let font_at = |slot: u32| -> String {
+        let style = iwork::style::reference_at(&archive, &[slot, 1])
+            .unwrap_or_else(|| panic!("slot {slot} names no style"));
+        let style = doc.archive(style).unwrap();
+        iwork::style::string_at(&style, iwork::style::property::FONT_NAME).unwrap_or_default()
+    };
+    assert_eq!(font_at(24), "HelveticaNeue", "body_text_style");
+    assert_eq!(font_at(25), "HelveticaNeue-Bold", "header_row_text_style");
+    assert_eq!(
+        font_at(26),
+        "HelveticaNeue-Bold",
+        "header_column_text_style"
+    );
+    assert_eq!(font_at(27), "HelveticaNeue-Bold", "footer_row_text_style");
+}
+
+/// A document an older version of this crate wrote names nine of the roles
+/// differently, and a table can still be added to it.
+///
+/// A Pages document carries the table styles with no table to copy the
+/// references from, so `add_table` finds them by name — and this one is given
+/// the names 0.2.2 and earlier wrote before it is asked.
+#[test]
+fn a_table_can_still_be_added_where_the_old_role_names_are() {
+    const RENAMED: &[(&str, &str)] = &[
+        ("tableCell-0-labelLevel1Row", "tableCell-0-groupLevel1Style"),
+        ("tableCell-0-labelLevel2Row", "tableCell-0-groupLevel2Style"),
+        ("tableCell-0-labelLevel3Row", "tableCell-0-groupLevel3Style"),
+        ("tableCell-0-labelLevel4Row", "tableCell-0-groupLevel4Style"),
+        ("tableCell-0-labelLevel5Row", "tableCell-0-groupLevel5Style"),
+        (
+            "tableCell-0-pivotBodySummaryRow",
+            "tableCell-0-pivotHeaderStyle",
+        ),
+        (
+            "tableCell-0-pivotBodySummaryColumn",
+            "tableCell-0-pivotValueStyle",
+        ),
+        (
+            "tableCell-0-pivotHeaderColumnSummary",
+            "tableCell-0-pivotTotalStyle",
+        ),
+        (
+            "text-0-paragraphstyle-Table Label 1",
+            "text-0-paragraphstyle-Table Group 1",
+        ),
+        (
+            "text-0-paragraphstyle-Table Label 2",
+            "text-0-paragraphstyle-Table Group 2",
+        ),
+        (
+            "text-0-paragraphstyle-Table Label 3",
+            "text-0-paragraphstyle-Table Group 3",
+        ),
+        (
+            "text-0-paragraphstyle-Table Label 4",
+            "text-0-paragraphstyle-Table Group 4",
+        ),
+        (
+            "text-0-paragraphstyle-Table Label 5",
+            "text-0-paragraphstyle-Table Group 5",
+        ),
+    ];
+    let mut doc = Document::new(iwork::Kind::Pages).unwrap();
+    let styles: Vec<u64> = doc
+        .objects()
+        .filter(|(_, object)| matches!(object.message_type(), 6004 | 2022))
+        .map(|(_, object)| object.identifier)
+        .collect();
+    let mut renamed = 0;
+    for identifier in styles {
+        let mut archive = doc.archive(identifier).unwrap();
+        let Some(current) = iwork::style::string_at(&archive, &[1, 2]) else {
+            continue;
+        };
+        // The old document had no header-column text style of its own either.
+        if current == "text-0-paragraphstyle-Table Header Column" {
+            iwork::style::set_path(
+                &mut archive,
+                &[1, 2],
+                Some(iwork::pb::Value::Bytes(
+                    b"text-0-paragraphstyle-Unused".to_vec(),
+                )),
+            )
+            .unwrap();
+            doc.set_archive_for(identifier, &archive).unwrap();
+            continue;
+        }
+        if let Some((_, old)) = RENAMED.iter().find(|(new, _)| *new == current) {
+            iwork::style::set_path(
+                &mut archive,
+                &[1, 2],
+                Some(iwork::pb::Value::Bytes(old.as_bytes().to_vec())),
+            )
+            .unwrap();
+            doc.set_archive_for(identifier, &archive).unwrap();
+            renamed += 1;
+        }
+    }
+    assert_eq!(
+        renamed,
+        RENAMED.len(),
+        "every renamed role was found to rename back"
+    );
+
+    doc.add_table("page 1", "Zahlen", 3, 2).unwrap();
+    assert_eq!(doc.tables().len(), 1);
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+}
+
+/// **The acceptance test for the look: Numbers paints the header row.**
+/// Off unless `IWORK_APP_CHECK=1`.
+#[test]
+fn numbers_draws_a_table_from_nothing_with_a_shaded_bold_header() {
+    if std::env::var("IWORK_APP_CHECK").as_deref() != Ok("1") {
+        eprintln!("IWORK_APP_CHECK is not 1 — skipping the cell-look oracle");
+        return;
+    }
+    let mut doc = Document::new_spreadsheet("Blatt", "Tabelle", 3, 3).unwrap();
+    let mut table = doc.table_mut("Tabelle").unwrap();
+    table
+        .set_block("A1", &[vec!["Region", "Einheiten", "Ertrag"]])
+        .unwrap();
+    table.set("A2", "Zürich").unwrap();
+    table.set("B2", 1240).unwrap();
+    table.set("C2", 184_300).unwrap();
+
+    let out = std::env::temp_dir().join("iwork-look.numbers");
+    let _ = std::fs::remove_file(&out);
+    doc.save(&out).unwrap();
+
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/cell-look-oracle.sh");
+    let output = std::process::Command::new(&script)
+        .arg(&out)
+        .output()
+        .unwrap_or_else(|e| panic!("{}: {e}", script.display()));
+    assert!(
+        output.status.success(),
+        "Numbers would not answer:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let answer = String::from_utf8_lossy(&output.stdout).to_string();
+    let cell = |name: &str| -> Vec<String> {
+        answer
+            .lines()
+            .map(|line| line.split('\t').map(str::to_string).collect::<Vec<_>>())
+            .find(|f| {
+                f.first().map(String::as_str) == Some("cell")
+                    && f.get(1).map(String::as_str) == Some(name)
+            })
+            .unwrap_or_else(|| panic!("no cell {name} in:\n{answer}"))
+    };
+    // cell, name, background, font name, font size, text colour
+    let header = cell("B1");
+    let body = cell("B2");
+    assert_ne!(header[2], "none", "the header row is painted: {header:?}");
+    assert!(
+        header[3].contains("Bold"),
+        "the header row is set in the bold face: {header:?}"
+    );
+    assert!(
+        !body[3].contains("Bold"),
+        "the body is set in the regular face: {body:?}"
+    );
+    let _ = std::fs::remove_file(&out);
 }
 
 /// **`override_count` decides whether the app keeps the bag at all.**

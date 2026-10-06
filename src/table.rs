@@ -4236,7 +4236,9 @@ fn borrow_table_styles(document: &crate::Document) -> Option<crate::create::Tabl
         .iter()
         .map(|number| at(*number))
         .collect::<Option<Vec<u64>>>()?,
-        text: [24, 25, 26, 27, 30, 65, 66, 67]
+        // In `create::TEXT_AREAS` order: body, header row, header column,
+        // footer, then the five label levels.
+        text: [24, 25, 26, 27, 76, 77, 78, 79, 80]
             .iter()
             .map(|number| at(*number))
             .collect::<Option<Vec<u64>>>()?,
@@ -4267,26 +4269,37 @@ fn table_styles_by_name(document: &crate::Document) -> Option<crate::create::Tab
             })
             .map(|(_, object)| object.identifier)
     };
-    Some(crate::create::TableStyles {
-        table: named("table-0-tableStyle", crate::create::TYPE_TABLE_STYLE)?,
-        cells: crate::create::CELL_AREAS
-            .iter()
-            .map(|area| {
-                named(
-                    &format!("tableCell-0-{area}"),
-                    crate::create::TYPE_CELL_STYLE,
-                )
-            })
-            .collect::<Option<Vec<u64>>>()?,
-        text: crate::create::TEXT_AREAS
-            .iter()
-            .map(|area| {
-                named(
-                    &format!("text-0-paragraphstyle-{area}"),
-                    crate::style::TYPE_PARAGRAPH_STYLE,
-                )
-            })
-            .collect::<Option<Vec<u64>>>()?,
+    // The names this version writes, and failing those the ones an older
+    // version wrote — a document made before the roles were renamed still has
+    // to take a table.
+    let set = |cells: &[&str], text: &[&str]| -> Option<crate::create::TableStyles> {
+        Some(crate::create::TableStyles {
+            table: named("table-0-tableStyle", crate::create::TYPE_TABLE_STYLE)?,
+            cells: cells
+                .iter()
+                .map(|area| {
+                    named(
+                        &format!("tableCell-0-{area}"),
+                        crate::create::TYPE_CELL_STYLE,
+                    )
+                })
+                .collect::<Option<Vec<u64>>>()?,
+            text: text
+                .iter()
+                .map(|area| {
+                    named(
+                        &format!("text-0-paragraphstyle-{area}"),
+                        crate::style::TYPE_PARAGRAPH_STYLE,
+                    )
+                })
+                .collect::<Option<Vec<u64>>>()?,
+        })
+    };
+    set(crate::create::CELL_AREAS, crate::create::TEXT_AREAS).or_else(|| {
+        set(
+            crate::create::LEGACY_CELL_AREAS,
+            crate::create::LEGACY_TEXT_AREAS,
+        )
     })
 }
 

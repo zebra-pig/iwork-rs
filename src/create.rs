@@ -672,14 +672,10 @@ pub(crate) fn pages(paper: Paper) -> Blueprint {
     blueprint.add(
         styles,
         TYPE_TABLE_STYLE,
-        named_style("table-0-tableStyle", stylesheet),
+        table_style("table-0-tableStyle", stylesheet),
     );
-    for area in CELL_AREAS {
-        blueprint.add(
-            styles,
-            TYPE_CELL_STYLE,
-            cell_style(&format!("tableCell-0-{area}"), stylesheet),
-        );
+    for index in 0..CELL_AREAS.len() {
+        blueprint.add(styles, TYPE_CELL_STYLE, cell_style_for(index, stylesheet));
     }
     for area in TEXT_AREAS {
         blueprint.add(
@@ -1223,7 +1219,7 @@ pub(crate) fn numbers(
     let table_style = blueprint.add(
         style_component,
         TYPE_TABLE_STYLE,
-        named_style("table-0-tableStyle", stylesheet),
+        table_style("table-0-tableStyle", stylesheet),
     );
     named.push(("table-0-tableStyle".to_string(), table_style));
 
@@ -1234,12 +1230,13 @@ pub(crate) fn numbers(
     // field that points at them; the archives themselves differ only in name.
     let table_cells: Vec<u64> = CELL_AREAS
         .iter()
-        .map(|area| {
+        .enumerate()
+        .map(|(index, area)| {
             let identifier = format!("tableCell-0-{area}");
             let style = blueprint.add(
                 style_component,
                 TYPE_CELL_STYLE,
-                cell_style(&identifier, stylesheet),
+                cell_style_for(index, stylesheet),
             );
             named.push((identifier, style));
             style
@@ -1500,7 +1497,7 @@ struct TableParts<'a> {
     table_style: u64,
     /// Seventeen, in the order [`CELL_AREAS`] names them.
     cell_styles: &'a [u64],
-    /// Eight, in the order [`TEXT_AREAS`] names them.
+    /// Nine, in the order [`TEXT_AREAS`] names them.
     text_styles: &'a [u64],
     /// `TST.ColumnRowUIDMapArchive` — the stable identity of every row and
     /// column. A table without one is a table nothing can insert a row into,
@@ -1522,6 +1519,30 @@ pub(crate) const CELL_AREAS: &[&str] = &[
     "categoryLevel3Row",
     "categoryLevel4Row",
     "categoryLevel5Row",
+    "labelLevel1Row",
+    "labelLevel2Row",
+    "labelLevel3Row",
+    "labelLevel4Row",
+    "labelLevel5Row",
+    "pivotBodySummaryRow",
+    "pivotBodySummaryColumn",
+    "pivotHeaderColumnSummary",
+];
+
+/// The names this crate gave nine of those roles before it had the app's own
+/// schema to read them from: `group_level` where the model says `label_level`,
+/// and three pivot names no document carries. A document an older version
+/// wrote still has them, and a table has to be addable to it.
+pub(crate) const LEGACY_CELL_AREAS: &[&str] = &[
+    "bodyStyle",
+    "headerRowStyle",
+    "headerColumnStyle",
+    "footerRowStyle",
+    "categoryLevel1Row",
+    "categoryLevel2Row",
+    "categoryLevel3Row",
+    "categoryLevel4Row",
+    "categoryLevel5Row",
     "groupLevel1Style",
     "groupLevel2Style",
     "groupLevel3Style",
@@ -1532,10 +1553,73 @@ pub(crate) const CELL_AREAS: &[&str] = &[
     "pivotTotalStyle",
 ];
 
-/// The same for the text in those areas.
+/// What each cell role is painted with in the table Numbers makes by default,
+/// read out of `numbers-values` channel for channel, in [`CELL_AREAS`] order.
+/// `None` is a fill that is present and paints nothing, which is what a body
+/// and a footer have. All of them are neutral greys but the header row, which
+/// is very slightly green — copied as it is rather than rounded to a grey.
+pub(crate) const CELL_FILLS: &[Option<[f32; 3]>] = &[
+    None,
+    Some([0.743_613_24, 0.753_780_4, 0.750_691_7]),
+    Some([0.862_404_9, 0.862_404_9, 0.862_404_9]),
+    None,
+    Some([0.827_908_7, 0.827_908_7, 0.827_908_7]),
+    Some([0.793_412_5, 0.793_412_5, 0.793_412_5]),
+    Some([0.758_916_3, 0.758_916_3, 0.758_916_3]),
+    Some([0.724_420_1, 0.724_420_1, 0.724_420_1]),
+    Some([0.689_923_9, 0.689_923_9, 0.689_923_9]),
+    Some([0.827_908_7, 0.827_908_7, 0.827_908_7]),
+    Some([0.793_412_5, 0.793_412_5, 0.793_412_5]),
+    Some([0.758_916_3, 0.758_916_3, 0.758_916_3]),
+    Some([0.724_420_1, 0.724_420_1, 0.724_420_1]),
+    Some([0.689_923_9, 0.689_923_9, 0.689_923_9]),
+    Some([0.892_971_9, 0.892_971_9, 0.892_971_9]),
+    Some([0.960_184_9, 0.960_184_9, 0.960_184_9]),
+    Some([0.827_908_7, 0.827_908_7, 0.827_908_7]),
+];
+
+/// The cell style for the role at `index` of [`CELL_AREAS`].
+pub(crate) fn cell_style_for(index: usize, stylesheet: u64) -> Message {
+    let area = CELL_AREAS[index];
+    // `text_wrap`: on everywhere but the category and label rows.
+    let wraps = !(area.starts_with("categoryLevel") || area.starts_with("labelLevel"));
+    cell_style(
+        &format!("tableCell-0-{area}"),
+        stylesheet,
+        CELL_FILLS[index],
+        wraps,
+    )
+}
+
+/// The text in those areas, in the order the model's slots take them:
+/// `body_text_style` (24), `header_row_text_style` (25),
+/// `header_column_text_style` (26), `footer_row_text_style` (27), then the five
+/// `label_level_N_text_style`s (76–80).
+///
+/// **The body comes first.** This list used to open with the header, while the
+/// model wrote index 0 into slot 24 — so a table made here pointed its body at
+/// the bold style and its header rows at the plain one. Nobody saw it, because
+/// the styles carried no `override_count` and the app was discarding them.
 pub(crate) const TEXT_AREAS: &[&str] = &[
-    "Table Header",
     "Table Body",
+    "Table Header",
+    "Table Header Column",
+    "Table Footer",
+    "Table Label 1",
+    "Table Label 2",
+    "Table Label 3",
+    "Table Label 4",
+    "Table Label 5",
+];
+
+/// The same nine before the body came first, for a document an older version
+/// wrote. Positions follow [`TEXT_AREAS`], so what was misnamed is put right
+/// on the way in: the old "Table Body" is the plain style, whichever slot the
+/// old model had it in.
+pub(crate) const LEGACY_TEXT_AREAS: &[&str] = &[
+    "Table Body",
+    "Table Header",
+    "Table Header",
     "Table Footer",
     "Table Group 1",
     "Table Group 2",
@@ -1603,12 +1687,14 @@ fn table_model(parts: TableParts) -> Message {
         reference(20, parts.cell_styles[2]),
         reference(21, parts.cell_styles[3]),
         varint(22, 1),
+        // `body_text_style`, then the header row's, the header column's and
+        // the footer's — the schema's names for 24 to 27.
         reference(24, parts.text_styles[0]),
         reference(25, parts.text_styles[1]),
-        reference(26, parts.text_styles[1]),
-        reference(27, parts.text_styles[1]),
+        reference(26, parts.text_styles[2]),
+        reference(27, parts.text_styles[3]),
         varint(29, 1),
-        reference(30, parts.text_styles[1]),
+        reference(30, parts.text_styles[0]),
         varint(31, 0),
         varint(32, 1),
         double(33, 0.0),
@@ -1637,11 +1723,11 @@ fn table_model(parts: TableParts) -> Message {
         reference(73, parts.cell_styles[11]),
         reference(74, parts.cell_styles[12]),
         reference(75, parts.cell_styles[13]),
-        reference(76, parts.text_styles[3]),
-        reference(77, parts.text_styles[4]),
-        reference(78, parts.text_styles[5]),
-        reference(79, parts.text_styles[6]),
-        reference(80, parts.text_styles[7]),
+        reference(76, parts.text_styles[4]),
+        reference(77, parts.text_styles[5]),
+        reference(78, parts.text_styles[6]),
+        reference(79, parts.text_styles[7]),
+        reference(80, parts.text_styles[8]),
         nested(
             81,
             vec![
@@ -1722,9 +1808,12 @@ fn table_text_style(identifier: &str, name: &str, stylesheet: u64, list: u64) ->
                 float(property::FONT_SIZE[1], 10.0),
                 string(
                     property::FONT_NAME[1],
-                    match name.contains("Header") {
-                        true => "HelveticaNeue-Bold",
-                        false => "HelveticaNeue",
+                    // Numbers' "Table Style 2" is the body and the only
+                    // regular face; its header rows, header columns, footers
+                    // and labels are all set in the bold one.
+                    match name == "Table Body" {
+                        true => "HelveticaNeue",
+                        false => "HelveticaNeue-Bold",
                     },
                 ),
                 nested(property::FONT_COLOR[1], black()),
@@ -1749,8 +1838,26 @@ fn named_style(identifier: &str, stylesheet: u64) -> Message {
     )])
 }
 
-/// `TST.CellStyleArchive` — a cell's padding and its fill.
-fn cell_style(identifier: &str, stylesheet: u64) -> Message {
+/// `TST.CellStyleArchive` — a cell's fill, its wrap, its vertical alignment and
+/// its padding, which are the four properties every one Numbers writes carries.
+fn cell_style(identifier: &str, stylesheet: u64, fill: Option<[f32; 3]>, wraps: bool) -> Message {
+    // `TSD.FillArchive { color = 1 }`, or the empty archive that is a fill
+    // present and painting nothing.
+    let fill = match fill {
+        Some([red, green, blue]) => vec![nested(
+            1,
+            vec![
+                varint(1, 1),
+                float(3, red),
+                float(4, green),
+                float(5, blue),
+                float(6, 1.0),
+                varint(12, 1),
+                float(13, 1.0),
+            ],
+        )],
+        None => Vec::new(),
+    };
     message(vec![
         nested(1, vec![string(2, identifier), reference(5, stylesheet)]),
         // `10 = 4` is what every `TST.CellStyleArchive` Numbers writes carries
@@ -1761,8 +1868,8 @@ fn cell_style(identifier: &str, stylesheet: u64) -> Message {
         nested(
             11,
             vec![
-                bytes(1, Vec::new()),
-                varint(3, 1),
+                nested(1, fill),
+                varint(3, u64::from(wraps)),
                 varint(8, 0),
                 // The four insets Numbers gives a cell, in points.
                 nested(
@@ -1771,6 +1878,95 @@ fn cell_style(identifier: &str, stylesheet: u64) -> Message {
                 ),
             ],
         ),
+    ])
+}
+
+/// `TSD.StrokeArchive` — a solid black line `width` points wide, field for
+/// field the stroke Numbers writes into a table style: colour, width, butt
+/// cap, miter join, a miter limit of 4, and the solid pattern with its six
+/// unused dash slots.
+fn table_stroke(number: u32, width: f32) -> Field {
+    let mut pattern = vec![varint(1, 1), float(2, 0.0), varint(3, 0)];
+    pattern.extend((0..6).map(|_| float(4, 0.0)));
+    nested(
+        number,
+        vec![
+            nested(1, black()),
+            float(2, width),
+            varint(3, 0),
+            varint(4, 0),
+            float(5, 4.0),
+            nested(6, pattern),
+        ],
+    )
+}
+
+/// `TST.TableStyleArchive` — what draws a table *as a table*.
+///
+/// This was a name and a stylesheet reference and nothing else, and a table
+/// made here was drawn as text floating on the canvas: no gridlines, no
+/// border, nothing between a header and the rows under it. Those are not
+/// properties of cells. They are `TST.TableStylePropertiesArchive`, and the
+/// schema carved out of 15.3.1 names every one — `h_strokes_visible`,
+/// `v_strokes_visible`, `table_border_visible`, a `TSD.StrokeArchive` for each
+/// separator, border and gridline by role.
+///
+/// What is written is the table Numbers makes by default, value for value
+/// from `numbers-values`: gridlines and borders on at 0.35 pt, the three
+/// separators at 0.75 pt, banding off with its grey ready, Helvetica Neue as
+/// the family. What is **not** written is the stroke preset list (field 32,
+/// 4 037 bytes of the menu's presets) and the category and pivot strokes
+/// (62–92), which draw nothing in a table that has no categories and is not a
+/// pivot. The count says how many properties are here, as it must.
+fn table_style(identifier: &str, stylesheet: u64) -> Message {
+    let grey = |level: f32| {
+        vec![
+            varint(1, 1),
+            float(3, level),
+            float(4, level),
+            float(5, level),
+            float(6, 1.0),
+            varint(12, 1),
+            float(13, 1.0),
+        ]
+    };
+    let mut properties = vec![
+        // banded_rows, and the fill a banded row would take
+        varint(1, 0),
+        nested(2, vec![nested(1, grey(0.960_184_9))]),
+        // behaves_like_spreadsheet, auto_resize
+        varint(21, 1),
+        varint(22, 1),
+        // v_strokes_visible, h_strokes_visible — the gridlines
+        varint(33, 1),
+        varint(34, 1),
+        // hr_, hc_ and footer_separator_visible
+        varint(35, 1),
+        varint(36, 1),
+        varint(37, 1),
+        // table_border_visible
+        varint(38, 1),
+        // master_font_family
+        string(41, "HelveticaNeue"),
+        // table_hc_, table_hr_ and table_footer_divider_visible
+        varint(42, 1),
+        varint(43, 1),
+        varint(44, 1),
+        // writing_direction
+        varint(45, 0),
+    ];
+    // 46–61: separator, border, horizontal and vertical for the header row,
+    // the header column and the footer row, then the body's two borders and
+    // two gridlines. The separators are the heavier line.
+    for number in 46..=61u32 {
+        let separator = matches!(number, 46 | 51 | 54);
+        properties.push(table_stroke(number, if separator { 0.75 } else { 0.35 }));
+    }
+    let count = properties.len() as u64;
+    message(vec![
+        nested(1, vec![string(2, identifier), reference(5, stylesheet)]),
+        varint(crate::style::OVERRIDE_COUNT[0], count),
+        nested(11, properties),
     ])
 }
 
@@ -2157,13 +2353,13 @@ pub(crate) fn keynote(slide_size: (f32, f32)) -> Blueprint {
     blueprint.add(
         style_component,
         TYPE_TABLE_STYLE,
-        named_style("table-0-tableStyle", stylesheet),
+        table_style("table-0-tableStyle", stylesheet),
     );
-    for area in CELL_AREAS {
+    for index in 0..CELL_AREAS.len() {
         blueprint.add(
             style_component,
             TYPE_CELL_STYLE,
-            cell_style(&format!("tableCell-0-{area}"), stylesheet),
+            cell_style_for(index, stylesheet),
         );
     }
     for area in TEXT_AREAS {
@@ -2655,7 +2851,7 @@ pub(crate) struct TableStyles {
     pub(crate) table: u64,
     /// Seventeen, in the order [`CELL_AREAS`] names them.
     pub(crate) cells: Vec<u64>,
-    /// Eight, in the order [`TEXT_AREAS`] names them.
+    /// Nine, in the order [`TEXT_AREAS`] names them.
     pub(crate) text: Vec<u64>,
 }
 
