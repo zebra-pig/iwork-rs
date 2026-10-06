@@ -682,6 +682,51 @@ text model uses, being NSString-backed, and an emoji therefore counts as two.
 An edit may not land between the halves of a surrogate pair; the result would be
 two unpaired surrogates, which is not a string. `Error::SplitSurrogate` says so.
 
+### The paragraph-style table has an entry for every paragraph
+
+`table_para_style` (field 5) is **not a run table**. Its neighbours — the
+list-style, para-data and bidi tables — are routinely sparse: one entry at 0
+for a storage of any length. This one never is. Two paragraphs sharing a style
+is the ordinary case and each still has its entry:
+
+```
+pages-styled    body   4 paragraphs    4 entries
+pages-toc       body  12 paragraphs   12 entries
+pages-numbering body  16 paragraphs   16 entries
+```
+
+and so on through every storage of all 33 documents, Pages, Numbers and Keynote
+alike, with no exception. An entry may carry no object — `{1: 22}` and nothing
+else, the format's "whatever was in force here", which is what Pages writes for
+a paragraph it adds — but it is there. (One more may sit at the very end of the
+text, the slot the style of a paragraph not yet typed comes from.)
+
+What a table that has lost that shape costs is worth setting down, because the
+symptom is three steps from the cause. A storage of three paragraphs written
+with `[(0, Title), (10, Body)]`:
+
+1. Pages discards the table on opening and rebuilds it,
+   `[(0, default), (10, nil), (27, nil)]`.
+2. `Title` is now referenced by nothing, and the stylesheet's
+   `can_cull_styles` removes it on the next save.
+3. If the stylesheet identifies no `paragraph-style-default` (§"Stylesheets"),
+   the default is one Pages invents.
+
+So every paragraph is drawn in a style the document never contained, the style
+that was applied no longer exists, and nothing was reported at any point. The
+same document with one entry per paragraph is drawn as written: asked for the
+size of each paragraph, Pages answers `30.0  11.0  11.0`.
+
+The edits that have to keep the shape are the ones that look like run edits:
+
+- **applying a style to a range** sets the entry of each paragraph the range
+  touches and coalesces nothing. The paragraph *after* the range needs care: if
+  its entry carries no object it was inheriting, and what it inherits from has
+  just changed, so it is given the reference it had;
+- **deleting a style** empties its entries rather than dropping them;
+- **creating a storage with several lines**, or writing several into an empty
+  one, writes an entry per line.
+
 ### Smart fields and hyperlinks — `table_smartfield` (field 11)
 
 Every smart field wraps a `TSWP.SmartFieldArchive`, which in 15.3.1 is one
@@ -916,6 +961,54 @@ The Pages sample's stylesheet carries 327 plain references and 267 keyed
 entries. Types in the 5000s (TSS) also appear and are stylesheets of narrower
 scope — six per document in the samples, attached to charts.
 
+Three more top-level fields matter to a writer:
+
+```
+6       can_cull_styles                         1 in every document here
+7, 8    {1: style id…, 2: {identifier, style}…} the same two lists again, for
+                                                styles newer app versions added
+```
+
+**`can_cull_styles` means what it says.** A style nothing refers to is removed
+when the app saves. That is harmless on its own and is how a second fault
+becomes a missing style: break the table that pointed at a style (§"The
+paragraph-style table"), and the style is gone on the next save.
+
+**One identifier is not optional: `paragraph-style-default`.** Every Pages
+stylesheet in the corpus has a keyed entry under that name, beside
+`character-style-null` and `column-style-default`. A stylesheet without it
+still opens — and Pages mints the default itself, a parentless style called
+"Free Form", 12 pt Helvetica, and draws in *that* every paragraph that has no
+style of its own. Measured: the same document with the entry pointing at its
+`Body` style is drawn in 11 pt Helvetica Neue, and without it in 12 pt
+Helvetica.
+
+### `override_count` — the field the apps believe
+
+Every style archive carries, beside its property bag at field 11 (and 12, for
+a paragraph style), a count at **field 10**: `TSS`'s `override_count`, the
+number of properties the style sets. It reads like bookkeeping. It is not:
+
+> **A style whose bag holds properties while its count says zero — or says
+> nothing — is treated as overriding nothing, and the app deletes the bag when
+> it saves.**
+
+Measured three times, in three archives, by making the app save the file and
+reading what it wrote:
+
+| archive | what was written | what came back |
+|---|---|---|
+| `TSWP.ShapeStyleArchive` variation (Keynote) | a fill, a stroke, an opacity; count 0 | the three properties gone |
+| `TST.CellStyleArchive` (Numbers) | a fill and four insets; no count | field 11 deleted from all seventeen cell styles of the table — 91 bytes down to 30 |
+| `TSWP.ParagraphStyleArchive` (Pages) | a font, a size, a colour; no count | kept, and the count *corrected* from 7 to 6 |
+
+The last row is the useful one for a writer: Pages recounts a count it
+disagrees with rather than discarding the bag, so the count has to be present
+and plausible, not exact. What it counts is the entries of the bags — a
+`TST.CellStyleArchive` with fill, wrap, vertical alignment and padding says 4,
+a variation carrying one property says 1, a table style with 63 says 63 — and
+a writer that derives it from the bag cannot get it wrong.
+
 > A bare `{1: id}` reference is not by itself proof of membership in a list.
 > `KN.SlideArchive` field 31 holds five of them, one per outline level, and it
 > is a positional array: adding an entry shifts the mapping rather than listing
@@ -956,6 +1049,23 @@ tree of `KN.SlideNodeArchive` (4), each naming a `KN.SlideArchive` (5), which is
 also what a slide layout is. **Each slide is its own component and its own
 `Index/Slide*.iwa`**, and each layout its own `Index/TemplateSlide-*.iwa`. The
 whole of it is §13.
+
+**A slide carries its own placeholders — one for every placeholder its layout
+defines.** A `KN.SlideArchive` Keynote writes for a slide on a "Title &
+Bullets" layout has, among its 23 fields, `5` (title), `6` (body), `20` (slide
+number) and often `30` (object), each a reference to a `KN.PlaceholderArchive`
+*in the slide's own stream*. Every one of the 83 slides in this corpus has a
+placeholder for each of those roles its layout has. They are copies: the
+placeholder, its text storage and whatever else hangs off it in the layout's
+stream, with the layout's identifier replaced by the slide's.
+
+A slide without them is not refused and does not crash. Keynote opens the
+document and saves it — and until it has, cannot answer for the slide: `text
+items of slide 2` fails with `AppleEvent handler failed (-10000)` and
+`default title item` is `missing value`. On saving it repairs the slide by
+minting the missing placeholders itself. A deck made from nothing hides the
+whole thing, because its one layout defines no slide-number placeholder; every
+layout in every bundled theme defines one.
 
 Two things worth knowing before reading a deck. **A deck's slides may hold no
 text at all**: in `keynote-charts` every one of the slides' own storages is
@@ -1275,6 +1385,106 @@ Verified by Numbers: `CHF 184300.00` and `€ 1234.50` in one table, both named
 `currency` by the app — and a formula cell given a currency value is drawn as
 money too, so a money column can carry its own total
 (`tests/formats.rs::numbers_draws_written_money_as_money`).
+
+### How a table looks
+
+Three things decide it, and only one of them is about cells.
+
+**The table style — `TST.TableStyleArchive` (6003).** Gridlines, the border
+and the line under a header row are not properties of cells. They are
+`TST.TableStylePropertiesArchive`, the table style's bag, and the schema names
+every one:
+
+```
+1   banded_rows               2   banded_fill           21  behaves_like_spreadsheet
+22  auto_resize               33  v_strokes_visible     34  h_strokes_visible
+35  hr_separator_visible      36  hc_separator_visible  37  footer_separator_visible
+38  table_border_visible      41  master_font_family    42–44 the three dividers
+45  writing_direction         32  stroke_preset_list    (the menu's presets)
+
+46–49  header row:    separator, border, horizontal, vertical     TSD.StrokeArchive
+50–53  header column: border, separator, horizontal, vertical     each
+54–57  footer row:    separator, border, horizontal, vertical
+58–61  body:          horizontal border, vertical border, horizontal, vertical
+62–92  category, label and pivot strokes
+```
+
+The table Numbers makes by default has 63 of them and `override_count = 63`:
+gridlines and border on, every stroke solid black at 0.35 pt except the three
+separators at 0.75, banding off with a 96 % grey ready. A table style that is a
+name and a stylesheet reference — which is what this crate wrote — is a table
+drawn as text on the canvas.
+
+**The area styles.** `TST.TableModelArchive` names a cell style and a text
+style for each *area* of the table, and its slots are worth having by name
+because their order is not the obvious one:
+
+```
+18 body_cell_style     19 header_row_style        20 header_column_style     21 footer_row_style
+24 body_text_style     25 header_row_text_style   26 header_column_text_style 27 footer_row_text_style
+60–64 category_level_N_style        65–69 category_level_N_text_style
+71–75 label_level_N_style           76–80 label_level_N_text_style
+87 pivot_body_summary_row_style  88 pivot_body_summary_column_style  89 pivot_header_column_summary_style
+```
+
+In Numbers' own table the body's text style is the regular face ("Table Style
+2") and the header row's, header column's and footer's are the bold one ("Table
+Style 1"). The cell styles are named by role in the stylesheet —
+`tableCell-0-bodyStyle`, `-headerRowStyle`, `-headerColumnStyle`,
+`-footerRowStyle`, `-categoryLevelNRow`, `-labelLevelNRow`,
+`-pivotBodySummaryRow`, `-pivotBodySummaryColumn`, `-pivotHeaderColumnSummary`
+— and each carries four properties: `cell_fill` (1), `text_wrap` (3),
+`vertical_alignment` (8) and `padding` (9). A body cell's fill is *present and
+empty*, which paints nothing and is not the same as absent.
+
+**The style network — `TST.TableStyleNetworkArchive` (6247).** Every document
+the apps write carries six `TST.TableStylePresetArchive`s (6008) — the six
+table styles the toolbar offers — each pointing (field 3) at a network that
+names, slot by slot, everything above for that preset:
+
+```
+1–4   body / header row / header column / footer text style
+5–8   body / header row / header column / footer cell style
+9     table style        10, 11  table name styles        12  preset_id
+13–17 category text      18–22 category cell      23–27 label text      28–32 label cell
+33–35 the three pivot cell styles
+```
+
+102 cell styles, six networks — in a Numbers document, a blank Pages document
+and every Keynote theme, whether or not there is a table anywhere. That is
+where the styles for a *new* table come from when the document has no table to
+copy them from: the network for preset 0.
+
+### How one cell looks
+
+A cell carries no colour and no weight. Its record carries two keys — flag
+`0x20` `cell_style_id`, flag `0x40` `text_style_id` — into **one** list,
+`DataStore.styleTable` (field 5, a `TableDataList` of type 4), whose entries
+are `{1: key, 2: count, 4: -> a style}`. A cell with neither key is drawn in
+its area's styles.
+
+A cell that differs from its area names a **variation** — the area's style as
+parent, the variation flag, and only what differs. Verbatim from
+`numbers-rules`:
+
+```
+TST.CellStyleArchive                    TSWP.ParagraphStyleArchive
+{ 1: { 3: -> parent, 4: 1,              { 1: { 3: -> parent, 4: 1,
+       5: -> stylesheet },                     5: -> stylesheet },
+  10: 1,                                  10: 2,
+  11: { 8: 1 } }                          11: { 3: 15.0 }, 12: { 43: 1 } }
+```
+
+Cells that look alike share one variation and one entry, and **the entry's
+count is the number of cells naming it, by either key** — 36 entries across
+the 37 tables of the corpus, every one exact. It is the rule strings and
+formats keep, and it has the same failure: a count that is wrong is a list the
+app's own bookkeeping disagrees with.
+
+**An empty cell can have a look.** The record is then bare — type 0, the style
+key, nothing else (`flags = 0x20`). 70 cells in three tables of the corpus are
+exactly that. It follows that emptying a styled cell does not delete its
+record: the value goes and the look stays.
 
 ### Writing a row's height and a column's width
 
@@ -2147,6 +2357,37 @@ Leaf shapes, as observed:
   13: headroom}`, channels 0–1. Always write `model`, `a` and the space: a
   colour serialised without alpha has been observed to crash Pages.
 
+### Writing a look: a variation of the object's own
+
+A drawable's style is very often **shared**. A document from nothing points
+every shape at one of the theme's presets — `line-style-preset-0` and its
+siblings — and a document the app wrote does the same until somebody changes
+one object. Painting the shared style is the obvious edit and the wrong one,
+for a reason that only a save shows: Keynote regenerates its presets from the
+theme, and a colour written into one is gone from the file it writes back.
+
+What the app does when one object is changed is give that object a style of its
+own — a **variation**:
+
+```
+TSWP.ShapeStyleArchive                      (a media style is the same, one
+{ 1: { 1: { 3: -> the style it varies,       level up and with no fill)
+            4: 1,                            "this is a variation"
+            5: -> the stylesheet },
+       10: 2,                               two properties differ
+       11: { 3: 0.5, 5: { 1: 0.4 } } },     and these are they
+  10: 2, 11: <empty> }
+```
+
+It carries only what differs, names its parent, and lives beside it in the
+stylesheet; the drawable's style reference is repointed at it. A second change
+to the same object edits the variation it already has. The count is
+§"`override_count`", and a variation with a full bag and a count of zero is the
+first of the three cases measured there.
+
+The reference from the drawable now leaves its component, so it has to be
+declared (§"Component index").
+
 ### Writing geometry
 
 `iwork set-geometry` takes the rectangle the *app* reports and converts it back:
@@ -2299,6 +2540,17 @@ Two things follow that a writer must know.
 names a path inside the app's own bundle — `ginger/02_theme/aa043252_750x683`.
 The photo in the Pages report fixture is one: the package holds only its
 thumbnail. There is nothing to replace in place.
+
+**The registry is keyed by content: one stored file per distinct set of
+bytes.** A `DataInfo` carries the SHA-1 of its file, and no two entries of any
+document in the corpus share one — a picture used on eight slides is one
+`Data/` file with eight users. A package that holds the same bytes twice under
+two names is not merely wasteful: **Keynote aborts on it**, inside
+`TSPersistence`, before it has drawn anything and without a word to the user
+(`EXC_CRASH (SIGABRT)`, `abort() called`). Two *different* pictures on the same
+two slides open normally, so it is the duplicate content and not the count. A
+writer adding an image looks the digest up first and takes another reference
+to the entry it finds.
 
 **The registry is refcounted, exactly like a table's interned string list.**
 Replacing an image in Keynote twice left the first replacement's `DataInfo`
