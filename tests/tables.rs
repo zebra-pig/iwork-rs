@@ -1380,3 +1380,46 @@ fn numbers_reports_a_written_merge() {
     }
     let _ = std::fs::remove_file(&out);
 }
+
+/// A table added to a blank document **Pages** made takes that document's own
+/// table styles — the ones its style network names for preset 0 — and not
+/// whichever cell styles happen to come first.
+#[test]
+fn a_table_added_to_a_document_pages_made_takes_its_preset_s_styles() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/generated/pages-plain.pages");
+    if !path.exists() {
+        eprintln!("no pages-plain.pages — skipping (run scripts/make-fixtures.sh)");
+        return;
+    }
+    let mut doc = iwork::Document::open(&path).unwrap();
+    assert!(
+        doc.tables().is_empty(),
+        "the fixture has no table to copy from"
+    );
+    let table = doc.add_table("page 1", "Zahlen", 3, 2).unwrap();
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+
+    let made = doc
+        .tables()
+        .into_iter()
+        .find(|t| t.identifier == table)
+        .unwrap();
+    let model = doc.archive(made.model).unwrap();
+    let identifier = |slot: u32| -> String {
+        let style = iwork::style::reference_at(&model, &[slot, 1]).unwrap();
+        iwork::style::string_at(&doc.archive(style).unwrap(), &[1, 2]).unwrap_or_default()
+    };
+    assert_eq!(identifier(3), "table-0-tableStyle");
+    assert_eq!(identifier(19), "tableCell-0-headerRowStyle");
+    assert!(
+        identifier(24).ends_with("Table Style 2"),
+        "{}",
+        identifier(24)
+    );
+    assert!(
+        identifier(25).ends_with("Table Style 1"),
+        "{}",
+        identifier(25)
+    );
+}

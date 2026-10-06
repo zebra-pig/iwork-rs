@@ -2060,3 +2060,120 @@ fn keynote_opens_a_themed_deck_this_crate_added_a_slide_to() {
     );
     let _ = std::fs::remove_file(&out);
 }
+
+/// **A table can be put on a deck built from one of Apple's themes.**
+///
+/// It could not: `add_table` answered "this document has no table to borrow
+/// styles from, and inventing a table style here would be a style the document
+/// never defined" for every theme, because no theme ships a table — while the
+/// same call worked on a deck made from nothing. The styles were there all
+/// along. Every document the apps write carries six table presets and, for
+/// each, a `TST.TableStyleNetworkArchive` naming the table style, the cell
+/// style and the text style of every area; the network for preset 0 is what
+/// the app gives a new table, and it is the document's own.
+#[test]
+fn a_table_goes_on_a_themed_deck_in_the_theme_s_own_styles() {
+    let Some(theme) = bundled_theme() else {
+        eprintln!("no bundled Keynote themes on this machine — skipping");
+        return;
+    };
+    let mut doc = Document::from_template(&theme).unwrap();
+    doc.add_slide(None).unwrap();
+    let index = doc.slides().len() - 1;
+    let table = doc
+        .slide_mut(index)
+        .unwrap()
+        .add_table("Quartal", 4, 3)
+        .unwrap();
+    let mut handle = doc.table_mut(table).unwrap();
+    handle
+        .set_block("A1", &[vec!["Region", "Einheiten", "Ertrag"]])
+        .unwrap();
+    handle.set("A2", "Zürich").unwrap();
+    handle.set("B2", 1240).unwrap();
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+
+    // The model's slots point at the theme's styles, preset 0's.
+    let made = doc
+        .tables()
+        .into_iter()
+        .find(|t| t.identifier == table)
+        .unwrap();
+    let model = doc.archive(made.model).unwrap();
+    let identifier = |slot: u32| -> String {
+        let style = iwork::style::reference_at(&model, &[slot, 1])
+            .unwrap_or_else(|| panic!("slot {slot} names no style"));
+        iwork::style::string_at(&doc.archive(style).unwrap(), &[1, 2]).unwrap_or_default()
+    };
+    assert_eq!(identifier(3), "table-0-tableStyle");
+    assert_eq!(identifier(18), "tableCell-0-bodyStyle");
+    assert_eq!(identifier(19), "tableCell-0-headerRowStyle");
+    assert!(
+        identifier(24).contains("paragraphstyle"),
+        "body_text_style is one of the theme's paragraph styles: {}",
+        identifier(24)
+    );
+    assert_ne!(
+        identifier(24),
+        identifier(25),
+        "the body and the header row are set differently"
+    );
+
+    // And one cell of it can be given a look of its own.
+    doc.table_mut(table)
+        .unwrap()
+        .fill(
+            "B2",
+            Some(iwork::drawable::Color {
+                red: 0.98,
+                green: 0.93,
+                blue: 0.82,
+                alpha: 1.0,
+            }),
+        )
+        .unwrap();
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+}
+
+/// Keynote opens it and reads the table's words back.
+/// Off unless `IWORK_APP_CHECK=1`.
+#[test]
+fn keynote_opens_a_themed_deck_with_a_table_this_crate_added() {
+    if std::env::var("IWORK_APP_CHECK").as_deref() != Ok("1") {
+        eprintln!("IWORK_APP_CHECK is not 1 — skipping the app round trip");
+        return;
+    }
+    let Some(theme) = bundled_theme() else {
+        eprintln!("no bundled Keynote themes on this machine — skipping");
+        return;
+    };
+    let mut doc = Document::from_template(&theme).unwrap();
+    doc.add_slide(None).unwrap();
+    let index = doc.slides().len() - 1;
+    let table = doc
+        .slide_mut(index)
+        .unwrap()
+        .add_table("Quartal", 3, 2)
+        .unwrap();
+    doc.table_mut(table)
+        .unwrap()
+        .set_block("A1", &[vec!["Rollmaterial", "Verfügbarkeit"]])
+        .unwrap();
+
+    let out = std::env::temp_dir().join("iwork-themed-table.key");
+    let _ = std::fs::remove_file(&out);
+    doc.save(&out).unwrap();
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/app-check.sh");
+    let output = std::process::Command::new(&script)
+        .arg(&out)
+        .arg("Rollmaterial")
+        .output()
+        .unwrap_or_else(|e| panic!("{}: {e}", script.display()));
+    assert!(
+        output.status.success(),
+        "Keynote would not read the table out of a themed deck:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = std::fs::remove_file(&out);
+}

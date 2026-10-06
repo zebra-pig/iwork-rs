@@ -4232,11 +4232,12 @@ fn borrow_table_styles(document: &crate::Document) -> Option<crate::create::Tabl
         .map(|(_, object)| object.identifier)
     else {
         // No table to copy the references from — which is every Pages document
-        // that has not had one yet. The styles themselves are still there: a
-        // blank Pages document the app makes carries 102 cell styles with not a
-        // table in sight, and one this crate makes carries the set it writes
-        // for a table, registered under the names below.
-        return table_styles_by_name(document);
+        // and every Keynote deck that has not had one yet. The styles are
+        // still there, and in a document the app made so is the thing that
+        // says which is which: see `table_styles_from_network`. A document
+        // this crate made has no network and carries the set it writes for a
+        // table, registered under the names `table_styles_by_name` looks for.
+        return table_styles_from_network(document).or_else(|| table_styles_by_name(document));
     };
     let archive = document.archive(model).ok()?;
     let at = |number: u32| {
@@ -4259,6 +4260,68 @@ fn borrow_table_styles(document: &crate::Document) -> Option<crate::create::Tabl
             .iter()
             .map(|number| at(*number))
             .collect::<Option<Vec<u64>>>()?,
+    })
+}
+
+/// `TST.TableStyleNetworkArchive`.
+const TYPE_STYLE_NETWORK: u32 = 6247;
+
+/// The styles a new table takes in a document the app made and nobody has put
+/// a table in yet, read from the document's own **style network**.
+///
+/// Every document the apps write carries six `TST.TableStylePresetArchive`s —
+/// the six table styles the toolbar offers — and each points at a
+/// `TST.TableStyleNetworkArchive` that names, slot by slot, the table style,
+/// the cell style of each area and the text style of each area that preset
+/// uses. A blank Pages document has them, and so does every Keynote theme:
+/// 102 cell styles, six networks, not a table in sight.
+///
+/// This crate used to answer "this document has no table to borrow styles
+/// from" for all of them, which made `add_table` unavailable on any deck built
+/// from one of Apple's themes while it worked on a deck made from nothing.
+/// The network for preset 0 — the first style in the menu, and what the app
+/// gives a new table — is the thing to borrow from, and it is the document's
+/// own.
+///
+/// The area slots are optional in the schema. One that is missing falls back
+/// to the body's, which is what the area would be drawn with anyway.
+fn table_styles_from_network(document: &crate::Document) -> Option<crate::create::TableStyles> {
+    let mut networks: Vec<(u64, Message)> = document
+        .objects()
+        .filter(|(_, object)| object.message_type() == TYPE_STYLE_NETWORK)
+        .filter_map(|(_, object)| {
+            Message::decode(object.payload())
+                .ok()
+                .map(|archive| (archive.varint(12).unwrap_or(u64::MAX), archive))
+        })
+        .collect();
+    // `preset_id` 0 if there is one, the lowest otherwise.
+    networks.sort_by_key(|(preset, _)| *preset);
+    let (_, network) = networks.into_iter().next()?;
+    let at = |number: u32| {
+        network
+            .bytes(number)
+            .and_then(reference)
+            .filter(|target| *target != 0)
+    };
+    let body_cell = at(5)?;
+    let body_text = at(1)?;
+    Some(crate::create::TableStyles {
+        table: at(9)?,
+        // In `create::CELL_AREAS` order: body, header row, header column,
+        // footer, five category levels, five label levels, three pivot areas.
+        cells: [
+            5, 6, 7, 8, 18, 19, 20, 21, 22, 28, 29, 30, 31, 32, 33, 34, 35,
+        ]
+        .iter()
+        .map(|number| at(*number).unwrap_or(body_cell))
+        .collect(),
+        // In `create::TEXT_AREAS` order: body, header row, header column,
+        // footer, five label levels.
+        text: [1, 2, 3, 4, 23, 24, 25, 26, 27]
+            .iter()
+            .map(|number| at(*number).unwrap_or(body_text))
+            .collect(),
     })
 }
 
@@ -4744,6 +4807,24 @@ pub struct CellText {
     /// Text colour, written to the font colour and to the fill inside the
     /// glyphs — the second being the one the app paints with.
     pub colour: Option<crate::drawable::Color>,
+    /// Horizontal alignment.
+    pub align: Option<Align>,
+}
+
+/// How a paragraph is ranged — `TSWP`'s `TextAlignmentType`, whose values the
+/// schema numbers and does not name. Right, centre and justified were probed
+/// (asked for, and read back as 1, 2 and 3); 4 is what every table text style
+/// in the corpus carries, the app's "automatic", which ranges text left and
+/// numbers right; 0 is the enum's first value and what a style with no
+/// alignment at all means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Align {
+    Left = 0,
+    Right = 1,
+    Centre = 2,
+    Justified = 3,
+    /// Text left, numbers right — what a table cell does unless told.
+    Automatic = 4,
 }
 
 impl CellText {

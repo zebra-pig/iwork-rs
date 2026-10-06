@@ -4208,7 +4208,7 @@ impl Document {
         // Field 11 is the cell's properties in a cell style and the character
         // properties in a text style; 12 is a text style's paragraph ones.
         let mut properties = bag(11);
-        let paragraph = bag(12);
+        let mut paragraph = bag(12);
         match look {
             CellLook::Fill(Some(colour)) => {
                 let mut fill = Message::default();
@@ -4238,6 +4238,9 @@ impl Document {
                         property::FONT_NAME[1],
                         Value::Bytes(font.as_bytes().to_vec()),
                     );
+                }
+                if let Some(align) = text.align {
+                    paragraph.set_in_order(property::ALIGNMENT[1], Value::Varint(align as u64));
                 }
                 if let Some(colour) = text.colour {
                     let ink = crate::drawable::colour_message(colour).encode();

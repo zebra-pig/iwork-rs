@@ -587,3 +587,35 @@ fn numbers_draws_the_look_of_one_cell() {
     assert_ne!(empty[2], "none", "an empty cell is painted too: {empty:?}");
     let _ = std::fs::remove_file(&out);
 }
+
+/// Alignment is a paragraph property, so it lands in the variation's second
+/// bag — the shape `{ 11: …, 12: … }` a text variation in the corpus has —
+/// and the count covers both.
+#[test]
+fn alignment_goes_in_the_paragraph_bag() {
+    let mut doc = fresh();
+    doc.table_mut("Tabelle")
+        .unwrap()
+        .set("B2", "Mitte")
+        .unwrap();
+    doc.table_mut("Tabelle")
+        .unwrap()
+        .text_look(
+            "B2",
+            &CellText {
+                align: Some(iwork::table::Align::Centre),
+                ..CellText::bold()
+            },
+        )
+        .unwrap();
+    let (_, style) = text_style_of(&doc, 1, 1).unwrap();
+    let archive = doc.archive(style).unwrap();
+    assert_eq!(
+        iwork::style::get_path(&archive, iwork::style::property::ALIGNMENT),
+        Some(Value::Varint(2))
+    );
+    assert_eq!(bag(&archive, 11).fields.len(), 1, "bold");
+    assert_eq!(bag(&archive, 12).fields.len(), 1, "alignment");
+    assert_eq!(archive.varint(10), Some(2), "the count covers both bags");
+    clean(&doc);
+}
