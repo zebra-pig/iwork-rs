@@ -150,6 +150,14 @@
 //! made to *look* right without being right, it is refused instead — with a
 //! [`Refusal`] saying which kind of wrong it would have been.
 
+/// Recipes: a spreadsheet, a deck and a report that look designed.
+///
+/// This module holds no code. It is `COOKBOOK.md`, included here so that every
+/// snippet in it is compiled by `cargo test --doc` — a recipe that has stopped
+/// compiling is a recipe that lies.
+#[doc = include_str!("../COOKBOOK.md")]
+pub mod cookbook {}
+
 pub mod annotations;
 pub mod calc;
 pub mod chart;

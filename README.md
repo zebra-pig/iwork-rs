@@ -11,6 +11,11 @@ documents and checked by the tests in this repository.
 cargo add iwork
 ```
 
+**In a hurry?** [`COOKBOOK.md`](COOKBOOK.md) is three short recipes — a
+spreadsheet, a deck and a report that look designed — each one run by this
+repository's tests. This README is the longer account: what the format is, and
+what was measured to know it.
+
 ```rust
 // A spreadsheet from nothing: no template, no Apple software.
 let mut doc = iwork::Document::new_spreadsheet("Sales", "Q1", 4, 2)?;
