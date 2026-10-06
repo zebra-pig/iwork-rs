@@ -50,6 +50,30 @@ The sentence is unchanged and is still what `Display` prints; the reason is that
 sentence as a value — `Merged`, `HoldsFormula`, `WrongSlot`, `NoDonorFormat`,
 `Organised`, `Patched`, `NotDrawn`, `Ambiguous` and the rest.
 
+**How it looks is written too**, and the same way in all three apps: one cell,
+one drawable or one paragraph is given a *variation* of the style it had —
+the parent's reference, and only what differs — which is how the apps store
+something somebody changed by hand.
+
+```rust
+use iwork::drawable::Color;
+use iwork::table::CellText;
+
+let navy = Color { red: 0.11, green: 0.22, blue: 0.38, alpha: 1.0 };
+let white = Color { red: 1.0, green: 1.0, blue: 1.0, alpha: 1.0 };
+
+q1.fill("A1:B1", Some(navy))?;                                  // cells, empty ones too
+q1.text_look("A1:B1", &CellText { colour: Some(white), ..CellText::bold() })?;
+
+let badge = doc.add_shape("Sales", Outline::Ellipse, "Q1", (420.0, 40.0), (90.0, 90.0))?;
+doc.set_object_fill(badge, Some(navy))?;                        // a shape, an image's frame
+doc.set_object_stroke(badge, white, 2.0)?;
+```
+
+A table made from nothing is drawn as Numbers draws a new one — gridlines, a
+border, a shaded bold header row — because the table style, the area styles and
+their text styles are the ones Numbers writes, value for value.
+
 **A sheet is not a grid.** This is where a Numbers document parts company with
 the shape a spreadsheet library usually assumes: a sheet is a *canvas* holding
 any number of tables, with charts, shapes and images beside them. `doc.sheets()`
@@ -446,6 +470,17 @@ its text is a number pointing into the table's string list, and so are its
 format, its style and its formula. `doc.tables()` resolves all of that;
 [`FORMAT.md`](FORMAT.md) §Tables writes down the layout.
 
+**How a table looks is three things, and one of them is about cells.**
+Gridlines, the border and the line under a header are the *table style's*
+properties, sixty-three of them in the table Numbers makes. Each *area* — body,
+header row, header column, footer — has a cell style and a text style, which
+the table model names slot by slot. And one cell that differs from its area
+carries two keys into the table's style list, whose entries are variations of
+the area's styles: `doc.cell_styles()` reads the first two, `table.fill` and
+`table.text_look` write the third, and `Table::audit` checks the rule that
+ties the list to the cells — an entry's count is the number of cells naming it.
+[`FORMAT.md`](FORMAT.md) §"How a table looks" has the field numbers.
+
 Three things are worth knowing before trusting a table reader, including this
 one:
 
@@ -581,6 +616,16 @@ both corrections came from asking the app rather than reading a schema:
 
 `iwork drawables` prints the corrected rectangle, and `IWORK_APP_CHECK=1 cargo
 test` compares every one of them with what Keynote and Pages report.
+
+**Painting one object means giving it a style of its own.** A document from
+nothing points every shape at a theme preset, and so does a document the app
+wrote until somebody changes one. Painting the shared style is the obvious
+edit and does not survive: Keynote regenerates its presets on save, and the
+colour is gone from the file it writes back. `set_object_fill`,
+`set_object_stroke` and `set_object_opacity` take the *drawable*, and the
+first of them to touch it makes the variation the app would have made — a red
+rectangle and a blue ellipse written here read back, channel for channel, out
+of the file Keynote itself saved.
 
 **Object styling is a separate object, and it inherits.** Fill, stroke,
 opacity, shadow and reflection live in a `TSD.ShapeStyleArchive` — or a

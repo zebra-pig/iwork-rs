@@ -6,6 +6,48 @@ bytes nobody has watched being read.
 
 ## 0.2.3 — unreleased
 
+The release in which a document made here stops looking unfinished.
+
+### Fixed
+
+- **No text style this crate applied was drawn in a document it made.** It was
+  one table. A storage's paragraph-style table has an entry for *every*
+  paragraph — 4 for 4, 12 for 12, in every storage of the corpus — and it was
+  written run-length. Pages discards a table short of an entry and rebuilds it
+  with the default style; the applied style, now referenced by nothing, is
+  culled on save; and a stylesheet that identifies no default has one invented
+  for it, "Free Form", 12 pt Helvetica. Every paragraph of a generated report
+  came out in that. With one entry per paragraph Pages answers
+  `30.0  11.0  11.0` when asked the size of each. `examples/report.rs` is the
+  result, and `scripts/paragraph-oracle.sh` is how it is measured.
+- **A table made here pointed its body at the bold style and its headers at the
+  plain one**, slots 24 to 27 of the model being in an order nobody had the
+  schema to read. Invisible until 0.2.2 fixed the count that made Numbers
+  discard the styles altogether.
+- **Emptying a cell that had a look deleted its record** — the colour with the
+  value — and left the style list counting a reference no cell held. The app
+  keeps a bare record for a styled cell with no value, and so does this now.
+- A text colour had nowhere to be drawn on a document from nothing: the app
+  paints with the fill inside the glyphs, and the blueprint's styles had a font
+  colour and no fill.
+- `add_table` refused on every deck built from one of Apple's themes. The
+  styles for a new table are read from the document's own style network.
+
+### Added
+
+- **The look of one cell** — `table.fill(range, colour)` and
+  `table.text_look(range, &CellText { bold, italic, size, font, colour, align })`,
+  on empty cells too. Each distinct look is one variation of the area's style
+  and one entry in the table's style list.
+- **A table drawn as a table.** The table style carries the gridlines, border
+  and separators of the table Numbers makes by default; the area styles carry
+  its greys; the role names are the app's.
+- `Table::audit` checks the style list's counts; `iwork check` names a
+  paragraph-style table short of an entry.
+- `scripts/cell-look-oracle.sh` — the background, font and text colour Numbers
+  draws each cell with.
+
+
 ## 0.2.2 — 2026-10-06
 
 Two more documents the apps opened and then quietly mangled, both found by
