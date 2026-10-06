@@ -4,7 +4,42 @@ What changed, and — because this is a reverse-engineered format — **how it w
 established**. An entry that cannot say what the app did is an entry about
 bytes nobody has watched being read.
 
-## 0.2.2 — unreleased
+## 0.2.2 — 2026-10-06
+
+Two more documents the apps opened and then quietly mangled, both found by
+making the app **save the file again** and reading what it wrote.
+
+### Fixed
+
+- **`override_count`, the one field the whole styling axis turned on.** A
+  style whose property bag holds entries while `TSS.StyleArchive.override_count`
+  says nothing is one the app treats as overriding nothing, and it deletes the
+  bag on save. Numbers did that to all seventeen cell styles of a table made
+  here — the fill, and four points of inset nobody asked it to touch, 91 bytes
+  down to 30 — and Pages did not draw a paragraph style made here at all. The
+  three blueprints write the count now, and `set_text_style_property` and
+  `set_cell_style_fill` maintain it from the bags, so the two cannot disagree.
+  A cell painted in a document from nothing survives Numbers' own save.
+- **A slide carries its layout's placeholders.** `iwork check` called a themed
+  deck with an added slide clean; Keynote opened it, resaved it, and could not
+  answer `text items of <slide>` until it had repaired the document itself.
+  The slide carried four fields where Keynote's carries twenty-three.
+  `add_slide` copies the layout's placeholders into the slide's own stream
+  now, and `title()` and `body()` write on a themed slide — which
+  `examples/deck.rs` has promised since it was written.
+- `iwork check` has learned both: it names a slide missing a placeholder its
+  layout defines, a rule all 83 app-written slides in the corpus keep.
+- Two refusal messages printed a literal backslash and seventeen spaces;
+  `currency_with` named its table by raw identifier where every sibling says
+  `Sales B3`; `object_style`'s documentation had slid onto `cell_styles`.
+
+### Still missing, and stated plainly
+
+Text colour does not survive on a deck made from nothing, and a text style
+made with `create_text_style` is not registered in a blank Pages document's
+stylesheet, so Pages discards it. A generated Pages report still draws every
+paragraph in `Body`.
+
 
 ## 0.2.1 — 2026-09-23
 
