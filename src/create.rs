@@ -149,6 +149,26 @@ pub(crate) fn reference(number: u32, target: u64) -> Field {
     nested(number, vec![varint(1, target)])
 }
 
+/// The paragraph-style table of a storage holding `text`: **an entry for every
+/// paragraph**, the first naming the style and the rest carrying their index
+/// and no object — the format's "whatever was in force here", and what Pages
+/// writes for a paragraph it adds.
+///
+/// Not [`attribute_table`], whose single entry is right for the tables that
+/// are routinely sparse and wrong for this one: a paragraph-style table short
+/// of an entry is one the app throws away and rebuilds with the default style,
+/// and a text box made with three lines was written with one.
+pub(crate) fn paragraph_style_table(target: u64, text: &str) -> Field {
+    let mut entries = vec![nested(1, vec![varint(1, 0), reference(2, target)])];
+    for paragraph in crate::text::paragraph_ranges(text).iter().skip(1) {
+        entries.push(nested(1, vec![varint(1, paragraph.start)]));
+    }
+    Field {
+        number: crate::text::PARAGRAPH_STYLE_TABLE,
+        value: Value::Bytes(message(entries).encode()),
+    }
+}
+
 /// An attribute table with a single entry covering the whole storage.
 pub(crate) fn attribute_table(number: u32, target: u64) -> Field {
     Field {
@@ -786,6 +806,18 @@ fn stylesheet_archive(
                     2,
                     vec![string(1, BODY_IDENTIFIER), reference(2, body_style)],
                 ),
+                // The style a paragraph falls back to, under the name a real
+                // stylesheet gives it. Without the entry Pages mints a default
+                // of its own on opening — "Free Form", 12 pt Helvetica — and
+                // that, not `Body`, is what a paragraph with no style of its
+                // own was drawn in.
+                nested(
+                    2,
+                    vec![
+                        string(1, DEFAULT_PARAGRAPH_IDENTIFIER),
+                        reference(2, body_style),
+                    ],
+                ),
                 nested(
                     2,
                     vec![string(1, TEXT_BOX_IDENTIFIER), reference(2, text_box_style)],
@@ -798,6 +830,10 @@ fn stylesheet_archive(
         ),
     ])
 }
+
+/// The well-known identifier of a document's default paragraph style. Every
+/// Pages stylesheet in the corpus carries it.
+const DEFAULT_PARAGRAPH_IDENTIFIER: &str = "paragraph-style-default";
 
 /// The internal name of the shape style a text box is drawn with, in the shape
 /// a theme names its presets.
@@ -2969,7 +3005,7 @@ pub(crate) fn storage_of_kind(
         fields.push(string(3, text));
     }
     fields.extend([
-        attribute_table(5, paragraph),
+        paragraph_style_table(paragraph, text),
         nested(
             6,
             vec![nested(1, vec![varint(1, 0), varint(2, 0), varint(3, 0)])],

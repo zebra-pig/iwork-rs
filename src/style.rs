@@ -927,6 +927,98 @@ pub fn apply(table: &mut Message, range: Range<u64>, style: u64, text_len: u64) 
     rebuild(table, keep, out, field);
 }
 
+/// Point the paragraphs in `range` at `style`, in a table that has **one
+/// entry per paragraph**.
+///
+/// [`apply`] is the right edit for a run table and the wrong one here, in two
+/// ways that both cost entries: it drops whatever sits inside the range, and
+/// its rebuild coalesces a neighbour that says the same thing as the entry
+/// before it. A run that repeats the run before it is not a run. Two
+/// neighbouring paragraphs sharing a style is the ordinary case, and each
+/// still has its entry — 4 for 4 paragraphs, 12 for 12, 16 for 16, in every
+/// body storage of the corpus.
+///
+/// What a table that has lost that shape costs was measured in Pages. Handed
+/// `[(0, Gross), (10, Body)]` over three paragraphs, it threw the table away
+/// and rebuilt it — `[(0, default), (10, nil), (27, nil)]` — which left the
+/// style this crate had applied referenced by nothing, so the stylesheet's
+/// `can_cull_styles` removed it; every paragraph was drawn in the default.
+/// With an entry per paragraph the same document draws `30 / 11 / 11`, and
+/// the style survives the app's own save.
+///
+/// `starts` are the paragraph starts of the storage's text, and `range` is
+/// expected to cover whole paragraphs — the caller grows it. Entries the
+/// range does not touch keep exactly what they had. The one subtlety is the
+/// paragraph *after* the range: an entry with no object means "whatever was
+/// in force", and what was in force before it is about to change — so it is
+/// given the reference it was inheriting, which keeps it drawn as it was.
+pub fn apply_to_paragraphs(
+    table: &mut Message,
+    range: Range<u64>,
+    style: u64,
+    starts: &[u64],
+    text_len: u64,
+) {
+    let range = range.start.min(text_len)..range.end.min(text_len);
+    if range.start >= range.end {
+        return;
+    }
+    let field = entry_field(table);
+    let keep = non_entries(table);
+    let mut all = entries(table);
+
+    // An entry at every paragraph start. A missing one is written the way
+    // Pages writes a new paragraph's — its index and no object.
+    for start in starts {
+        if all.iter().any(|(index, _)| index == start) {
+            continue;
+        }
+        let mut nil = Message::default();
+        nil.set(1, Value::Varint(*start));
+        let position = all.partition_point(|(index, _)| index < start);
+        all.insert(position, (*start, nil));
+    }
+
+    // The reference in force at `at`, looking back past entries with no object.
+    let in_force = |all: &[(u64, Message)], at: u64| -> Option<Value> {
+        all.iter()
+            .rev()
+            .filter(|(index, _)| *index <= at)
+            .find_map(|(_, entry)| match entry.get(2) {
+                Some(value @ Value::Bytes(_)) => Some(value.clone()),
+                _ => None,
+            })
+    };
+
+    // The first paragraph past the range keeps what it was inheriting.
+    if let Some(next) = starts.iter().copied().find(|start| *start >= range.end) {
+        let inherited = in_force(&all, next);
+        if let Some((_, entry)) = all.iter_mut().find(|(index, _)| *index == next) {
+            if !matches!(entry.get(2), Some(Value::Bytes(_))) {
+                if let Some(value) = inherited {
+                    entry.set_in_order(2, value);
+                }
+            }
+        }
+    }
+
+    for (index, entry) in all.iter_mut() {
+        if starts.contains(index) && *index >= range.start && *index < range.end {
+            entry.set_in_order(2, Value::Bytes(reference(style).encode()));
+        }
+    }
+
+    // Written back as they stand: nothing is coalesced, because an entry per
+    // paragraph is the shape, not a redundancy.
+    table.fields = keep;
+    for (_, entry) in all {
+        table.fields.push(Field {
+            number: field,
+            value: Value::Bytes(entry.encode()),
+        });
+    }
+}
+
 /// Point every run that uses `from` at `to`, or drop those runs when `to` is
 /// `None`, letting the preceding run extend over them.
 ///
@@ -942,6 +1034,22 @@ pub fn apply(table: &mut Message, range: Range<u64>, style: u64, text_len: u64) 
 ///
 /// Returns how many entries were touched.
 pub fn repoint(table: &mut Message, from: u64, to: Option<u64>) -> usize {
+    repoint_shaped(table, from, to, false)
+}
+
+/// [`repoint`], for the table that has an entry for every paragraph.
+///
+/// Dropping an entry and coalescing its neighbours are how a run table says
+/// "the run before extends over this"; in the paragraph-style table they are
+/// how a paragraph loses its entry, and a table short of one is a table the
+/// app rebuilds — see [`apply_to_paragraphs`]. So nothing is dropped: an entry
+/// that pointed at `from` keeps its place and is *emptied*, which is the
+/// format's own "whatever was in force here", and nothing is merged.
+pub fn repoint_paragraphs(table: &mut Message, from: u64, to: Option<u64>) -> usize {
+    repoint_shaped(table, from, to, true)
+}
+
+fn repoint_shaped(table: &mut Message, from: u64, to: Option<u64>, per_paragraph: bool) -> usize {
     let field = entry_field(table);
     let keep = non_entries(table);
     let mut touched = 0;
@@ -957,14 +1065,24 @@ pub fn repoint(table: &mut Message, from: u64, to: Option<u64>) -> usize {
                 entry.set(2, Value::Bytes(reference(to).encode()));
                 out.push((start, entry));
             }
-            None if start == 0 => {
+            None if start == 0 || per_paragraph => {
                 entry.clear(2);
                 out.push((start, entry));
             }
             None => {}
         }
     }
-    rebuild(table, keep, out, field);
+    if per_paragraph {
+        table.fields = keep;
+        for (_, entry) in out {
+            table.fields.push(Field {
+                number: field,
+                value: Value::Bytes(entry.encode()),
+            });
+        }
+    } else {
+        rebuild(table, keep, out, field);
+    }
     touched
 }
 

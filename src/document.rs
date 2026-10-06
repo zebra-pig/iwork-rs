@@ -7637,7 +7637,11 @@ impl Document {
                     else {
                         continue;
                     };
-                    let changed = style::repoint(&mut runs, identifier, replace_with);
+                    let changed = if table == text::PARAGRAPH_STYLE_TABLE {
+                        style::repoint_paragraphs(&mut runs, identifier, replace_with)
+                    } else {
+                        style::repoint(&mut runs, identifier, replace_with)
+                    };
                     if changed > 0 {
                         edited.set(table, Value::Bytes(runs.encode()));
                         touched += changed;
@@ -7755,7 +7759,21 @@ impl Document {
             })?,
             None => Message::default(),
         };
-        style::apply(&mut table, range, style_identifier, length);
+        match kind {
+            // One entry per paragraph is the shape of this table, and a table
+            // that has lost it is one Pages rebuilds from nothing — see
+            // `style::apply_to_paragraphs`.
+            StyleKind::Paragraph => {
+                let starts: Vec<u64> = text::paragraph_ranges(&body)
+                    .iter()
+                    .map(|paragraph| paragraph.start)
+                    .collect();
+                style::apply_to_paragraphs(&mut table, range, style_identifier, &starts, length);
+            }
+            StyleKind::List | StyleKind::Character => {
+                style::apply(&mut table, range, style_identifier, length);
+            }
+        }
         // In field order: a storage that had no table of this kind would
         // otherwise get one appended after every other field, and iWork writes
         // its fields ascending everywhere anyone has looked. Appending gave a
@@ -8356,6 +8374,31 @@ impl Document {
                         problems.push(format!(
                             "{where_}: entry at {index} is neither a paragraph start \
                              nor the end of the text"
+                        ));
+                    }
+                }
+                // **The paragraph-style table has an entry for every
+                // paragraph.** It is not a run table: two neighbouring
+                // paragraphs sharing a style still have an entry each, in
+                // every storage of the corpus. One that has lost that shape is
+                // one Pages throws away and rebuilds with defaults — which
+                // leaves whatever style it named referenced by nothing, culled
+                // on the next save, and every paragraph drawn in the default.
+                // This checker called such a document clean.
+                if field == text::PARAGRAPH_STYLE_TABLE {
+                    let missing: Vec<u64> = starts
+                        .iter()
+                        .copied()
+                        .filter(|start| !entries.iter().any(|(index, _)| index == start))
+                        .collect();
+                    if !missing.is_empty() {
+                        problems.push(format!(
+                            "{where_}: {} of {} paragraph(s) have no entry (first at {}) — \
+                             the table has one per paragraph, and the app rebuilds one that \
+                             does not, with the default style",
+                            missing.len(),
+                            starts.len(),
+                            missing[0]
                         ));
                     }
                 }

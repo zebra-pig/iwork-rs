@@ -1270,25 +1270,10 @@ fn pages_resaves_text_pointed_at_a_style_this_crate_applied() {
     let _ = std::fs::remove_file(&out);
 }
 
-/// **Where styling actually works, measured in the app.**
-///
-/// The crate can create a text style and point a run at it, and the archives
-/// come out right either way — but whether the *app draws it* depends on
-/// where the style came from, and the difference is stark enough to be worth
-/// a test that says so.
-///
-/// In a document Pages wrote, pointing paragraphs at its own `Title`,
-/// `Heading` and `Body` works: asked afterwards for the size of every
-/// paragraph, Pages answered `30.0 18.0 11.0 18.0 11.0` — exactly the roles
-/// applied, in order.
-///
-/// In a document from [`Document::new`], the same crate calls are accepted,
-/// `iwork check` is clean, Pages opens it — and Pages draws every paragraph
-/// at `12.0`, because a blank document's stylesheet holds one paragraph style
-/// (`Body`), and a style copied from it is not one Pages honours.
-///
-/// This test asserts the shape of that: what a real document has to point at,
-/// and what a blank one does not.
+/// A blank document offers one paragraph style to build on, and a document
+/// Pages wrote offers a hierarchy. Styles for a generated document are
+/// therefore *made* — copied from `Body` with `create_text_style` — and the
+/// tests after this one are what establish that Pages draws them.
 #[test]
 fn a_blank_document_has_one_paragraph_style_and_a_real_one_has_a_hierarchy() {
     let blank = Document::new(Kind::Pages).unwrap();
@@ -1329,4 +1314,263 @@ fn a_blank_document_has_one_paragraph_style_and_a_real_one_has_a_hierarchy() {
             "a document Pages wrote carries {role}: {named:?}"
         );
     }
+}
+
+/// The entries of a storage's paragraph-style table, as `(index, style)`.
+fn paragraph_entries(doc: &Document, storage: u64) -> Vec<(u64, Option<u64>)> {
+    let archive = doc.archive(storage).unwrap();
+    match archive.get(iwork::text::PARAGRAPH_STYLE_TABLE) {
+        Some(iwork::pb::Value::Bytes(raw)) => {
+            let table = iwork::pb::Message::decode(raw).unwrap();
+            iwork::style::runs(&table)
+                .into_iter()
+                .map(|run| (run.start, run.style))
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// **The paragraph-style table has an entry for every paragraph.**
+///
+/// It is not a run table. Two neighbouring paragraphs sharing a style is the
+/// ordinary case and each still has its entry — 4 for 4 paragraphs, 12 for 12,
+/// 16 for 16, in every storage of every document in the corpus. This crate
+/// wrote it run-length: styling the first of three paragraphs left
+/// `[(0, new), (10, Body)]`, two entries for three paragraphs.
+///
+/// Pages' answer to that table was measured. It threw it away and rebuilt it
+/// with the default style, which left the style this crate had applied
+/// referenced by nothing; the stylesheet's `can_cull_styles` then removed it
+/// on save. Every paragraph of a generated report was drawn in the default,
+/// and `iwork check` had called the document clean.
+#[test]
+fn styling_one_paragraph_leaves_an_entry_for_every_paragraph() {
+    let mut doc = Document::new(Kind::Pages).unwrap();
+    let body = doc
+        .text_styles()
+        .into_iter()
+        .find(|s| s.name.as_deref() == Some("Body"))
+        .expect("a blank document has Body")
+        .identifier;
+    let made = doc.create_text_style(body, "Gross").unwrap().identifier;
+
+    doc.body_mut()
+        .unwrap()
+        .set("Kopfzeile\nFliesstext hier.\nNoch eine Zeile.")
+        .unwrap();
+    let storage = doc
+        .text_storages()
+        .into_iter()
+        .find(|s| s.text.contains("Kopfzeile"))
+        .unwrap()
+        .identifier;
+    doc.body_mut().unwrap().style(0..10, made).unwrap();
+
+    let entries = paragraph_entries(&doc, storage);
+    assert_eq!(
+        entries.iter().map(|(index, _)| *index).collect::<Vec<_>>(),
+        vec![0, 10, 27],
+        "one entry per paragraph, at each paragraph's first character"
+    );
+    assert_eq!(entries[0].1, Some(made), "the styled paragraph");
+    // The paragraph after the range was inheriting `Body` through an entry
+    // with no object. What it inherits from has just changed, so it is given
+    // the reference it had — which is what keeps it drawn as it was.
+    assert_eq!(entries[1].1, Some(body), "the next one keeps what it had");
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+
+    // Styling the middle one, and then all three, keeps the shape.
+    doc.body_mut().unwrap().style(10..27, made).unwrap();
+    assert_eq!(paragraph_entries(&doc, storage).len(), 3);
+    doc.body_mut().unwrap().style(0..43, made).unwrap();
+    let entries = paragraph_entries(&doc, storage);
+    assert_eq!(
+        entries.len(),
+        3,
+        "three paragraphs sharing one style still have three entries"
+    );
+    assert!(entries.iter().all(|(_, style)| *style == Some(made)));
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+}
+
+/// Deleting a style empties its entries rather than dropping them, for the
+/// same reason: a dropped entry is a paragraph without one.
+#[test]
+fn deleting_a_style_leaves_every_paragraph_its_entry() {
+    let mut doc = Document::new(Kind::Pages).unwrap();
+    let body = doc
+        .text_styles()
+        .into_iter()
+        .find(|s| s.name.as_deref() == Some("Body"))
+        .unwrap()
+        .identifier;
+    let made = doc.create_text_style(body, "Gross").unwrap().identifier;
+    doc.body_mut().unwrap().set("Eins\nZwei\nDrei").unwrap();
+    let storage = doc
+        .text_storages()
+        .into_iter()
+        .find(|s| s.text.contains("Zwei"))
+        .unwrap()
+        .identifier;
+    doc.body_mut().unwrap().style(5..10, made).unwrap();
+    assert_eq!(paragraph_entries(&doc, storage).len(), 3);
+
+    doc.delete_text_style(made, None).unwrap();
+    let entries = paragraph_entries(&doc, storage);
+    assert_eq!(entries.len(), 3, "still one per paragraph: {entries:?}");
+    assert_eq!(
+        entries[1].1, None,
+        "emptied, which is the format's 'whatever was in force'"
+    );
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+}
+
+/// A storage *made* with several lines has an entry for each, in all three
+/// apps, and so does a note written into an empty one.
+#[test]
+fn text_made_with_several_lines_has_an_entry_for_each() {
+    let frame = iwork::drawable::Frame {
+        x: 80.0,
+        y: 80.0,
+        width: 600.0,
+        height: 200.0,
+    };
+    let mut deck = Document::new(Kind::Keynote).unwrap();
+    deck.slide_mut(0)
+        .unwrap()
+        .add_text_box("Eins\nZwei\nDrei", frame)
+        .unwrap();
+    deck.slide_mut(0)
+        .unwrap()
+        .notes("Notiz eins\nNotiz zwei")
+        .unwrap();
+    assert!(deck.problems().is_empty(), "{:?}", deck.problems());
+
+    let mut pages = Document::new(Kind::Pages).unwrap();
+    pages
+        .add_text_box("page 1", "Eins\nZwei\nDrei", (72.0, 300.0), (400.0, 100.0))
+        .unwrap();
+    pages.append_paragraph("Noch einer").unwrap();
+    pages.append_paragraph("Und noch einer").unwrap();
+    assert!(pages.problems().is_empty(), "{:?}", pages.problems());
+
+    let mut numbers = Document::new_spreadsheet("S", "T", 2, 2).unwrap();
+    numbers
+        .add_text_box("S", "Eins\nZwei", (300.0, 300.0), (300.0, 100.0))
+        .unwrap();
+    assert!(numbers.problems().is_empty(), "{:?}", numbers.problems());
+}
+
+/// And the checker names a table that has lost the shape.
+#[test]
+fn a_paragraph_table_short_of_an_entry_is_a_problem_the_checker_names() {
+    let mut doc = Document::new(Kind::Pages).unwrap();
+    doc.body_mut().unwrap().set("Eins\nZwei\nDrei").unwrap();
+    let storage = doc
+        .text_storages()
+        .into_iter()
+        .find(|s| s.text.contains("Zwei"))
+        .unwrap()
+        .identifier;
+    let body = doc
+        .text_styles()
+        .into_iter()
+        .find(|s| s.name.as_deref() == Some("Body"))
+        .unwrap()
+        .identifier;
+
+    // The table as this crate used to leave it: one entry for three paragraphs.
+    let mut archive = doc.archive(storage).unwrap();
+    let mut entry = iwork::pb::Message::default();
+    entry.set_in_order(1, iwork::pb::Value::Varint(0));
+    entry.set_in_order(
+        2,
+        iwork::pb::Value::Bytes(iwork::style::reference(body).encode()),
+    );
+    let mut table = iwork::pb::Message::default();
+    table.fields.push(iwork::pb::Field {
+        number: 1,
+        value: iwork::pb::Value::Bytes(entry.encode()),
+    });
+    archive.set_in_order(
+        iwork::text::PARAGRAPH_STYLE_TABLE,
+        iwork::pb::Value::Bytes(table.encode()),
+    );
+    doc.set_archive_for(storage, &archive).unwrap();
+
+    let problems = doc.problems();
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("2 of 3 paragraph(s) have no entry")),
+        "{problems:?}"
+    );
+}
+
+/// **The acceptance test: Pages draws a style this crate made, in a document
+/// made from nothing.** Asked for the size of every paragraph, it answers with
+/// the sizes written here. Off unless `IWORK_APP_CHECK=1`.
+#[test]
+fn pages_draws_a_style_this_crate_made_from_nothing() {
+    if std::env::var("IWORK_APP_CHECK").as_deref() != Ok("1") {
+        eprintln!("IWORK_APP_CHECK is not 1 — skipping the paragraph oracle");
+        return;
+    }
+    let mut doc = Document::new(Kind::Pages).unwrap();
+    let body = doc
+        .text_styles()
+        .into_iter()
+        .find(|s| s.name.as_deref() == Some("Body"))
+        .unwrap()
+        .identifier;
+    let title = doc.create_text_style(body, "Gross").unwrap().identifier;
+    doc.set_text_style_property(
+        title,
+        iwork::style::property::FONT_SIZE,
+        Some(iwork::pb::Value::Fixed32(30.0f32.to_le_bytes())),
+    )
+    .unwrap();
+    let small = doc.create_text_style(body, "Klein").unwrap().identifier;
+    doc.set_text_style_property(
+        small,
+        iwork::style::property::FONT_SIZE,
+        Some(iwork::pb::Value::Fixed32(8.0f32.to_le_bytes())),
+    )
+    .unwrap();
+
+    doc.body_mut()
+        .unwrap()
+        .set("Kopfzeile\nFliesstext hier.\nNoch eine Zeile.\nFussnote")
+        .unwrap();
+    doc.body_mut().unwrap().style(0..10, title).unwrap();
+    doc.body_mut().unwrap().style(44..52, small).unwrap();
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+
+    let out = std::env::temp_dir().join("iwork-made-style.pages");
+    let _ = std::fs::remove_file(&out);
+    doc.save(&out).unwrap();
+
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/paragraph-oracle.sh");
+    let output = std::process::Command::new(&script)
+        .arg(&out)
+        .output()
+        .unwrap_or_else(|e| panic!("{}: {e}", script.display()));
+    assert!(
+        output.status.success(),
+        "Pages would not answer:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let sizes: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.split('\t').next().map(str::to_string))
+        .filter(|size| !size.is_empty())
+        .collect();
+    assert_eq!(
+        sizes,
+        vec!["30.0", "11.0", "11.0", "8.0"],
+        "Pages draws each paragraph in the style this crate gave it"
+    );
+    let _ = std::fs::remove_file(&out);
 }

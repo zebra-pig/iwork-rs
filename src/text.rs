@@ -1136,6 +1136,49 @@ pub fn apply(storage: &mut Message, edit: Edit, new_text: &str) -> EditReport {
     }
     storage.fields.retain(|f| !emptied.contains(&f.number));
 
+    // **The paragraph-style table has an entry for every paragraph, always.**
+    // The remap above keeps a table dense if it was dense, which is the right
+    // rule for the tables that may be sparse and not enough for this one: a
+    // storage with no text has no paragraph to be dense over, so writing three
+    // lines into an empty presenter note left it one entry for three
+    // paragraphs. The new ones are written the way Pages writes a paragraph it
+    // adds — an index and no object.
+    for field in &mut storage.fields {
+        if field.number != PARAGRAPH_STYLE_TABLE {
+            continue;
+        }
+        let Value::Bytes(raw) = &field.value else {
+            continue;
+        };
+        let Some(decoded) = crate::pb::decode_nested(raw) else {
+            continue;
+        };
+        let (mut entries, rest, entry_field) = split(&decoded, Anchoring::Paragraph);
+        let before = entries.len();
+        for start in &new_starts {
+            if entries.iter().any(|entry| entry.index == *start) {
+                continue;
+            }
+            let mut message = Message::default();
+            message.set(1, Value::Varint(*start));
+            let position = entries.partition_point(|entry| entry.index < *start);
+            entries.insert(
+                position,
+                Entry {
+                    index: *start,
+                    message,
+                },
+            );
+        }
+        if entries.len() != before {
+            report.added += entries.len() - before;
+            if !report.tables.contains(&field.number) {
+                report.tables.push(field.number);
+            }
+            field.value = Value::Bytes(join(entries, rest, entry_field).encode());
+        }
+    }
+
     set_storage_text(storage, new_text);
     report
 }

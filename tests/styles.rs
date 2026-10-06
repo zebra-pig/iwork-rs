@@ -948,7 +948,8 @@ fn split_document() -> Document {
     storage.set(3, Value::Bytes(TEXT.as_bytes().to_vec()));
     storage
         .fields
-        .push(nested(5, &attribute_table(&[(0, HEADING)])));
+        // One entry per paragraph: the paragraph-style table is not a run table.
+        .push(nested(5, &attribute_table(&[(0, HEADING), (11, HEADING)])));
 
     let mut metadata = Message::default();
     metadata.set(1, Value::Varint(SHEET_COMPONENT));
