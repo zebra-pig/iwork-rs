@@ -1830,14 +1830,6 @@ fn table_text_style(identifier: &str, name: &str, stylesheet: u64, list: u64) ->
     ])
 }
 
-/// A style that is nothing but a name and the stylesheet it belongs to.
-fn named_style(identifier: &str, stylesheet: u64) -> Message {
-    message(vec![nested(
-        1,
-        vec![string(2, identifier), reference(5, stylesheet)],
-    )])
-}
-
 /// `TST.CellStyleArchive` — a cell's fill, its wrap, its vertical alignment and
 /// its padding, which are the four properties every one Numbers writes carries.
 fn cell_style(identifier: &str, stylesheet: u64, fill: Option<[f32; 3]>, wraps: bool) -> Message {
@@ -2322,10 +2314,38 @@ pub(crate) fn keynote(slide_size: (f32, f32)) -> Blueprint {
     };
     let (style_component, stylesheet) = blueprint.component("DocumentStylesheet", false);
 
+    // A slide style Keynote writes carries one property, the fill the slide is
+    // drawn on, and a count that says one. This was a name and nothing else —
+    // which is a slide with no background to change, because there is nowhere
+    // for a colour to go and nothing here invents the message.
     let slide_style = blueprint.add(
         style_component,
         TYPE_SLIDE_STYLE,
-        named_style("slide-style-default", stylesheet),
+        message(vec![
+            nested(
+                1,
+                vec![string(2, "slide-style-default"), reference(5, stylesheet)],
+            ),
+            varint(crate::style::OVERRIDE_COUNT[0], 1),
+            nested(
+                11,
+                vec![nested(
+                    1,
+                    vec![nested(
+                        1,
+                        vec![
+                            varint(1, 1),
+                            float(3, 1.0),
+                            float(4, 1.0),
+                            float(5, 1.0),
+                            float(6, 1.0),
+                            varint(12, 1),
+                            float(13, 1.0),
+                        ],
+                    )],
+                )],
+            ),
+        ]),
     );
     // The two styles any text on a slide needs: what a paragraph looks like,
     // and the list it is not in.

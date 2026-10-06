@@ -2151,6 +2151,127 @@ fn derived_uuid(entry: &Message, identifier: u64) -> (u64, u64) {
     let upper = u64::from_le_bytes(digest[8..16].try_into().expect("sha1 is 20 bytes"));
     (lower, upper)
 }
+/// Paint the background of one slide, or with `None` go back to its layout's.
+///
+/// A slide's background is not on the slide. It is the `fill` — field 1 of
+/// `KN.SlideStylePropertiesArchive` — of the slide style the slide names in
+/// its field 1, and that style is normally the **layout's**: in every deck of
+/// the corpus a slide and the layout it is built on name the same
+/// `slide-N-slidestyle`. Painting that one would repaint the layout and every
+/// slide built on it.
+///
+/// So the slide is given a style of its own: a variation naming the layout's
+/// style as its parent and carrying the fill and nothing else, the way a
+/// drawable is ([`crate::drawable::set_fill`]) and a table cell is.
+///
+/// **This shape is inferred, not observed.** No deck in the corpus has a slide
+/// whose background somebody changed, so the variation is built by the
+/// convention every other style archive keeps — `super { 3: parent, 4: 1,
+/// 5: stylesheet }`, `override_count`, the property bag — rather than copied
+/// from one Keynote wrote. It is tested against the app behind
+/// `IWORK_APP_CHECK=1`, and that test is the only thing that says it is right.
+pub fn set_slide_background(
+    document: &mut crate::Document,
+    slide: u64,
+    colour: Option<crate::drawable::Color>,
+) -> Result<(), Error> {
+    let deck = show(document).ok_or_else(|| Error::Format("not a Keynote document".into()))?;
+    let Some(found) = deck.slides.iter().find(|s| s.identifier == slide) else {
+        return Err(Error::refused(
+            crate::Refusal::NotFound,
+            format!("no slide {slide} in this deck"),
+        ));
+    };
+    let mut archive = document.archive(found.identifier)?;
+    let current = reference(&archive, slide_field::STYLE)
+        .ok_or_else(|| Error::Format(format!("slide {slide} names no style")))?;
+    let style = document.archive(current)?;
+    let varies = matches!(
+        crate::style::get_path(&style, crate::style::IS_VARIATION),
+        Some(Value::Varint(1))
+    );
+    let parent = crate::style::reference_at(&style, &[1, 3, 1]);
+    // How many slides and layouts name the style the slide has now.
+    let users = deck
+        .slides
+        .iter()
+        .map(|s| s.identifier)
+        .chain(deck.layouts.iter().map(|l| l.identifier))
+        .filter(|id| {
+            document
+                .archive(*id)
+                .ok()
+                .and_then(|a| reference(&a, slide_field::STYLE))
+                == Some(current)
+        })
+        .count();
+    let own = varies && users == 1;
+
+    let Some(colour) = colour else {
+        // Back to the layout's: the slide names its variation's parent again.
+        // A slide that never had its own has nothing to give back.
+        if let (true, Some(parent)) = (own, parent) {
+            archive.set_in_order(
+                slide_field::STYLE,
+                Value::Bytes(crate::style::reference(parent).encode()),
+            );
+            document.set_archive_for(slide, &archive)?;
+            document.declare_external_references();
+        }
+        return Ok(());
+    };
+
+    let mut fill = Message::default();
+    fill.set_in_order(
+        1,
+        Value::Bytes(crate::drawable::colour_message(colour).encode()),
+    );
+    let mut properties = Message::default();
+    properties.set_in_order(1, Value::Bytes(fill.encode()));
+
+    if own {
+        // Already the slide's own: repaint it where it stands.
+        let mut style = style;
+        let mut bag = style
+            .bytes(11)
+            .and_then(crate::pb::decode_nested)
+            .unwrap_or_default();
+        bag.set_in_order(1, Value::Bytes(fill.encode()));
+        style.set_in_order(11, Value::Bytes(bag.encode()));
+        crate::style::refresh_override_count(&mut style, &[], &[11]);
+        return document.set_archive_for(current, &style);
+    }
+
+    let stylesheet = crate::style::reference_at(&style, &[1, 5, 1]);
+    let mut super_ = Message::default();
+    super_.set_in_order(3, Value::Bytes(crate::style::reference(current).encode()));
+    super_.set_in_order(4, Value::Varint(1));
+    if let Some(stylesheet) = stylesheet {
+        super_.set_in_order(
+            5,
+            Value::Bytes(crate::style::reference(stylesheet).encode()),
+        );
+    }
+    let mut made = Message::default();
+    made.set_in_order(1, Value::Bytes(super_.encode()));
+    made.set_in_order(crate::style::OVERRIDE_COUNT[0], Value::Varint(1));
+    made.set_in_order(11, Value::Bytes(properties.encode()));
+
+    let mut grow = crate::create::Grow::new(document);
+    let variation = grow.allocate();
+    grow.beside(current, variation, TYPE_SLIDE_STYLE, &made)?;
+    grow.finish()?;
+
+    archive.set_in_order(
+        slide_field::STYLE,
+        Value::Bytes(crate::style::reference(variation).encode()),
+    );
+    document.set_archive_for(slide, &archive)?;
+    // The variation is in the stylesheet and the slide in its own stream.
+    document.declare_external_references();
+    Ok(())
+}
+
 /// Give every slide the placeholders its layout defines, where it has none.
 ///
 /// A deck made from nothing builds its first slide before any of this, and a

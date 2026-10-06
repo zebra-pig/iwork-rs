@@ -370,6 +370,12 @@ impl SlideHandle<'_> {
         self.document.duplicate_slide(self.slide)
     }
 
+    /// Paint this slide's background, or with `None` go back to its layout's.
+    /// See [`Document::set_slide_background`].
+    pub fn background(&mut self, colour: Option<crate::drawable::Color>) -> Result<(), Error> {
+        self.document.set_slide_background(self.slide, colour)
+    }
+
     /// Give the slide a transition — by the app's name for the effect or by the
     /// identifier on the wire, and `"none"` takes it away.
     ///
@@ -8669,6 +8675,23 @@ impl Document {
         edit: &crate::keynote::TransitionEdit,
     ) -> Result<crate::keynote::Transition, Error> {
         crate::keynote::set_transition(self, slide, edit)
+    }
+
+    /// Paint the background of one slide, or with `None` go back to its
+    /// layout's.
+    ///
+    /// See [`crate::keynote::set_slide_background`] — the slide is given a
+    /// slide style of its own, because the one it has is its layout's and
+    /// painting that would repaint every slide built on it. The shape of that
+    /// style is inferred from the convention the other style archives keep
+    /// rather than read off a deck Keynote wrote; the doc comment there says
+    /// so at length.
+    pub fn set_slide_background(
+        &mut self,
+        slide: u64,
+        colour: Option<crate::drawable::Color>,
+    ) -> Result<(), Error> {
+        crate::keynote::set_slide_background(self, slide, colour)
     }
 
     /// Add a slide to the end of a Keynote deck.

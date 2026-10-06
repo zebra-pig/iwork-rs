@@ -2177,3 +2177,151 @@ fn keynote_opens_a_themed_deck_with_a_table_this_crate_added() {
     );
     let _ = std::fs::remove_file(&out);
 }
+
+/// The slide style of a deck made from nothing carries what Keynote's does:
+/// one property, the fill the slide is drawn on, and a count of one.
+#[test]
+fn a_slide_style_from_nothing_carries_its_fill() {
+    let doc = Document::new(iwork::Kind::Keynote).unwrap();
+    let slide = doc.slides()[0].identifier;
+    let style = iwork::style::reference_at(&doc.archive(slide).unwrap(), &[1, 1]).unwrap();
+    let archive = doc.archive(style).unwrap();
+    assert_eq!(archive.varint(10), Some(1), "override_count");
+    assert!(
+        iwork::style::get_path(&archive, &[11, 1, 1, 3]).is_some(),
+        "the fill has a colour to change"
+    );
+}
+
+/// One slide's background is a slide style of its own — a variation of the
+/// layout's — so painting it leaves the layout, and every other slide built on
+/// it, alone.
+#[test]
+fn a_slide_s_background_is_its_own_and_not_its_layout_s() {
+    let navy = iwork::drawable::Color {
+        red: 0.11,
+        green: 0.22,
+        blue: 0.38,
+        alpha: 1.0,
+    };
+    let mut doc = Document::new(iwork::Kind::Keynote).unwrap();
+    doc.add_slide(None).unwrap();
+    let (first, second) = (doc.slides()[0].identifier, doc.slides()[1].identifier);
+    let style_of = |doc: &Document, slide: u64| {
+        iwork::style::reference_at(&doc.archive(slide).unwrap(), &[1, 1]).unwrap()
+    };
+    let shared = style_of(&doc, first);
+    assert_eq!(
+        style_of(&doc, second),
+        shared,
+        "both start on the layout's style"
+    );
+
+    doc.slide_mut(0).unwrap().background(Some(navy)).unwrap();
+    let own = style_of(&doc, first);
+    assert_ne!(own, shared, "the painted slide has a style of its own");
+    assert_eq!(
+        style_of(&doc, second),
+        shared,
+        "the other slide is untouched"
+    );
+
+    let archive = doc.archive(own).unwrap();
+    assert_eq!(
+        iwork::style::reference_at(&archive, &[1, 3, 1]),
+        Some(shared)
+    );
+    assert_eq!(
+        iwork::style::get_path(&archive, iwork::style::IS_VARIATION),
+        Some(iwork::pb::Value::Varint(1))
+    );
+    assert_eq!(archive.varint(10), Some(1));
+    match iwork::style::get_path(&archive, &[11, 1, 1, 5]) {
+        Some(iwork::pb::Value::Fixed32(bytes)) => {
+            assert!((f32::from_le_bytes(bytes) - 0.38).abs() < 1e-6)
+        }
+        other => panic!("no blue channel: {other:?}"),
+    }
+    // The layout's own fill is still white.
+    match iwork::style::get_path(&doc.archive(shared).unwrap(), &[11, 1, 1, 5]) {
+        Some(iwork::pb::Value::Fixed32(bytes)) => assert_eq!(f32::from_le_bytes(bytes), 1.0),
+        other => panic!("the layout's fill is gone: {other:?}"),
+    }
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+
+    // Painting it again repaints the style it already owns.
+    doc.slide_mut(0)
+        .unwrap()
+        .background(Some(iwork::drawable::Color {
+            red: 0.9,
+            green: 0.1,
+            blue: 0.1,
+            alpha: 1.0,
+        }))
+        .unwrap();
+    assert_eq!(style_of(&doc, first), own, "one style, painted twice");
+
+    // And `None` gives the slide back to its layout.
+    doc.slide_mut(0).unwrap().background(None).unwrap();
+    assert_eq!(style_of(&doc, first), shared);
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+}
+
+/// Keynote opens a deck with a painted slide and keeps the colour through its
+/// own save. **This is the test that says whether the inferred shape is
+/// right.** Off unless `IWORK_APP_CHECK=1`.
+#[test]
+fn keynote_keeps_a_slide_background_this_crate_painted() {
+    if std::env::var("IWORK_APP_CHECK").as_deref() != Ok("1") {
+        eprintln!("IWORK_APP_CHECK is not 1 — skipping the resave");
+        return;
+    }
+    let mut doc = Document::new(iwork::Kind::Keynote).unwrap();
+    doc.slide_mut(0)
+        .unwrap()
+        .background(Some(iwork::drawable::Color {
+            red: 0.11,
+            green: 0.22,
+            blue: 0.38,
+            alpha: 1.0,
+        }))
+        .unwrap();
+    let slide = doc.slides()[0].identifier;
+    let out = std::env::temp_dir().join("iwork-slide-background.key");
+    let _ = std::fs::remove_file(&out);
+    doc.save(&out).unwrap();
+
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/resave.sh");
+    let output = std::process::Command::new(&script)
+        .arg(&out)
+        .output()
+        .unwrap_or_else(|e| panic!("{}: {e}", script.display()));
+    assert!(
+        output.status.success(),
+        "Keynote would not resave a deck with a painted slide:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let after = Document::open(&out).unwrap();
+    let style = iwork::style::reference_at(&after.archive(slide).unwrap(), &[1, 1]).unwrap();
+    let mut blue = None;
+    let mut at = Some(style);
+    // The fill may have been folded into whatever style Keynote left the
+    // slide on, so look up the chain for it.
+    for _ in 0..4 {
+        let Some(id) = at else { break };
+        let archive = after.archive(id).unwrap();
+        if let Some(iwork::pb::Value::Fixed32(bytes)) =
+            iwork::style::get_path(&archive, &[11, 1, 1, 5])
+        {
+            blue = Some(f32::from_le_bytes(bytes));
+            break;
+        }
+        at = iwork::style::reference_at(&archive, &[1, 3, 1]);
+    }
+    assert!(
+        matches!(blue, Some(b) if (b - 0.38).abs() < 1e-3),
+        "Keynote kept the slide's navy background: {blue:?}"
+    );
+    let _ = std::fs::remove_file(&out);
+}
