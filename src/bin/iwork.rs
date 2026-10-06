@@ -93,6 +93,11 @@ drawables and media
   iwork add-shape <file> <where> <outline> <text> <x> <y> <w> <h> <out>
                                            the same, drawn along <outline>:
                                            rectangle, ellipse or line
+  iwork paint     <file> <drawable> <what>... <out>
+                                           how one shape or image looks — any
+                                           of fill=<colour>|none,
+                                           stroke=<colour>[:<points>],
+                                           opacity=<0..1>
   iwork add-image <file> <where> <image> <x> <y> [<w> <h>] <out>
                                            place a PNG or a JPEG, at its own
                                            pixel size unless given one
@@ -133,6 +138,15 @@ tables
                                            number[:places], percent[:places],
                                            scientific[:places],
                                            currency:CODE[:places], date:PATTERN
+  iwork fill      <file> <table> <range> <colour>|none <out>
+                                           paint cells (empty ones too): a
+                                           colour is #RRGGBB or r,g,b in 0..1
+  iwork text-look <file> <table> <range> <what>... <out>
+                                           how cells' text is set — any of
+                                           bold, italic, plain, size=<pt>,
+                                           font=<PostScript name>,
+                                           color=<colour>, align=left|right|
+                                           centre|justified|auto
   iwork set-width  <file> <table> <column> <points>|default <out>
   iwork set-height <file> <table> <row> <points>|default <out>
                                            a column's width, a row's height
@@ -231,6 +245,9 @@ Keynote decks
                                            from one of the deck's layouts
   iwork effects                            every transition effect, by name and
                                            by the identifier the archive holds
+  iwork background <file> <slide> <colour>|none <out>
+                                           one slide's background, or back to
+                                           its layout's
   iwork set-transition <file> <slide> <effect> [<duration> [<delay>]] <out>
                                            give a slide a transition; `none`
                                            takes its transition away
@@ -268,6 +285,23 @@ indexes text in.
 ";
 
 fn main() -> ExitCode {
+    // `iwork text Report.pages | head -3` closes the pipe while this is still
+    // printing, and `println!` answers a closed pipe with a panic and a
+    // backtrace hint. A tool that is read through `head` and `grep` all day
+    // should end the way every other one does: quietly, with the status a
+    // SIGPIPE gives.
+    // ponytail: matches on the panic's text, because restoring SIGPIPE's
+    // default needs `unsafe` or a dependency and this crate has neither. If
+    // std ever rewords the message this stops catching it and nothing else
+    // breaks.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if info.to_string().contains("failed printing to stdout") {
+            std::process::exit(141);
+        }
+        default_hook(info);
+    }));
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
@@ -348,6 +382,16 @@ fn main() -> ExitCode {
             .and_then(|(row, column)| set_formula(file, table, row, column, formula, value, out)),
         ["set-format", file, table, cell, format, out] => reference_position(cell)
             .and_then(|(row, column)| set_format(file, table, row, column, format, out)),
+        ["fill", file, table, range, colour, out] => fill_cells(file, table, range, colour, out),
+        ["text-look", file, table, range, what @ .., out] if !what.is_empty() => {
+            text_look(file, table, range, what, out)
+        }
+        ["paint", file, drawable, what @ .., out] if !what.is_empty() => {
+            identifier(drawable).and_then(|drawable| paint(file, drawable, what, out))
+        }
+        ["background", file, slide, colour, out] => {
+            identifier(slide).and_then(|slide| slide_background(file, slide, colour, out))
+        }
         ["set-width", file, table, column, points, out] => {
             index(column).and_then(|column| set_size(file, table, column, points, true, out))
         }
@@ -3130,6 +3174,191 @@ fn set_format(
         reference_name(row, column),
         format.name()
     );
+    save(&doc, out)
+}
+
+/// `#RRGGBB`, or `r,g,b` with each channel in `0.0..=1.0`.
+fn parse_colour(text: &str) -> Result<iwork::drawable::Color, Error> {
+    let bad = || {
+        Error::Format(format!(
+            "'{text}' is not a colour — #RRGGBB, or r,g,b in 0..1"
+        ))
+    };
+    if let Some(hex) = text.strip_prefix('#') {
+        if hex.len() != 6 || !hex.is_ascii() {
+            return Err(bad());
+        }
+        let channel = |at: usize| {
+            u8::from_str_radix(&hex[at..at + 2], 16)
+                .map(|value| f32::from(value) / 255.0)
+                .map_err(|_| bad())
+        };
+        return Ok(iwork::drawable::Color {
+            red: channel(0)?,
+            green: channel(2)?,
+            blue: channel(4)?,
+            alpha: 1.0,
+        });
+    }
+    let channels: Vec<f32> = text
+        .split(',')
+        .map(|part| part.trim().parse::<f32>().map_err(|_| bad()))
+        .collect::<Result<_, _>>()?;
+    match channels[..] {
+        [red, green, blue] if channels.iter().all(|c| (0.0..=1.0).contains(c)) => {
+            Ok(iwork::drawable::Color {
+                red,
+                green,
+                blue,
+                alpha: 1.0,
+            })
+        }
+        _ => Err(bad()),
+    }
+}
+
+/// A colour, or `none`.
+fn parse_colour_or_none(text: &str) -> Result<Option<iwork::drawable::Color>, Error> {
+    match text {
+        "none" => Ok(None),
+        other => parse_colour(other).map(Some),
+    }
+}
+
+/// `iwork fill` — paint a range of cells.
+fn fill_cells(path: &str, table: &str, range: &str, colour: &str, out: &str) -> Result<(), Error> {
+    let colour = parse_colour_or_none(colour)?;
+    let cells = iwork::table::CellRange::from(range).cells()?;
+    let mut doc = Document::open(path)?;
+    let changed = doc.set_cell_fill(table, cells, colour)?;
+    match colour {
+        Some(colour) => println!("{range} of table {table}: painted {colour} ({changed} cell(s))"),
+        None => println!("{range} of table {table}: unpainted ({changed} cell(s))"),
+    }
+    save(&doc, out)
+}
+
+/// `iwork text-look` — how the text of a range of cells is set.
+fn text_look(path: &str, table: &str, range: &str, what: &[&str], out: &str) -> Result<(), Error> {
+    use iwork::table::{Align, CellText};
+    let mut look = CellText::default();
+    for word in what {
+        match word.split_once('=') {
+            None => match *word {
+                "bold" => look.bold = Some(true),
+                "italic" => look.italic = Some(true),
+                "plain" => {
+                    look.bold = Some(false);
+                    look.italic = Some(false);
+                }
+                other => {
+                    return Err(Error::Format(format!(
+                        "'{other}' is not something text can be — bold, italic, plain, \
+                         size=, font=, color= or align="
+                    )))
+                }
+            },
+            Some(("size", value)) => {
+                look.size = Some(
+                    value
+                        .parse()
+                        .map_err(|_| Error::Format(format!("'{value}' is not a size in points")))?,
+                )
+            }
+            Some(("font", value)) => look.font = Some(value.to_string()),
+            Some(("color" | "colour", value)) => look.colour = Some(parse_colour(value)?),
+            Some(("align", value)) => {
+                look.align = Some(match value {
+                    "left" => Align::Left,
+                    "right" => Align::Right,
+                    "centre" | "center" => Align::Centre,
+                    "justified" | "justify" => Align::Justified,
+                    "auto" | "automatic" => Align::Automatic,
+                    other => {
+                        return Err(Error::Format(format!(
+                            "'{other}' is not an alignment — left, right, centre, justified \
+                             or auto"
+                        )))
+                    }
+                })
+            }
+            Some((other, _)) => {
+                return Err(Error::Format(format!(
+                    "'{other}=' is not something text can be given — size, font, color or align"
+                )))
+            }
+        }
+    }
+    let cells = iwork::table::CellRange::from(range).cells()?;
+    let mut doc = Document::open(path)?;
+    let changed = doc.set_cell_text(table, cells, &look)?;
+    println!(
+        "{range} of table {table}: {} ({changed} cell(s))",
+        what.join(" ")
+    );
+    save(&doc, out)
+}
+
+/// `iwork paint` — the fill, outline and opacity of one drawable.
+fn paint(path: &str, drawable: u64, what: &[&str], out: &str) -> Result<(), Error> {
+    let mut doc = Document::open(path)?;
+    for word in what {
+        let (key, value) = word.split_once('=').ok_or_else(|| {
+            Error::Format(format!(
+                "'{word}' is not <what>=<value> — fill=, stroke= or opacity="
+            ))
+        })?;
+        match key {
+            "fill" => doc.set_object_fill(drawable, parse_colour_or_none(value)?)?,
+            "stroke" => {
+                // `#RRGGBB:width`. The split is from the right, so a colour
+                // written `r,g,b` keeps its commas.
+                let (colour, width) = match value.rsplit_once(':') {
+                    Some((colour, width)) => (
+                        colour,
+                        width.parse::<f32>().map_err(|_| {
+                            Error::Format(format!("'{width}' is not a width in points"))
+                        })?,
+                    ),
+                    None => (value, 1.0),
+                };
+                doc.set_object_stroke(drawable, parse_colour(colour)?, width)?
+            }
+            "opacity" => doc.set_object_opacity(
+                drawable,
+                value
+                    .parse()
+                    .map_err(|_| Error::Format(format!("'{value}' is not an opacity in 0..1")))?,
+            )?,
+            other => {
+                return Err(Error::Format(format!(
+                    "'{other}=' is not something a drawable has — fill, stroke or opacity"
+                )))
+            }
+        }
+    }
+    println!("drawable {drawable}: {}", what.join(" "));
+    save(&doc, out)
+}
+
+/// `iwork background` — one slide's background.
+fn slide_background(path: &str, slide: u64, colour: &str, out: &str) -> Result<(), Error> {
+    let colour = parse_colour_or_none(colour)?;
+    let mut doc = Document::open(path)?;
+    // A slide is named the way `iwork slides` prints it: by its place in the
+    // deck, or by its archive identifier.
+    let slides = doc.slides();
+    let target = slides
+        .iter()
+        .find(|found| found.identifier == slide)
+        .or_else(|| slide.checked_sub(1).and_then(|at| slides.get(at as usize)))
+        .map(|found| found.identifier)
+        .ok_or_else(|| Error::Format(format!("no slide {slide} in a deck of {}", slides.len())))?;
+    doc.set_slide_background(target, colour)?;
+    match colour {
+        Some(colour) => println!("slide {slide}: background {colour}"),
+        None => println!("slide {slide}: its layout's background"),
+    }
     save(&doc, out)
 }
 

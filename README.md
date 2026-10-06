@@ -259,6 +259,10 @@ iwork links     Report.pages              # hyperlinks and smart fields, with th
 iwork set-text  Report.pages 6083 "…" out.pages
 iwork insert-text Report.pages 6083 12 "…" out.pages   # at character 12
 iwork delete-text Report.pages 6083 12 30 out.pages    # characters 12..30
+iwork fill      Budget.numbers Costs A1:D1 '#122B4A' out.numbers     # paint cells
+iwork text-look Budget.numbers Costs A1:D1 bold color=#FFFFFF out.numbers
+iwork paint     Talk.key 1073 fill=#B44A2B stroke=#FFFFFF:4 opacity=0.9 out.key
+iwork background Talk.key 1 '#122B4A' out.key              # one slide's background
 iwork objects   Budget.numbers 2001       # every object of one message type
 iwork dump      Talk.key 1                # one object, field by field
 iwork check     Report.pages              # look for a broken object graph
