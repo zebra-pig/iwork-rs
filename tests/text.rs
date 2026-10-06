@@ -1574,3 +1574,118 @@ fn pages_draws_a_style_this_crate_made_from_nothing() {
     );
     let _ = std::fs::remove_file(&out);
 }
+
+/// **A style made here keeps the colour of its text where the app draws it.**
+///
+/// A style does not have one text colour: the font colour is one field and
+/// the fill drawn inside the glyphs is another, and the fill is what the app
+/// paints with. `set_text_style_color` writes every one the style *has* and
+/// invents none — and a blank document's `Body` had a font colour and no
+/// fill, so a style copied from it could be told to be red in one place out
+/// of four, the one that is not drawn. The paragraph oracle reported `0,0,0`
+/// for every paragraph of a report that had asked for an accent colour.
+#[test]
+fn a_style_made_from_nothing_has_a_fill_for_its_colour_to_go_in() {
+    for kind in [Kind::Pages, Kind::Keynote, Kind::Numbers] {
+        let mut doc = match kind {
+            Kind::Numbers => Document::new_spreadsheet("S", "T", 2, 2).unwrap(),
+            other => Document::new(other).unwrap(),
+        };
+        let Some(template) = doc
+            .text_styles()
+            .into_iter()
+            .find(|s| s.kind == StyleKind::Paragraph && s.name.is_some())
+        else {
+            panic!("{kind:?}: no named paragraph style to copy");
+        };
+        let made = doc
+            .create_text_style(template.identifier, "Akzent")
+            .unwrap()
+            .identifier;
+        let written = doc
+            .set_text_style_color(made, 0.83, 0.18, 0.18, 1.0)
+            .unwrap();
+        assert!(
+            written >= 2,
+            "{kind:?}: the colour reached {written} place(s); the font colour and the \
+             fill are the least a style needs to be drawn in it"
+        );
+
+        let archive = doc.text_style(made).unwrap().archive;
+        match iwork::style::get_path(&archive, &[11, 46, 1, 3]) {
+            Some(iwork::pb::Value::Fixed32(bytes)) => {
+                assert!((f32::from_le_bytes(bytes) - 0.83).abs() < 1e-6, "{kind:?}");
+            }
+            other => panic!("{kind:?}: the fill has no red channel: {other:?}"),
+        }
+        // And the count still agrees with the bags.
+        let bag = |n: u32| match iwork::style::get_path(&archive, &[n]) {
+            Some(iwork::pb::Value::Bytes(raw)) => iwork::pb::Message::decode(&raw)
+                .map(|m| m.fields.len())
+                .unwrap_or(0),
+            _ => 0,
+        };
+        assert_eq!(
+            iwork::style::get_path(&archive, iwork::style::OVERRIDE_COUNT),
+            Some(iwork::pb::Value::Varint((bag(11) + bag(12)) as u64)),
+            "{kind:?}: override_count follows the bags"
+        );
+        assert!(doc.problems().is_empty(), "{kind:?}: {:?}", doc.problems());
+    }
+}
+
+/// **The acceptance test for colour: Pages draws the text red.**
+/// Off unless `IWORK_APP_CHECK=1`.
+#[test]
+fn pages_draws_text_in_a_colour_this_crate_gave_a_style() {
+    if std::env::var("IWORK_APP_CHECK").as_deref() != Ok("1") {
+        eprintln!("IWORK_APP_CHECK is not 1 — skipping the paragraph oracle");
+        return;
+    }
+    let mut doc = Document::new(Kind::Pages).unwrap();
+    let body = doc
+        .text_styles()
+        .into_iter()
+        .find(|s| s.name.as_deref() == Some("Body"))
+        .unwrap()
+        .identifier;
+    let red = doc.create_text_style(body, "Rot").unwrap().identifier;
+    doc.set_text_style_color(red, 0.83, 0.18, 0.18, 1.0)
+        .unwrap();
+    doc.body_mut().unwrap().set("Rot\nSchwarz").unwrap();
+    doc.body_mut().unwrap().style(0..4, red).unwrap();
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+
+    let out = std::env::temp_dir().join("iwork-red-text.pages");
+    let _ = std::fs::remove_file(&out);
+    doc.save(&out).unwrap();
+
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/paragraph-oracle.sh");
+    let output = std::process::Command::new(&script)
+        .arg(&out)
+        .output()
+        .unwrap_or_else(|e| panic!("{}: {e}", script.display()));
+    assert!(
+        output.status.success(),
+        "Pages would not answer:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // Third column: the colour as three 16-bit channels.
+    let colours: Vec<Vec<u32>> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.split('\t').nth(2).map(str::to_string))
+        .map(|c| c.split(',').filter_map(|n| n.trim().parse().ok()).collect())
+        .collect();
+    assert_eq!(colours.len(), 2, "two paragraphs: {colours:?}");
+    let (first, second) = (&colours[0], &colours[1]);
+    assert!(
+        first.len() == 3 && first[0] > 30_000 && first[0] > first[1] * 2,
+        "the first paragraph is drawn red: {first:?}"
+    );
+    assert!(
+        second.len() == 3 && second.iter().all(|c| *c < 3_000),
+        "the second is still black: {second:?}"
+    );
+    let _ = std::fs::remove_file(&out);
+}

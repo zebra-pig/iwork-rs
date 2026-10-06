@@ -873,8 +873,8 @@ fn paragraph_style(stylesheet: u64, list: u64) -> Message {
         // `override_count`, and it is not decoration: a style whose bags hold
         // properties while this says nothing is one the app treats as
         // overriding nothing — Pages draws the paragraph as if the style set
-        // nothing at all. Five character properties below, two paragraph.
-        varint(crate::style::OVERRIDE_COUNT[0], 7),
+        // nothing at all. Six character properties below, two paragraph.
+        varint(crate::style::OVERRIDE_COUNT[0], 8),
         nested(
             property::FONT_SIZE[0],
             vec![
@@ -883,6 +883,11 @@ fn paragraph_style(stylesheet: u64, list: u64) -> Message {
                 float(property::FONT_SIZE[1], 11.0),
                 string(property::FONT_NAME[1], "HelveticaNeue"),
                 nested(property::FONT_COLOR[1], black()),
+                // The fill drawn inside the glyphs, which is the colour the
+                // app actually paints text with: a style whose font colour
+                // says red and whose fill says black is drawn black, and one
+                // with no fill at all has nowhere for a colour to be written.
+                nested(property::TEXT_FILL[1], vec![nested(1, black())]),
             ],
         ),
         nested(
@@ -1709,8 +1714,8 @@ fn table_text_style(identifier: &str, name: &str, stylesheet: u64, list: u64) ->
                 reference(5, stylesheet),
             ],
         ),
-        // Three character properties below, two paragraph. See `OVERRIDE_COUNT`.
-        varint(crate::style::OVERRIDE_COUNT[0], 5),
+        // Four character properties below, two paragraph. See `OVERRIDE_COUNT`.
+        varint(crate::style::OVERRIDE_COUNT[0], 6),
         nested(
             property::FONT_SIZE[0],
             vec![
@@ -1723,6 +1728,7 @@ fn table_text_style(identifier: &str, name: &str, stylesheet: u64, list: u64) ->
                     },
                 ),
                 nested(property::FONT_COLOR[1], black()),
+                nested(property::TEXT_FILL[1], vec![nested(1, black())]),
             ],
         ),
         nested(
