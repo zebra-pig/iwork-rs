@@ -596,6 +596,44 @@ impl TableHandle<'_> {
         self.document.set_format(&self.table, cells, format)
     }
 
+    /// Paint a range of cells, or with `None` go back to what their area is
+    /// painted with. See [`Document::set_cell_fill`].
+    ///
+    /// ```no_run
+    /// # use iwork::drawable::Color;
+    /// # let mut doc = iwork::Document::new_spreadsheet("S", "T", 4, 3)?;
+    /// let mut t = doc.table_mut("T")?;
+    /// t.fill("A1:C1", Some(Color { red: 0.12, green: 0.22, blue: 0.38, alpha: 1.0 }))?;
+    /// # Ok::<(), iwork::Error>(())
+    /// ```
+    pub fn fill(
+        &mut self,
+        cells: impl Into<crate::table::CellRange>,
+        colour: Option<crate::drawable::Color>,
+    ) -> Result<usize, Error> {
+        let cells = cells.into().cells()?;
+        self.document.set_cell_fill(&self.table, cells, colour)
+    }
+
+    /// Change how the text of a range of cells is set. See
+    /// [`Document::set_cell_text`].
+    ///
+    /// ```no_run
+    /// # use iwork::table::CellText;
+    /// # let mut doc = iwork::Document::new_spreadsheet("S", "T", 4, 3)?;
+    /// let mut t = doc.table_mut("T")?;
+    /// t.text_look("A4:C4", &CellText::bold())?;
+    /// # Ok::<(), iwork::Error>(())
+    /// ```
+    pub fn text_look(
+        &mut self,
+        cells: impl Into<crate::table::CellRange>,
+        look: &crate::table::CellText,
+    ) -> Result<usize, Error> {
+        let cells = cells.into().cells()?;
+        self.document.set_cell_text(&self.table, cells, look)
+    }
+
     /// What the table sorts by, replacing whatever it sorted by before.
     ///
     /// The rules are stored, not applied: see [`Document::set_sort_rules`].
@@ -670,10 +708,21 @@ struct TableSite {
     controls: Option<u64>,
     /// The `FORMULA` list, which a filled formula takes another reference in.
     formulas: Option<u64>,
+    /// `DataStore.styleTable` — the list a cell's own cell style and text
+    /// style are keys into.
+    styles: Option<u64>,
     /// `TST.HeaderStorageBucket`s carrying the per-row and per-column cell
     /// counts, which change when a cell appears or disappears.
     row_bucket: Vec<u64>,
     column_bucket: Option<u64>,
+}
+
+/// What [`Document::set_cell_fill`] and [`Document::set_cell_text`] ask of the
+/// one routine that serves both.
+#[derive(Debug, Clone)]
+enum CellLook {
+    Fill(Option<crate::drawable::Color>),
+    Text(crate::table::CellText),
 }
 
 /// One row of a batch: the row's index in the table, and its cells by column.
@@ -2728,6 +2777,7 @@ impl Document {
             formats: list(22),
             controls: list(21),
             formulas: list(6),
+            styles: list(5),
             row_bucket: store
                 .bytes(1)
                 .and_then(crate::pb::decode_nested)
@@ -2926,6 +2976,29 @@ impl Document {
             }
             if let (Some(list), Some(key)) = (site.controls, old.control_id) {
                 mutations.push(ListMutation::Release { list, key });
+            }
+            // **Unless the cell names a style of its own.** Then it is not
+            // deleted, it is emptied: the app keeps a bare record — type 0,
+            // the style keys and nothing else — for a cell that has a look
+            // and no value, 70 of them in three tables of the corpus. Deleting
+            // one took the cell's colour with its value and left the style
+            // list counting a reference no cell held.
+            if old.cell_style_id.is_some()
+                || old.text_style_id.is_some()
+                || old.conditional_style_id.is_some()
+            {
+                let bare = crate::table::CellRecord {
+                    version: 5,
+                    cell_type: cell_type::EMPTY,
+                    cell_style_id: old.cell_style_id,
+                    text_style_id: old.text_style_id,
+                    conditional_style_id: old.conditional_style_id,
+                    ..crate::table::CellRecord::default()
+                };
+                return Ok(CellWrite {
+                    record: Some(bare),
+                    mutations,
+                });
             }
             return Ok(CellWrite {
                 record: None,
@@ -3915,6 +3988,497 @@ impl Document {
             written += 1;
         }
         cache.flush(self)?;
+        Ok(written)
+    }
+
+    // -- how one cell looks ---------------------------------------------------
+
+    /// Paint cells, or with `None` go back to what their area is painted with.
+    ///
+    /// A cell does not carry a colour. It carries a key into its table's style
+    /// list, and the entry names a `TST.CellStyleArchive` — for a cell that
+    /// differs from its area, a **variation**: an archive that names the
+    /// area's style as its parent, says it is a variation, and holds only what
+    /// differs. Read off a table Numbers wrote:
+    ///
+    /// ```text
+    /// { 1: { 3: -> the area's style, 4: 1, 5: -> the stylesheet },
+    ///   10: 1,            one property differs
+    ///   11: { 8: 1 } }    and this is it
+    /// ```
+    ///
+    /// That is what this makes, once per distinct look: cells that end up
+    /// painted alike share one variation and one list entry, whose count is
+    /// the number of cells naming it — the rule all 37 tables in the corpus
+    /// keep and [`crate::table::Table::audit`] checks.
+    ///
+    /// **An empty cell can be painted**, which is what a banner or a spacer
+    /// row needs: the app keeps a bare record for a styled cell with no value,
+    /// and so does this. Returns how many cells changed.
+    ///
+    /// Refused by name: a cell outside the table, a cell a merge covers, a
+    /// table with no style list, and any object carrying version patches.
+    pub fn set_cell_fill(
+        &mut self,
+        wanted: &str,
+        cells: impl IntoIterator<Item = (usize, usize)>,
+        colour: Option<crate::drawable::Color>,
+    ) -> Result<usize, Error> {
+        self.style_cells(wanted, cells.into_iter().collect(), CellLook::Fill(colour))
+    }
+
+    /// Change how the text of cells is set — bold, italic, size, font, colour.
+    ///
+    /// The same mechanism as [`Document::set_cell_fill`], through the same
+    /// list: the entry names a `TSWP.ParagraphStyleArchive` variation whose
+    /// parent is the text style the cell had, carrying only what `look`
+    /// changes. A colour goes to the font colour *and* to the fill inside the
+    /// glyphs, because the fill is what the app paints with.
+    pub fn set_cell_text(
+        &mut self,
+        wanted: &str,
+        cells: impl IntoIterator<Item = (usize, usize)>,
+        look: &crate::table::CellText,
+    ) -> Result<usize, Error> {
+        if look.is_empty() {
+            return Ok(0);
+        }
+        self.style_cells(
+            wanted,
+            cells.into_iter().collect(),
+            CellLook::Text(look.clone()),
+        )
+    }
+
+    fn style_cells(
+        &mut self,
+        wanted: &str,
+        cells: Vec<(usize, usize)>,
+        look: CellLook,
+    ) -> Result<usize, Error> {
+        let table = self.table_for_write(wanted)?;
+        let site = self.table_site(&table)?;
+        let list = site.styles.ok_or_else(|| {
+            Error::refused(
+                Refusal::Missing,
+                format!("{}: the table has no style list", table.name),
+            )
+        })?;
+        let mut seen = std::collections::BTreeSet::new();
+        for &(row, column) in &cells {
+            let where_ = format!(
+                "{} {}",
+                table.name,
+                crate::table::CellRef::Index(row, column)
+            );
+            if row >= table.rows || column >= table.columns {
+                return Err(Error::refused(
+                    Refusal::OutOfBounds,
+                    format!("{where_}: the table is {}×{}", table.rows, table.columns),
+                ));
+            }
+            if let Some(merge) = table.merge_covering(row, column) {
+                if (merge.row, merge.column) != (row, column) {
+                    return Err(Error::refused(
+                        Refusal::Merged,
+                        format!(
+                            "{where_}: covered by the merge that begins at row {} column {}",
+                            merge.row, merge.column
+                        ),
+                    ));
+                }
+            }
+            if !seen.insert((row, column)) {
+                return Err(Error::refused(
+                    Refusal::NotACell,
+                    format!("{where_}: named twice in one write"),
+                ));
+            }
+        }
+        let mut rewritten: Vec<u64> = vec![list];
+        rewritten.extend(site.tiles.values().copied());
+        rewritten.extend(site.row_bucket.iter().copied());
+        rewritten.extend(site.column_bucket);
+        self.refuse_if_patched(&rewritten, &table.name)?;
+
+        let restore = self.streams.clone();
+        match self.apply_cell_look(&table, &site, &cells, list, &look) {
+            Ok(written) => {
+                // The variation lives in the stylesheet and the list that names
+                // it in the table's own component.
+                self.declare_external_references();
+                Ok(written)
+            }
+            Err(e) => {
+                self.streams = restore;
+                Err(e)
+            }
+        }
+    }
+
+    /// The style an area of a table is drawn with when a cell names none of
+    /// its own: the model's `body_`, `header_row_`, `header_column_` and
+    /// `footer_row_` slots, for the cell style or the text style.
+    fn area_style(
+        &self,
+        table: &crate::table::Table,
+        row: usize,
+        column: usize,
+        text: bool,
+    ) -> Result<u64, Error> {
+        let slot = if row < table.header_rows as usize {
+            if text {
+                25
+            } else {
+                19
+            }
+        } else if table.footer_rows > 0 && row >= table.rows - table.footer_rows as usize {
+            if text {
+                27
+            } else {
+                21
+            }
+        } else if column < table.header_columns as usize {
+            if text {
+                26
+            } else {
+                20
+            }
+        } else if text {
+            24
+        } else {
+            18
+        };
+        let model = self.archive_of(table.model)?;
+        style::reference_at(&model, &[slot, 1]).ok_or_else(|| {
+            Error::refused(
+                Refusal::Missing,
+                format!(
+                    "{}: the table model names no style in slot {slot} for row {row} column \
+                     {column} to vary",
+                    table.name
+                ),
+            )
+        })
+    }
+
+    /// The variation of `base` that `look` asks for: its parent and its
+    /// archive, or `None` when nothing is left to differ and the cell should
+    /// name no style of its own.
+    fn variation_of(
+        &self,
+        base: u64,
+        look: &CellLook,
+    ) -> Result<Option<(u64, u32, Message)>, Error> {
+        let (_, object) = self.object(base).ok_or(Error::NoSuchObject(base))?;
+        let message_type = object.message_type();
+        let expected = match look {
+            CellLook::Fill(_) => crate::create::TYPE_CELL_STYLE,
+            CellLook::Text(_) => style::TYPE_PARAGRAPH_STYLE,
+        };
+        if message_type != expected {
+            return Err(Error::Format(format!(
+                "style {base} is message type {message_type}, where a cell's {} is {expected}",
+                match look {
+                    CellLook::Fill(_) => "cell style",
+                    CellLook::Text(_) => "text style",
+                }
+            )));
+        }
+        let archive = self.archive_of(base)?;
+        // A cell that already has a variation gets a sibling of it, not a
+        // variation of a variation: the parent is the area's style either way.
+        let varies = matches!(
+            style::get_path(&archive, style::IS_VARIATION),
+            Some(Value::Varint(1))
+        );
+        let parent = match (varies, style::reference_at(&archive, &[1, 3, 1])) {
+            (true, Some(parent)) => parent,
+            _ => base,
+        };
+        let bag = |number: u32| -> Message {
+            if parent == base {
+                return Message::default();
+            }
+            archive
+                .bytes(number)
+                .and_then(crate::pb::decode_nested)
+                .unwrap_or_default()
+        };
+        // Field 11 is the cell's properties in a cell style and the character
+        // properties in a text style; 12 is a text style's paragraph ones.
+        let mut properties = bag(11);
+        let paragraph = bag(12);
+        match look {
+            CellLook::Fill(Some(colour)) => {
+                let mut fill = Message::default();
+                fill.set_in_order(
+                    1,
+                    Value::Bytes(crate::drawable::colour_message(*colour).encode()),
+                );
+                properties.set_in_order(1, Value::Bytes(fill.encode()));
+            }
+            CellLook::Fill(None) => {
+                properties.clear(1);
+            }
+            CellLook::Text(text) => {
+                use style::property;
+                if let Some(bold) = text.bold {
+                    properties.set_in_order(property::BOLD[1], Value::Varint(u64::from(bold)));
+                }
+                if let Some(italic) = text.italic {
+                    properties.set_in_order(property::ITALIC[1], Value::Varint(u64::from(italic)));
+                }
+                if let Some(size) = text.size {
+                    properties
+                        .set_in_order(property::FONT_SIZE[1], Value::Fixed32(size.to_le_bytes()));
+                }
+                if let Some(font) = &text.font {
+                    properties.set_in_order(
+                        property::FONT_NAME[1],
+                        Value::Bytes(font.as_bytes().to_vec()),
+                    );
+                }
+                if let Some(colour) = text.colour {
+                    let ink = crate::drawable::colour_message(colour).encode();
+                    properties.set_in_order(property::FONT_COLOR[1], Value::Bytes(ink.clone()));
+                    let mut fill = Message::default();
+                    fill.set_in_order(1, Value::Bytes(ink));
+                    properties.set_in_order(property::TEXT_FILL[1], Value::Bytes(fill.encode()));
+                }
+            }
+        }
+        let count = properties.fields.len() + paragraph.fields.len();
+        if count == 0 {
+            return Ok(None);
+        }
+        let stylesheet = style::reference_at(&self.archive_of(parent)?, &[1, 5, 1])
+            .or_else(|| style::reference_at(&archive, &[1, 5, 1]));
+        let mut super_ = Message::default();
+        super_.set_in_order(3, Value::Bytes(style::reference(parent).encode()));
+        super_.set_in_order(4, Value::Varint(1));
+        if let Some(stylesheet) = stylesheet {
+            super_.set_in_order(5, Value::Bytes(style::reference(stylesheet).encode()));
+        }
+        let mut made = Message::default();
+        made.set_in_order(1, Value::Bytes(super_.encode()));
+        made.set_in_order(style::OVERRIDE_COUNT[0], Value::Varint(count as u64));
+        if !properties.fields.is_empty() {
+            made.set_in_order(11, Value::Bytes(properties.encode()));
+        }
+        if !paragraph.fields.is_empty() {
+            made.set_in_order(12, Value::Bytes(paragraph.encode()));
+        }
+        Ok(Some((parent, message_type, made)))
+    }
+
+    fn apply_cell_look(
+        &mut self,
+        table: &crate::table::Table,
+        site: &TableSite,
+        cells: &[(usize, usize)],
+        list: u64,
+        look: &CellLook,
+    ) -> Result<usize, Error> {
+        let text = matches!(look, CellLook::Text(_));
+        let current = crate::table::DataList::decode(&self.archive_of(list)?);
+
+        // -- what each cell names now, and the style that stands behind it ----
+        let mut bases: Vec<u64> = Vec::with_capacity(cells.len());
+        for &(row, column) in cells {
+            let named = table.cell(row, column).and_then(|cell| match text {
+                true => cell.record.text_style_id,
+                false => cell.record.cell_style_id,
+            });
+            let base = named
+                .and_then(|key| current.entries.get(&key))
+                .and_then(|entry| entry.reference);
+            bases.push(match base {
+                Some(base) => base,
+                None => self.area_style(table, row, column, text)?,
+            });
+        }
+
+        // -- one variation, and one list entry, per distinct look -------------
+        // `None` is "no style of its own": the cell goes back to its area's.
+        enum Planned {
+            None,
+            Existing(u32),
+            New(u64),
+        }
+        let mut planned: std::collections::BTreeMap<u64, Planned> = Default::default();
+        let mut distinct: Vec<u64> = bases.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        // Archives made in this batch, so two bases that come to the same
+        // look share one object.
+        let mut made: Vec<(Vec<u8>, u64)> = Vec::new();
+        for base in distinct {
+            let Some((parent, message_type, archive)) = self.variation_of(base, look)? else {
+                planned.insert(base, Planned::None);
+                continue;
+            };
+            let bytes = archive.encode();
+            let existing = current.entries.values().find(|entry| {
+                entry
+                    .reference
+                    .and_then(|target| self.archive_of(target).ok())
+                    .is_some_and(|other| other.encode() == bytes)
+            });
+            if let Some(entry) = existing {
+                planned.insert(base, Planned::Existing(entry.key));
+                continue;
+            }
+            if let Some((_, identifier)) = made.iter().find(|(other, _)| *other == bytes) {
+                planned.insert(base, Planned::New(*identifier));
+                continue;
+            }
+            let mut grow = crate::create::Grow::new(self);
+            let identifier = grow.allocate();
+            grow.beside(parent, identifier, message_type, &archive)?;
+            grow.finish()?;
+            made.push((bytes, identifier));
+            planned.insert(base, Planned::New(identifier));
+        }
+
+        let mut cache = ListCache::default();
+        let mut keys: std::collections::BTreeMap<u64, Option<u32>> = Default::default();
+        let mut key_of_new: std::collections::BTreeMap<u64, u32> = Default::default();
+        for (base, plan) in &planned {
+            let key = match plan {
+                Planned::None => None,
+                Planned::Existing(key) => Some(*key),
+                Planned::New(identifier) => Some(match key_of_new.get(identifier) {
+                    Some(key) => *key,
+                    None => {
+                        // `{1: key, 2: count, 4: -> the style}`. No references
+                        // yet: every cell takes its own below.
+                        let key = self.define_list_entry(
+                            &mut cache,
+                            list,
+                            4,
+                            style::reference(*identifier).encode(),
+                            0,
+                        )?;
+                        key_of_new.insert(*identifier, key);
+                        key
+                    }
+                }),
+            };
+            keys.insert(*base, key);
+        }
+
+        // -- the records ------------------------------------------------------
+        let mut by_tile: std::collections::BTreeMap<usize, Vec<(usize, usize, Option<u32>)>> =
+            Default::default();
+        for (&(row, column), base) in cells.iter().zip(&bases) {
+            by_tile
+                .entry(row / site.tile_size)
+                .or_default()
+                .push((row, column, keys[base]));
+        }
+        let mut written = 0;
+        let mut row_delta: std::collections::BTreeMap<usize, i64> = Default::default();
+        let mut column_delta: std::collections::BTreeMap<usize, i64> = Default::default();
+        for (_, mut targets) in by_tile {
+            targets.sort_unstable();
+            let first = targets[0].0;
+            let where_ = format!("{} r{first}", table.name);
+            let tile = self.tile_for_row(site, first, &where_)?;
+            let mut archive = self.archive_of(tile)?;
+            let mut index = TileIndex::of(&archive);
+            let mut touched_tile = false;
+            let mut at = 0;
+            while at < targets.len() {
+                let row = targets[at].0;
+                let mut in_tile = index.row(&archive, row % site.tile_size, &where_)?;
+                let mut changed = false;
+                while at < targets.len() && targets[at].0 == row {
+                    let (_, column, key) = targets[at];
+                    at += 1;
+                    let where_ = format!(
+                        "{} {}",
+                        table.name,
+                        crate::table::CellRef::Index(row, column)
+                    );
+                    let slots = in_tile.records.len();
+                    if column >= slots {
+                        return Err(Error::refused(
+                            Refusal::OutOfBounds,
+                            format!("{where_}: the row's offset array names only {slots} columns"),
+                        ));
+                    }
+                    let had = in_tile.records[column].clone();
+                    let mut record = match &had {
+                        Some(bytes) => crate::table::decode_cell(bytes)
+                            .map_err(|e| Error::Format(format!("{where_}: {e}")))?,
+                        None => crate::table::CellRecord {
+                            version: 5,
+                            ..crate::table::CellRecord::default()
+                        },
+                    };
+                    let previous = match text {
+                        true => record.text_style_id,
+                        false => record.cell_style_id,
+                    };
+                    if previous == key {
+                        continue;
+                    }
+                    match text {
+                        true => record.text_style_id = key,
+                        false => record.cell_style_id = key,
+                    }
+                    // A record that says nothing at all is not kept: an empty
+                    // cell naming no style is no cell.
+                    let bare = record.cell_type == cell_type::EMPTY && record.says_nothing();
+                    let encoded = match bare {
+                        true => None,
+                        false => Some(
+                            record
+                                .encode()
+                                .map_err(|e| Error::Format(format!("{where_}: {e}")))?,
+                        ),
+                    };
+                    if let Some(previous) = previous {
+                        self.step_list_entry(&mut cache, list, previous, -1)?;
+                    }
+                    if let Some(key) = key {
+                        self.step_list_entry(&mut cache, list, key, 1)?;
+                    }
+                    match (had.is_some(), encoded.is_some()) {
+                        (false, true) => {
+                            *row_delta.entry(row).or_default() += 1;
+                            *column_delta.entry(column).or_default() += 1;
+                        }
+                        (true, false) => {
+                            *row_delta.entry(row).or_default() -= 1;
+                            *column_delta.entry(column).or_default() -= 1;
+                        }
+                        _ => {}
+                    }
+                    in_tile.records[column] = encoded;
+                    changed = true;
+                    written += 1;
+                }
+                if changed {
+                    in_tile.put(&mut archive, &where_)?;
+                    if in_tile.fresh {
+                        index.inserted(in_tile.index, in_tile.position);
+                    }
+                    touched_tile = true;
+                }
+            }
+            if touched_tile {
+                self.set_archive(tile, &archive)?;
+            }
+        }
+        cache.flush(self)?;
+        if written > 0 {
+            self.step_row_counts(site, &row_delta)?;
+            if let Some(bucket) = site.column_bucket {
+                self.step_bucket_counts(bucket, &column_delta)?;
+            }
+        }
         Ok(written)
     }
 

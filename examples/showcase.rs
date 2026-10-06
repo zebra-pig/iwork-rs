@@ -1,5 +1,5 @@
-//! Everything 0.2.0 can put in a Numbers document, in one file — written
-//! from Rust, with no Apple software anywhere in the picture.
+//! What this crate can put in a Numbers document, in one file — written from
+//! Rust, with no Apple software anywhere in the picture.
 //!
 //! ```text
 //! cargo run --example showcase -- Review.numbers
@@ -12,8 +12,29 @@
 //! two, placed side by side — which is why every call names a table rather
 //! than assuming the sheet *is* one.
 
-use iwork::table::{CellValue, Decimal, Format, SortRule};
+use iwork::drawable::Color;
+use iwork::table::{CellText, CellValue, Decimal, Format, SortRule};
 use iwork::Document;
+
+/// The house colours: a navy for banners, a sand for totals, and white.
+const NAVY: Color = Color {
+    red: 0.11,
+    green: 0.22,
+    blue: 0.38,
+    alpha: 1.0,
+};
+const SAND: Color = Color {
+    red: 0.98,
+    green: 0.93,
+    blue: 0.82,
+    alpha: 1.0,
+};
+const WHITE: Color = Color {
+    red: 1.0,
+    green: 1.0,
+    blue: 1.0,
+    alpha: 1.0,
+};
 
 struct Route {
     name: &'static str,
@@ -132,6 +153,18 @@ fn revenue(doc: &mut Document) -> Result<(), iwork::Error> {
     t.set("A1", "Alpine Rail — Q3 2026")?;
     t.merge("A1:D1")?;
     t.row_height(0, Some(38.0))?;
+    // How one cell looks is its own: a fill, and a text look, each a variation
+    // of the style its area has — which is how Numbers stores a cell somebody
+    // coloured by hand. The merge's own cell is the one that takes it.
+    t.fill("A1", Some(NAVY))?;
+    t.text_look(
+        "A1",
+        &CellText {
+            size: Some(16.0),
+            colour: Some(WHITE),
+            ..CellText::bold()
+        },
+    )?;
 
     t.set_block("A2", &[vec!["Route", "Passengers", "Revenue", "Load"]])?;
 
@@ -187,6 +220,11 @@ fn revenue(doc: &mut Document) -> Result<(), iwork::Error> {
     t.column_width(0, Some(190.0))?;
     t.column_width(2, Some(130.0))?;
 
+    // The total row: painted and bold, across a range that includes a text
+    // cell, two numbers and money. An empty cell could be painted too.
+    t.fill(format!("A{total}:D{total}"), Some(SAND))?;
+    t.text_look(format!("A{total}:D{total}"), &CellText::bold())?;
+
     // What to sort *by*. Nothing here reorders a row — this is the rule the
     // app's own sort applies when you ask it to.
     t.sort_by(&[SortRule {
@@ -216,6 +254,8 @@ fn headline(doc: &mut Document) -> Result<(), iwork::Error> {
 
     t.set("A1", "Headline")?;
     t.merge("A1:B1")?;
+    t.fill("A1", Some(NAVY))?;
+    t.text_look("A1", &CellText::coloured(WHITE))?;
 
     t.set("A2", "Routes")?;
     t.set("B2", ROUTES.len() as u32)?;

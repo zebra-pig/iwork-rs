@@ -540,6 +540,13 @@ impl CellRecord {
     /// byte 6's chosen-format bits, byte 7 and any trailing bytes are carried
     /// through as they arrived, and so are the conditional-style and
     /// conditional-rule keys that a cell's highlighting hangs off.
+    /// Whether the record carries nothing at all — no value, no key, no flag.
+    /// An empty cell whose record says nothing is not a cell, and the app
+    /// keeps no record for one.
+    pub fn says_nothing(&self) -> bool {
+        self.derived_flags() == 0
+    }
+
     pub fn encode(&self) -> Result<Vec<u8>, String> {
         let known = FLAGS.iter().fold(0u32, |all, &(bit, _, _)| all | bit);
         if self.flags & !known != 0 {
@@ -2793,6 +2800,11 @@ impl Table {
                 ("string", &self.side.strings, cell.record.string_id),
                 ("control", &self.side.controls, cell.record.control_id),
                 ("formula", &self.side.formulas, cell.record.formula_id),
+                // One list for both: a cell's own cell style and its own text
+                // style are keys into the same `styleTable`, and an entry's
+                // count is every cell that names it either way.
+                ("style", &self.side.styles, cell.record.cell_style_id),
+                ("style", &self.side.styles, cell.record.text_style_id),
             ]) {
                 let Some(key) = key else { continue };
                 *used.entry((name, key)).or_default() += 1;
@@ -2809,6 +2821,7 @@ impl Table {
             ("string", &self.side.strings),
             ("format", &self.side.formats),
             ("control", &self.side.controls),
+            ("style", &self.side.styles),
         ] {
             for entry in list.entries.values() {
                 let counted = used.get(&(name, entry.key)).copied().unwrap_or(0);
@@ -2971,6 +2984,9 @@ pub struct SideTables {
     pub formats: DataList,
     pub controls: DataList,
     pub formulas: DataList,
+    /// `DataStore.styleTable` — what a cell's `cell_style_id` and
+    /// `text_style_id` are keys into, both of them.
+    pub styles: DataList,
 }
 
 /// Read every table in a document.
@@ -3162,6 +3178,7 @@ fn read_table(
         formats: data_list(document, &store, 22),
         controls: data_list(document, &store, 21),
         formulas: data_list(document, &store, 6),
+        styles: data_list(document, &store, 5),
     };
 
     // The UUID index first: nothing below can name a row or a column without
@@ -4704,6 +4721,51 @@ pub fn set_conditional_threshold(
         ));
     }
     document.set_archive_for(set, &archive)
+}
+
+/// What to change about how one cell's text is set. Anything left `None` is
+/// left as the cell has it.
+///
+/// A cell does not carry these itself. It carries a key into its table's style
+/// list, and the list names a `TSWP.ParagraphStyleArchive` — for a cell whose
+/// text differs from its area's, a *variation*: an archive naming the area's
+/// style as its parent and holding only what differs. That is what Numbers
+/// writes when a cell is made bold, and it is what this makes.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CellText {
+    /// The bold toggle.
+    pub bold: Option<bool>,
+    /// The italic toggle.
+    pub italic: Option<bool>,
+    /// Font size, in points.
+    pub size: Option<f32>,
+    /// PostScript font name, e.g. `"HelveticaNeue-Medium"`.
+    pub font: Option<String>,
+    /// Text colour, written to the font colour and to the fill inside the
+    /// glyphs — the second being the one the app paints with.
+    pub colour: Option<crate::drawable::Color>,
+}
+
+impl CellText {
+    /// Bold, and nothing else changed.
+    pub fn bold() -> CellText {
+        CellText {
+            bold: Some(true),
+            ..CellText::default()
+        }
+    }
+
+    /// A colour, and nothing else changed.
+    pub fn coloured(colour: crate::drawable::Color) -> CellText {
+        CellText {
+            colour: Some(colour),
+            ..CellText::default()
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        *self == CellText::default()
+    }
 }
 
 /// `TST.CellStyleArchive` — how a table cell is painted.
