@@ -9,6 +9,51 @@ com.apple.iWork.Keynote bundles), all three scriptable via AppleScript and
 confirmed working: probe documents created by each app parse correctly with
 the crate, and Numbers evaluates formulas we can read back as an oracle.
 
+## Awaiting the apps — branch `overnight`, 2026-10-07
+
+**Delete this section once every row has an answer.** It is here because the
+work below was done while the Mac was locked, which fails every app-driven
+check with `did not open … (8010)`, and ground rule 1 says none of it is
+finished until the apps have been asked. `main` is at the released 0.2.2 and
+has none of it.
+
+Run, with the Mac unlocked and nobody else driving the apps:
+
+```
+IWORK_APP_CHECK=1 cargo test --all-targets --no-fail-fast
+```
+
+and then open the three documents `cargo run --example {showcase,deck,report}`
+write, because several of these are about what is *drawn*.
+
+| commit | what it claims | the test that decides it |
+|---|---|---|
+| paragraph-style table, one entry per paragraph | Pages draws a style applied here | `pages_draws_a_style_this_crate_made_from_nothing` — **passed before the lock**; the rest of the suite has not run on it |
+| a text fill in the blueprint | a text colour is drawn | `pages_draws_text_in_a_colour_this_crate_gave_a_style` |
+| a table from nothing, wired and styled | gridlines, shaded bold header, regular body | `numbers_draws_a_table_from_nothing_with_a_shaded_bold_header`, and look at it: a table style with 31 of Numbers' 63 properties is a shape no document Numbers wrote has |
+| the look of one cell | Numbers draws a cell's own fill and bold | `numbers_draws_the_look_of_one_cell` — the bold assertion reads `font name` and may need to read something else |
+| a table on a themed deck | Keynote opens it | `keynote_opens_a_themed_deck_with_a_table_this_crate_added` |
+| a slide's background | Keynote keeps it through a save | `keynote_keeps_a_slide_background_this_crate_painted` — **the shape is inferred, not observed**; if it fails, drop the commit or make a fixture with one slide's background changed by hand and copy that |
+
+Three things to look at that no test looks at:
+
+1. **A slide of a deck made from nothing now carries three bare placeholders,
+   1920 × 1080 at the origin** — copies of the blueprint layout's, made since
+   0.2.2. Keynote opened and resaved such decks. Whether it *draws* anything
+   for them — a "double-click to edit" prompt across the slide — nobody has
+   seen. Open `Quarter.key`.
+2. **`iwork check` reports problems on documents the apps wrote**, two kinds:
+   a format-list count on a table this crate created after Numbers resaves it
+   (`format entry 1 says 1 reference(s) and 0 cell(s) point at it`), and a
+   slide's table living in the `CalculationEngine` stream after Keynote
+   resaves it. Both need a resaved file to bisect, and the ones that showed
+   them were lost.
+3. The two new oracles, `scripts/paragraph-oracle.sh` (ran) and
+   `scripts/cell-look-oracle.sh` (compiled, never ran).
+
+What a failure means is ground rule 1a, unchanged: find the invariant, teach
+the checker, fix the writer, leave a test. Not a workaround, and not a merge.
+
 ## Ground rules, binding on every phase
 
 1. **"The app opens it" is the acceptance test.** Every write feature ships
