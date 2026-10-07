@@ -2289,6 +2289,7 @@ enum Property {
     Fill,
     Stroke,
     Opacity,
+    Shadow,
 }
 
 /// The path from a style archive's root to one property, or a refusal naming
@@ -2334,6 +2335,8 @@ fn property_path(
         (StyleShape::Shape, Property::Opacity) => 3,
         (StyleShape::Media, Property::Stroke) => 1,
         (StyleShape::Media, Property::Opacity) => 2,
+        (StyleShape::Shape, Property::Shadow) => 4,
+        (StyleShape::Media, Property::Shadow) => 3,
     };
     path.extend_from_slice(&[11, field]);
     Ok(path)
@@ -2576,6 +2579,211 @@ pub fn set_fill(
         Property::Fill,
         Some(Value::Bytes(fill.encode())),
     )
+}
+
+/// A linear gradient: colours along a line at an angle.
+///
+/// The angle is the one Keynote's inspector shows, in degrees: 0 runs left to
+/// right, 90 bottom to top, 270 top to bottom.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Gradient {
+    /// Each colour and where along the line it sits, `0.0..=1.0`, in order.
+    pub stops: Vec<(Color, f32)>,
+    pub angle: f32,
+}
+
+impl Gradient {
+    /// Two colours, from one to the other, at an angle.
+    pub fn linear(from: Color, to: Color, angle: f32) -> Gradient {
+        Gradient {
+            stops: vec![(from, 0.0), (to, 1.0)],
+            angle,
+        }
+    }
+
+    /// `TSD.FillArchive { 2: gradient }`, field for field what a theme's
+    /// gradient-fill preset is: linear, each stop with an inflection of one
+    /// half, opaque, not "advanced", and the angle in radians.
+    pub(crate) fn fill(&self) -> Result<Message, crate::Error> {
+        let ordered = self.stops.windows(2).all(|pair| pair[0].1 <= pair[1].1);
+        let inside = self.stops.iter().all(|(_, at)| (0.0..=1.0).contains(at));
+        if self.stops.len() < 2 || !ordered || !inside || !self.angle.is_finite() {
+            return Err(crate::Error::refused(
+                crate::Refusal::UnwritableValue,
+                "a gradient is two or more stops at fractions from 0 to 1 in ascending order, \
+                 and a finite angle",
+            ));
+        }
+        let mut gradient = Message::default();
+        gradient.set_in_order(1, Value::Varint(0));
+        for (colour, at) in &self.stops {
+            let mut stop = Message::default();
+            stop.set_in_order(1, Value::Bytes(colour_message(*colour).encode()));
+            stop.set_in_order(2, Value::Fixed32(at.to_le_bytes()));
+            stop.set_in_order(3, Value::Fixed32(0.5f32.to_le_bytes()));
+            gradient.append_in_order(2, Value::Bytes(stop.encode()));
+        }
+        gradient.set_in_order(3, Value::Fixed32(1.0f32.to_le_bytes()));
+        gradient.set_in_order(4, Value::Varint(0));
+        let mut angle = Message::default();
+        angle.set_in_order(2, Value::Fixed32(self.angle.to_radians().to_le_bytes()));
+        gradient.set_in_order(5, Value::Bytes(angle.encode()));
+        let mut fill = Message::default();
+        fill.set_in_order(2, Value::Bytes(gradient.encode()));
+        Ok(fill)
+    }
+}
+
+impl Default for Shadow {
+    /// Black, down and to the right, soft — close to the app's first preset.
+    fn default() -> Shadow {
+        Shadow {
+            color: Some(Color {
+                red: 0.0,
+                green: 0.0,
+                blue: 0.0,
+                alpha: 1.0,
+            }),
+            angle: 315.0,
+            offset: 6.0,
+            radius: 12,
+            opacity: 0.35,
+            enabled: true,
+        }
+    }
+}
+
+/// How a picture fills a shape — `TSD.ImageFillArchive.ImageFillTechnique`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageFit {
+    /// At its own size, cropped by the shape.
+    Original = 0,
+    /// Stretched to the shape, ignoring its proportions.
+    Stretch = 1,
+    /// Repeated.
+    Tile = 2,
+    /// Scaled to cover the shape, cropped where it overflows.
+    ScaleToFill = 3,
+    /// Scaled to fit inside the shape.
+    ScaleToFit = 4,
+}
+
+/// Fill a drawable with a gradient. See [`set_fill`] for why the argument is
+/// the drawable and what the first paint does.
+pub fn set_gradient(
+    document: &mut crate::Document,
+    drawable: u64,
+    gradient: &Gradient,
+) -> Result<(), crate::Error> {
+    let fill = gradient.fill()?;
+    let style = own_style(document, drawable)?;
+    set_property(
+        document,
+        style,
+        Property::Fill,
+        Some(Value::Bytes(fill.encode())),
+    )
+}
+
+/// Give a drawable a drop shadow, or with `None` take it away.
+///
+/// `TSD.ShadowArchive` as a theme's shadow presets write it: colour, angle,
+/// offset, radius, opacity, enabled, type 0. `Shadow::default()` is a soft
+/// black one. "No shadow" is the same archive with `is_enabled` false, which
+/// is what Keynote's text-box style carries.
+pub fn set_shadow(
+    document: &mut crate::Document,
+    drawable: u64,
+    shadow: Option<Shadow>,
+) -> Result<(), crate::Error> {
+    let enabled = shadow.as_ref().is_some_and(|shadow| shadow.enabled);
+    let given = shadow.unwrap_or_default();
+    if !(0.0..=1.0).contains(&given.opacity)
+        || !given.offset.is_finite()
+        || given.offset < 0.0
+        || given.radius < 0
+    {
+        return Err(crate::Error::refused(
+            crate::Refusal::UnwritableValue,
+            format!(
+                "a shadow's opacity is 0.0 to 1.0 and its offset and blur are not negative, \
+                 not {}, {} and {}",
+                given.opacity, given.offset, given.radius
+            ),
+        ));
+    }
+    let colour = given.color.unwrap_or(Color {
+        red: 0.0,
+        green: 0.0,
+        blue: 0.0,
+        alpha: 1.0,
+    });
+    let style = own_style(document, drawable)?;
+    let mut archive = Message::default();
+    archive.set_in_order(1, Value::Bytes(colour_message(colour).encode()));
+    archive.set_in_order(2, Value::Fixed32(given.angle.to_le_bytes()));
+    archive.set_in_order(3, Value::Fixed32(given.offset.to_le_bytes()));
+    archive.set_in_order(4, Value::Varint(given.radius as u64));
+    archive.set_in_order(5, Value::Fixed32(given.opacity.to_le_bytes()));
+    archive.set_in_order(6, Value::Varint(u64::from(enabled)));
+    archive.set_in_order(7, Value::Varint(0));
+    set_property(
+        document,
+        style,
+        Property::Shadow,
+        Some(Value::Bytes(archive.encode())),
+    )
+}
+
+/// Fill a drawable with a picture.
+///
+/// The bytes go into the package once per distinct content, as
+/// [`add_image`]'s do, and the style that names them declares them in its own
+/// `data_references` — a style is an object like any other, and one that
+/// names media without declaring it is one the app does not load the media
+/// for.
+pub fn set_image_fill(
+    document: &mut crate::Document,
+    drawable: u64,
+    bytes: &[u8],
+    preferred_name: &str,
+    fit: ImageFit,
+) -> Result<(), crate::Error> {
+    let natural = crate::media::pixel_size(bytes).ok_or_else(|| {
+        crate::Error::Format("the picture is not a PNG or a JPEG this crate can measure".into())
+    })?;
+    let style = own_style(document, drawable)?;
+    let digest = crate::media::sha1(bytes);
+    let data = match document
+        .data_files()
+        .into_iter()
+        .find(|file| file.digest == digest)
+    {
+        Some(file) => file.identifier,
+        None => {
+            let data = document.next_object_identifier();
+            document.set_last_object_identifier(data)?;
+            document.register_media(data, bytes, preferred_name, natural)?;
+            data
+        }
+    };
+    let mut size = Message::default();
+    size.set_in_order(1, Value::Fixed32(natural.0.to_le_bytes()));
+    size.set_in_order(2, Value::Fixed32(natural.1.to_le_bytes()));
+    let mut image = Message::default();
+    image.set_in_order(2, Value::Varint(fit as u64));
+    image.set_in_order(4, Value::Bytes(size.encode()));
+    image.set_in_order(6, Value::Bytes(crate::style::reference(data).encode()));
+    image.set_in_order(8, Value::Varint(1));
+    let mut fill = Message::default();
+    fill.set_in_order(3, Value::Bytes(image.encode()));
+    set_property(
+        document,
+        style,
+        Property::Fill,
+        Some(Value::Bytes(fill.encode())),
+    )?;
+    document.set_data_references(style, &[data])
 }
 
 /// Outline a drawable: colour and width in points, solid.

@@ -383,6 +383,15 @@ impl SlideHandle<'_> {
         self.document.set_slide_background(self.slide, colour)
     }
 
+    /// Paint this slide's background with a linear gradient.
+    pub fn background_gradient(
+        &mut self,
+        gradient: &crate::drawable::Gradient,
+    ) -> Result<(), Error> {
+        let fill = gradient.fill()?;
+        crate::keynote::set_slide_fill(self.document, self.slide, Some(fill))
+    }
+
     /// Give the slide a transition — by the app's name for the effect or by the
     /// identifier on the wire, and `"none"` takes it away.
     ///
@@ -7244,6 +7253,71 @@ impl Document {
         colour: Option<crate::drawable::Color>,
     ) -> Result<(), Error> {
         crate::drawable::set_fill(self, drawable, colour)
+    }
+
+    /// Fill a drawable with a linear gradient. See
+    /// [`crate::drawable::set_gradient`].
+    pub fn set_object_gradient(
+        &mut self,
+        drawable: u64,
+        gradient: &crate::drawable::Gradient,
+    ) -> Result<(), Error> {
+        crate::drawable::set_gradient(self, drawable, gradient)
+    }
+
+    /// Give a drawable a drop shadow, or with `None` take it away. See
+    /// [`crate::drawable::set_shadow`].
+    pub fn set_object_shadow(
+        &mut self,
+        drawable: u64,
+        shadow: Option<crate::drawable::Shadow>,
+    ) -> Result<(), Error> {
+        crate::drawable::set_shadow(self, drawable, shadow)
+    }
+
+    /// Fill a drawable with a picture (PNG or JPEG bytes). See
+    /// [`crate::drawable::set_image_fill`].
+    pub fn set_object_image_fill(
+        &mut self,
+        drawable: u64,
+        bytes: &[u8],
+        preferred_name: &str,
+        fit: crate::drawable::ImageFit,
+    ) -> Result<(), Error> {
+        crate::drawable::set_image_fill(self, drawable, bytes, preferred_name, fit)
+    }
+
+    /// Make `object` declare exactly these media in its
+    /// `MessageInfo.data_references`.
+    pub(crate) fn set_data_references(&mut self, object: u64, data: &[u64]) -> Result<(), Error> {
+        let (stream, index) = self.locate(object).ok_or(Error::NoSuchObject(object))?;
+        let message = self
+            .streams
+            .get_mut(&stream)
+            .expect("stream came from the document")[index]
+            .messages
+            .first_mut()
+            .ok_or(Error::NoSuchObject(object))?;
+        message.extra.retain(|field| field.number != 6);
+        if !data.is_empty() {
+            let mut packed = Vec::new();
+            for identifier in data {
+                crate::pb::write_varint(&mut packed, *identifier);
+            }
+            let at = message
+                .extra
+                .iter()
+                .position(|field| field.number > 6)
+                .unwrap_or(message.extra.len());
+            message.extra.insert(
+                at,
+                crate::pb::Field {
+                    number: 6,
+                    value: Value::Bytes(packed),
+                },
+            );
+        }
+        Ok(())
     }
 
     /// Outline a drawable: colour, and width in points.

@@ -26,6 +26,12 @@ bytes nobody has watched being read.
   made from nothing too. Stored as the apps store a word somebody made bold: a
   variation of `character-style-null` named by the run. Pages and Keynote are
   asked how they draw each word (`scripts/word-oracle.sh`).
+- **Gradients, shadows and picture fills** for any shape —
+  `set_object_gradient(drawable, &Gradient)`, `set_object_shadow(drawable,
+  Some(Shadow { .. }))`, `set_object_image_fill(drawable, bytes, name,
+  ImageFit::ScaleToFill)` — and `slide.background_gradient(&Gradient)`. Each
+  is shaped as a theme's own presets shape it; Keynote draws them and keeps
+  them through its own save. Gradients are linear.
 
 ## 0.2.3 — 2026-10-07
 

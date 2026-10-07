@@ -2175,6 +2175,23 @@ pub fn set_slide_background(
     slide: u64,
     colour: Option<crate::drawable::Color>,
 ) -> Result<(), Error> {
+    let fill = colour.map(|colour| {
+        let mut fill = Message::default();
+        fill.set_in_order(
+            1,
+            Value::Bytes(crate::drawable::colour_message(colour).encode()),
+        );
+        fill
+    });
+    set_slide_fill(document, slide, fill)
+}
+
+/// The same, with any `TSD.FillArchive` — a gradient, for one.
+pub(crate) fn set_slide_fill(
+    document: &mut crate::Document,
+    slide: u64,
+    fill: Option<Message>,
+) -> Result<(), Error> {
     let deck = show(document).ok_or_else(|| Error::Format("not a Keynote document".into()))?;
     let Some(found) = deck.slides.iter().find(|s| s.identifier == slide) else {
         return Err(Error::refused(
@@ -2207,7 +2224,7 @@ pub fn set_slide_background(
         .count();
     let own = varies && users == 1;
 
-    let Some(colour) = colour else {
+    let Some(fill) = fill else {
         // Back to the layout's: the slide names its variation's parent again.
         // A slide that never had its own has nothing to give back.
         if let (true, Some(parent)) = (own, parent) {
@@ -2221,11 +2238,6 @@ pub fn set_slide_background(
         return Ok(());
     };
 
-    let mut fill = Message::default();
-    fill.set_in_order(
-        1,
-        Value::Bytes(crate::drawable::colour_message(colour).encode()),
-    );
     let mut properties = Message::default();
     properties.set_in_order(1, Value::Bytes(fill.encode()));
 
