@@ -334,7 +334,7 @@ fn looks() -> (Document, [u64; 3]) {
         .background_gradient(&Gradient::linear(BLUE, BLACK, 270.0))
         .unwrap();
     let slide = deck.slides()[0].identifier.to_string();
-    let mut shape = |deck: &mut Document, x: f32| {
+    let shape = |deck: &mut Document, x: f32| {
         deck.add_shape(&slide, Outline::Rectangle, "", (x, 200.0), (300.0, 200.0))
             .unwrap()
     };
