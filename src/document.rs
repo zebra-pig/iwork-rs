@@ -4150,7 +4150,7 @@ impl Document {
     /// That is what this makes, once per distinct look: cells that end up
     /// painted alike share one variation and one list entry, whose count is
     /// the number of cells naming it — the rule all 37 tables in the corpus
-    /// keep and [`crate::table::Table::audit`] checks.
+    /// keep and [`crate::table::TableInfo::audit`] checks.
     ///
     /// **An empty cell can be painted**, which is what a banner or a spacer
     /// row needs: the app keeps a bare record for a styled cell with no value,
@@ -6084,7 +6084,7 @@ impl Document {
     /// takes its cells with it, and a cell's **references have to be given
     /// back** — every string, format and control key it held — or the list's
     /// reference counts stop matching the cells that point at them, which is
-    /// exactly what [`crate::table::Table::audit`] reports.
+    /// exactly what [`crate::table::TableInfo::audit`] reports.
     ///
     /// What moves is what an insert moves, backwards: `number_of_rows`, every
     /// `TileRowInfo` below `at` (across tile boundaries, so a row can change

@@ -1043,7 +1043,7 @@ impl Sheet {
     /// Reading a table decodes it, so this is a document-wide read filtered to
     /// the sheet rather than a cheap lookup; a caller walking every sheet
     /// should call [`crate::Document::tables`] once instead and group by
-    /// [`Table::sheet`].
+    /// [`TableInfo::sheet`].
     pub fn tables(&self, document: &crate::Document) -> Vec<TableInfo> {
         let mut tables: Vec<TableInfo> = document
             .tables()
@@ -1464,7 +1464,7 @@ pub struct Cell {
     pub format: CellFormat,
     pub control: Option<CellControl>,
     /// Set when the cell carries a formula. The formula itself is a `TSCE`
-    /// archive in the table's formula list; [`Table::formula`] reads it.
+    /// archive in the table's formula list; [`TableInfo::formula`] reads it.
     pub has_formula: bool,
     /// The record as it was on the wire, for callers that want more than this
     /// crate models yet.
@@ -2723,7 +2723,7 @@ impl TableInfo {
 
     /// The merge a position falls inside, anchor included.
     ///
-    /// Not the same question as [`Table::merge_at`], and the difference is the
+    /// Not the same question as [`TableInfo::merge_at`], and the difference is the
     /// one a writer has to get right: a merged-away cell has no record and no
     /// mark of its own, so the only way to know that `E9` is not a cell is to
     /// ask which rectangle covers it.
@@ -2976,7 +2976,7 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 ///
 /// The interning tables the cell records key into. Kept on the table because
 /// a cell's own bytes say nothing at all without them — and because the
-/// invariants that tie the two together ([`Table::audit`]) are the ones a
+/// invariants that tie the two together ([`TableInfo::audit`]) are the ones a
 /// writer is most likely to break.
 #[derive(Debug, Clone, Default)]
 pub struct SideTables {
