@@ -1911,10 +1911,30 @@ fn page_of(document: &crate::Document, wanted: &str) -> Result<Option<Container>
 
 /// A style a text box can be drawn with, from the document rather than invented.
 ///
-/// A shape already on the page is the best answer — the new box then looks like
-/// the ones beside it. Failing that, the theme's text-box preset, which is what
-/// the app itself reaches for when it makes one.
+/// The theme's text-box style is the answer — the one the app itself reaches
+/// for, named `textbox-…` in the stylesheet (`textbox-0-shapestyle` in a deck
+/// Keynote wrote, `textbox-style-preset-0` as a theme preset). It says "no
+/// fill, no outline". Only failing that, the style of a text shape already
+/// there, and then any shape style at all — which is how every text box on a
+/// deck made from nothing came to be drawn with the first *line* preset's
+/// black hairline round it.
 fn text_box_style(document: &crate::Document) -> Option<u64> {
+    let shape_styles = || {
+        document
+            .objects()
+            .filter(|(_, object)| object.message_type() == TYPE_WP_SHAPE_STYLE)
+    };
+    let themed = shape_styles().find(|(_, object)| {
+        Message::decode(object.payload()).is_ok_and(|archive| {
+            [&[1u32, 1, 2][..], &[1, 2]]
+                .iter()
+                .filter_map(|path| crate::style::string_at(&archive, path))
+                .any(|identifier| identifier.starts_with("textbox"))
+        })
+    });
+    if let Some((_, object)) = themed {
+        return Some(object.identifier);
+    }
     for drawable in document.drawables() {
         if drawable.text.is_some() {
             if let Some(style) = drawable.style {
@@ -1922,10 +1942,7 @@ fn text_box_style(document: &crate::Document) -> Option<u64> {
             }
         }
     }
-    document
-        .objects()
-        .find(|(_, object)| object.message_type() == crate::create::TYPE_SHAPE_STYLE)
-        .map(|(_, object)| object.identifier)
+    shape_styles().next().map(|(_, object)| object.identifier)
 }
 
 /// The styles a new text storage points at: a paragraph style and a list style

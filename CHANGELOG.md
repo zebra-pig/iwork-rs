@@ -6,6 +6,27 @@ bytes nobody has watched being read.
 
 ## 0.2.4 — unreleased
 
+### Fixed
+
+- **Every text box on a document made from nothing was drawn with a black
+  outline.** Two causes, both seen only by rendering the slides: `add_text_box`
+  took the first shape style it found, which was a *line* preset, and the
+  text-box preset itself said nothing about its stroke and carried no
+  `override_count`, so the app ignored its bag. A text box now names the
+  theme's `textbox-…` style, and that style says "no outline" the way
+  Keynote's own does.
+- **A character style applied to a run ran on to the end of the text** when
+  the storage had no character table yet. The run is closed with a nil entry,
+  as Pages closes it.
+
+### Added
+
+- **Mixed formatting inside a paragraph** — `text.format(range, &TextLook {
+  bold, italic, underline, strikethrough, size, font, colour })`, on documents
+  made from nothing too. Stored as the apps store a word somebody made bold: a
+  variation of `character-style-null` named by the run. Pages and Keynote are
+  asked how they draw each word (`scripts/word-oracle.sh`).
+
 ## 0.2.3 — 2026-10-07
 
 The release in which a document made here stops looking unfinished.

@@ -626,7 +626,8 @@ pub(crate) fn pages(paper: Paper) -> Blueprint {
                 // style in a document Keynote wrote carries. Without it there
                 // is nowhere for a colour to go, and this crate refuses to
                 // invent the message rather than write into one it has seen.
-                nested(11, vec![bytes(1, Vec::new())]),
+                varint(10, 2),
+                nested(11, vec![bytes(1, Vec::new()), no_stroke()]),
             ],
         )]),
     );
@@ -2125,6 +2126,32 @@ fn numbers_stylesheet(named: &[(String, u64)]) -> Message {
     message(fields)
 }
 
+/// `TSD.StrokeArchive` at field 2 of a shape style's bag, saying *no outline*:
+/// black, 1 pt, and the empty pattern (type 2) — field for field what
+/// Keynote's own `textbox-0-shapestyle` carries.
+fn no_stroke() -> Field {
+    nested(
+        2,
+        vec![
+            nested(
+                1,
+                vec![
+                    varint(1, 1),
+                    float(3, 0.0),
+                    float(4, 0.0),
+                    float(5, 0.0),
+                    float(6, 1.0),
+                ],
+            ),
+            float(2, 1.0),
+            varint(3, 0),
+            varint(4, 0),
+            float(5, 4.0),
+            nested(6, vec![varint(1, 2), float(2, 0.0), varint(3, 0)]),
+        ],
+    )
+}
+
 /// The style presets a theme carries, and the objects they name.
 ///
 /// `TSD.ThemePresetsArchive`, field 100 of the theme: six line styles, six
@@ -2164,7 +2191,21 @@ fn theme_presets(
                         // and paints nothing — what a shape style in a deck
                         // Keynote wrote carries, and the only place a colour
                         // written later has to go.
-                        nested(11, vec![bytes(1, Vec::new())]),
+                        // The count of what the bag holds, without which the
+                        // app does not read the bag. See `OVERRIDE_COUNT`.
+                        varint(10, if kind == "textbox-style" { 2 } else { 1 }),
+                        nested(11, {
+                            let mut bag = vec![bytes(1, Vec::new())];
+                            // A text box has no outline, and has to say so:
+                            // a stroke whose pattern is the empty one (2),
+                            // field for field what Keynote's own text-box
+                            // style carries. Left unsaid, every text box was
+                            // drawn with a black hairline round it.
+                            if kind == "textbox-style" {
+                                bag.push(no_stroke());
+                            }
+                            bag
+                        }),
                     ],
                 )]),
             );

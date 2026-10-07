@@ -284,6 +284,13 @@ impl TextHandle<'_> {
             .map(|_| ())
     }
 
+    /// Make a run of characters bold, coloured, bigger — whatever `look`
+    /// sets — without touching the rest of its paragraph. See
+    /// [`Document::format_text`].
+    pub fn format(&mut self, range: Range<u64>, look: &text::TextLook) -> Result<(), Error> {
+        self.document.format_text(self.storage, range, look)
+    }
+
     /// Where each paragraph begins and ends, in UTF-16 code units.
     pub fn paragraphs(&self) -> Result<Vec<Range<u64>>, Error> {
         self.document.paragraph_ranges(self.storage)
@@ -8359,6 +8366,191 @@ impl Document {
         // declared before iWork will resolve it.
         self.declare_external_references();
         Ok(())
+    }
+
+    /// Give a run of characters a look of its own inside its paragraph: a
+    /// bold word, a red figure, one phrase set larger.
+    ///
+    /// This is what the apps write when somebody selects a word and presses
+    /// ⌘B. The storage's character-style table (8) names, for exactly the run,
+    /// a `TSWP.CharacterStyleArchive` that is a *variation* of the
+    /// stylesheet's `character-style-null` and holds only what was changed.
+    /// A document with no such style — one this crate made from nothing — is
+    /// given it, as the apps' own documents all have it.
+    ///
+    /// A run that already has a look keeps it and gains what `look` sets, so
+    /// bold over `0..9` and then red over `5..12` leaves `5..9` bold and red.
+    /// Runs asking for the same look share one style. The range is in UTF-16
+    /// code units and may cross paragraphs.
+    pub fn format_text(
+        &mut self,
+        storage: u64,
+        range: Range<u64>,
+        look: &text::TextLook,
+    ) -> Result<(), Error> {
+        use style::property;
+        let archive = self.storage_archive(storage)?;
+        let length = text::length(&text::read(&archive));
+        if range.end > length || range.start >= range.end {
+            return Err(Error::TextRange {
+                storage,
+                index: range.end.max(range.start),
+                length,
+            });
+        }
+        let stylesheet = style::reference_at(&archive, &[2, 1])
+            .ok_or_else(|| Error::Format(format!("storage {storage} names no stylesheet")))?;
+        let null = self.null_character_style(stylesheet)?;
+
+        // Cut the range where the existing runs change, so each piece has one
+        // look to start from.
+        let table = archive
+            .bytes(StyleKind::Character.attribute_table())
+            .and_then(crate::pb::decode_nested)
+            .unwrap_or_default();
+        let runs = style::runs(&table);
+        let mut cuts: Vec<u64> = runs
+            .iter()
+            .map(|run| run.start)
+            .filter(|start| *start > range.start && *start < range.end)
+            .collect();
+        cuts.insert(0, range.start);
+        cuts.push(range.end);
+
+        for piece in cuts.windows(2) {
+            let current = runs
+                .iter()
+                .rev()
+                .find(|run| run.start <= piece[0])
+                .and_then(|run| run.style);
+            // A piece already set in a variation of the null style starts from
+            // that variation's properties; one set in a named character style
+            // becomes a variation of *that*; anything else starts from nothing.
+            let (parent, mut bag) = match current {
+                Some(current) => {
+                    let existing = self.archive_of(current)?;
+                    let bag = existing
+                        .bytes(11)
+                        .and_then(crate::pb::decode_nested)
+                        .unwrap_or_default();
+                    match style::get_path(&existing, style::IS_VARIATION) {
+                        Some(Value::Varint(1)) => (
+                            style::reference_at(&existing, &[1, 3, 1]).unwrap_or(null),
+                            bag,
+                        ),
+                        _ => (current, Message::default()),
+                    }
+                }
+                None => (null, Message::default()),
+            };
+            let toggle = |bag: &mut Message, path: &[u32], value: Option<bool>| {
+                if let Some(value) = value {
+                    bag.set_in_order(path[1], Value::Varint(u64::from(value)));
+                }
+            };
+            toggle(&mut bag, property::BOLD, look.bold);
+            toggle(&mut bag, property::ITALIC, look.italic);
+            toggle(&mut bag, property::UNDERLINE, look.underline);
+            toggle(&mut bag, property::STRIKETHROUGH, look.strikethrough);
+            if let Some(size) = look.size {
+                bag.set_in_order(property::FONT_SIZE[1], Value::Fixed32(size.to_le_bytes()));
+            }
+            if let Some(font) = &look.font {
+                bag.set_in_order(
+                    property::FONT_NAME[1],
+                    Value::Bytes(font.as_bytes().to_vec()),
+                );
+            }
+            if let Some(colour) = look.colour {
+                // Both places: the font colour, and the fill inside the glyphs
+                // the app paints with.
+                let ink = crate::drawable::colour_message(colour).encode();
+                bag.set_in_order(property::FONT_COLOR[1], Value::Bytes(ink.clone()));
+                let mut fill = Message::default();
+                fill.set_in_order(1, Value::Bytes(ink));
+                bag.set_in_order(property::TEXT_FILL[1], Value::Bytes(fill.encode()));
+            }
+            if bag.fields.is_empty() {
+                continue;
+            }
+            // The count the app keeps: a colour is one property though it is
+            // written twice — Keynote's own red word says 1 with both fields.
+            let both = bag.get(property::FONT_COLOR[1]).is_some()
+                && bag.get(property::TEXT_FILL[1]).is_some();
+            let count = bag.fields.len() - usize::from(both);
+
+            let mut super_ = Message::default();
+            super_.set_in_order(3, Value::Bytes(style::reference(parent).encode()));
+            super_.set_in_order(4, Value::Varint(1));
+            super_.set_in_order(5, Value::Bytes(style::reference(stylesheet).encode()));
+            let mut made = Message::default();
+            made.set_in_order(1, Value::Bytes(super_.encode()));
+            made.set_in_order(style::OVERRIDE_COUNT[0], Value::Varint(count as u64));
+            made.set_in_order(11, Value::Bytes(bag.encode()));
+            let bytes = made.encode();
+
+            let existing = self
+                .objects()
+                .find(|(_, object)| {
+                    object.message_type() == style::TYPE_CHARACTER_STYLE
+                        && object.payload() == bytes.as_slice()
+                })
+                .map(|(_, object)| object.identifier);
+            let variation = match existing {
+                Some(identifier) => identifier,
+                None => {
+                    let mut grow = crate::create::Grow::new(self);
+                    let identifier = grow.allocate();
+                    grow.beside(stylesheet, identifier, style::TYPE_CHARACTER_STYLE, &made)?;
+                    grow.finish()?;
+                    let mut sheet = self.archive_of(stylesheet)?;
+                    style::register_variation(&mut sheet, parent, identifier);
+                    self.set_archive_for(stylesheet, &sheet)?;
+                    identifier
+                }
+            };
+            self.apply_text_style(storage, piece[0]..piece[1], variation)?;
+        }
+        Ok(())
+    }
+
+    /// The stylesheet's `character-style-null` — "None", the character style
+    /// that changes nothing and that every run's own look is a variation of —
+    /// made if the stylesheet has none.
+    fn null_character_style(&mut self, stylesheet: u64) -> Result<u64, Error> {
+        const IDENTIFIER: &str = "character-style-null";
+        let mut sheet = self.archive_of(stylesheet)?;
+        let named = sheet.all(2).find_map(|value| {
+            let Value::Bytes(raw) = value else {
+                return None;
+            };
+            let entry = crate::pb::decode_nested(raw)?;
+            (entry.bytes(1) == Some(IDENTIFIER.as_bytes()))
+                .then(|| style::reference_at(&entry, &[2, 1]))
+                .flatten()
+        });
+        if let Some(named) = named {
+            return Ok(named);
+        }
+        let mut super_ = Message::default();
+        super_.set_in_order(1, Value::Bytes(b"None".to_vec()));
+        super_.set_in_order(2, Value::Bytes(IDENTIFIER.as_bytes().to_vec()));
+        super_.set_in_order(5, Value::Bytes(style::reference(stylesheet).encode()));
+        let mut made = Message::default();
+        made.set_in_order(1, Value::Bytes(super_.encode()));
+
+        let mut grow = crate::create::Grow::new(self);
+        let identifier = grow.allocate();
+        grow.beside(stylesheet, identifier, style::TYPE_CHARACTER_STYLE, &made)?;
+        grow.finish()?;
+
+        sheet.append_in_order(1, Value::Bytes(style::reference(identifier).encode()));
+        let mut entry = Message::default();
+        entry.set_in_order(1, Value::Bytes(IDENTIFIER.as_bytes().to_vec()));
+        entry.set_in_order(2, Value::Bytes(style::reference(identifier).encode()));
+        sheet.append_in_order(2, Value::Bytes(entry.encode()));
+        self.set_archive_for(stylesheet, &sheet)?;
+        Ok(identifier)
     }
 
     /// Character ranges of the paragraphs in one storage, in UTF-16 code units.

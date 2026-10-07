@@ -838,3 +838,30 @@ fn keynote_opens_a_deck_that_uses_one_picture_twice() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// A text box has no outline and says so. On a document made from nothing it
+/// names the theme's text-box style, whose stroke is the empty pattern and
+/// whose `override_count` is there for the app to believe the bag — without
+/// either, Keynote drew a black hairline round every text box (seen in the
+/// slides it exported, not in any byte check).
+#[test]
+fn a_text_box_made_from_nothing_has_no_outline() {
+    for kind in [Kind::Keynote, Kind::Pages] {
+        let mut doc = Document::new(kind).unwrap();
+        let container = match kind {
+            Kind::Keynote => doc.slides()[0].identifier.to_string(),
+            _ => "page 1".to_string(),
+        };
+        let made = doc
+            .add_text_box(&container, "Kein Rahmen", (100.0, 100.0), (400.0, 80.0))
+            .unwrap();
+        let style = doc.drawable(made).and_then(|d| d.style).expect("a style");
+        let style = doc.object_style(style).expect("a text box has a style");
+        assert_eq!(style.override_count, Some(2), "{kind:?}");
+        assert_eq!(
+            style.stroke.map(|stroke| stroke.pattern),
+            Some(iwork::drawable::StrokePattern::Empty),
+            "{kind:?}"
+        );
+    }
+}

@@ -588,8 +588,8 @@ fn styling_from_the_middle_gives_the_table_a_head_entry_at_zero() {
     let table = iwork::pb::decode_nested(archive.bytes(8).unwrap()).unwrap();
     assert_eq!(
         iwork::text::entry_indices(&table, Anchoring::Run),
-        vec![(0, None), (4, Some(style))],
-        "the head entry is at 0 and carries nothing"
+        vec![(0, None), (4, Some(style)), (9, None)],
+        "the head entry is at 0 and carries nothing, and the run stops at 9"
     );
     // And the table went in in field order, where iWork puts its fields, rather
     // than being appended after field 28.
@@ -1688,4 +1688,197 @@ fn pages_draws_text_in_a_colour_this_crate_gave_a_style() {
         "the second is still black: {second:?}"
     );
     let _ = std::fs::remove_file(&out);
+}
+
+// -- a run with a look of its own ---------------------------------------------
+
+/// The character-style table of a storage: `(start, style)`.
+fn character_runs(doc: &Document, storage: u64) -> Vec<(u64, Option<u64>)> {
+    let archive = doc.archive(storage).unwrap();
+    let table = archive
+        .bytes(StyleKind::Character.attribute_table())
+        .and_then(iwork::pb::decode_nested)
+        .unwrap_or_default();
+    iwork::style::runs(&table)
+        .into_iter()
+        .map(|run| (run.start, run.style))
+        .collect()
+}
+
+/// A bold word is a run that starts at the word and **stops** at its end: a
+/// nil entry before, the style, a nil entry after — `[0 nil, 19 bold, 30 nil]`
+/// is what Pages wrote for the same edit. Without the closing entry every
+/// character after the word was bold too, which is how Pages drew it.
+#[test]
+fn a_formatted_run_ends_where_it_was_asked_to() {
+    let mut doc = Document::new(Kind::Pages).unwrap();
+    doc.body_mut().unwrap().set("Plain bold plain").unwrap();
+    let storage = doc.body_mut().unwrap().identifier();
+    doc.body_mut()
+        .unwrap()
+        .format(6..10, &iwork::text::TextLook::bold())
+        .unwrap();
+    let runs = character_runs(&doc, storage);
+    assert_eq!(runs.len(), 3, "{runs:?}");
+    assert_eq!((runs[0].0, runs[0].1), (0, None));
+    assert_eq!(runs[1].0, 6);
+    assert!(runs[1].1.is_some());
+    assert_eq!((runs[2].0, runs[2].1), (10, None));
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+}
+
+/// The run's style is what the apps write for a word made bold by hand: a
+/// variation of `character-style-null` holding only the property, counted,
+/// and listed in the stylesheet under its parent. Two runs asking for the
+/// same thing share one; a run formatted twice keeps both looks.
+#[test]
+fn a_formatted_run_is_a_variation_of_the_null_character_style() {
+    use iwork::text::TextLook;
+    let mut doc = Document::new(Kind::Keynote).unwrap();
+    let made = doc
+        .slide_mut(0)
+        .unwrap()
+        .add_text_box(
+            "one two three four",
+            iwork::drawable::Frame {
+                x: 0.0,
+                y: 0.0,
+                width: 800.0,
+                height: 100.0,
+            },
+        )
+        .unwrap();
+    let storage = doc.drawable(made).and_then(|d| d.text).unwrap();
+    let mut text = doc.text_mut(storage).unwrap();
+    text.format(0..3, &TextLook::bold()).unwrap();
+    text.format(8..13, &TextLook::bold()).unwrap();
+    text.format(10..18, &TextLook::italic()).unwrap();
+
+    let runs = character_runs(&doc, storage);
+    let starts: Vec<u64> = runs.iter().map(|run| run.0).collect();
+    assert_eq!(starts, vec![0, 3, 8, 10, 13], "{runs:?}");
+    let (bold, both, italic) = (runs[0].1.unwrap(), runs[3].1.unwrap(), runs[4].1.unwrap());
+    assert_eq!(runs[2].1, Some(bold), "the same look is the same style");
+    assert_ne!(both, bold);
+    assert_ne!(both, italic);
+
+    let archive = doc.archive(both).unwrap();
+    let get = |path: &[u32]| iwork::style::get_path(&archive, path);
+    assert_eq!(
+        get(iwork::style::property::BOLD),
+        Some(iwork::pb::Value::Varint(1))
+    );
+    assert_eq!(
+        get(iwork::style::property::ITALIC),
+        Some(iwork::pb::Value::Varint(1))
+    );
+    assert_eq!(
+        get(&[10]),
+        Some(iwork::pb::Value::Varint(2)),
+        "override_count"
+    );
+    assert_eq!(
+        get(&[1, 4]),
+        Some(iwork::pb::Value::Varint(1)),
+        "is_variation"
+    );
+    let parent = iwork::style::reference_at(&archive, &[1, 3, 1]).unwrap();
+    let parent = doc.text_style(parent).unwrap();
+    assert_eq!(parent.name.as_deref(), Some("None"));
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+
+    // Out of range is refused, not clamped.
+    assert!(doc
+        .text_mut(storage)
+        .unwrap()
+        .format(10..99, &TextLook::bold())
+        .is_err());
+}
+
+/// **The acceptance test: Pages and Keynote draw each word the way it was
+/// formatted**, and only that word. Off unless `IWORK_APP_CHECK=1`.
+#[test]
+fn the_apps_draw_a_word_with_a_look_of_its_own() {
+    use iwork::text::TextLook;
+    if std::env::var("IWORK_APP_CHECK").as_deref() != Ok("1") {
+        eprintln!("IWORK_APP_CHECK is not 1 — skipping the word oracle");
+        return;
+    }
+    let red = iwork::drawable::Color {
+        red: 1.0,
+        green: 0.0,
+        blue: 0.0,
+        alpha: 1.0,
+    };
+    let big = TextLook {
+        size: Some(40.0),
+        ..TextLook::default()
+    };
+    let words = "Plain bold red big plain";
+
+    let mut pages = Document::new(Kind::Pages).unwrap();
+    pages.body_mut().unwrap().set(words).unwrap();
+    let storage = pages.body_mut().unwrap().identifier();
+
+    let mut keynote = Document::new(Kind::Keynote).unwrap();
+    let made = keynote
+        .slide_mut(0)
+        .unwrap()
+        .add_text_box(
+            words,
+            iwork::drawable::Frame {
+                x: 100.0,
+                y: 100.0,
+                width: 1500.0,
+                height: 200.0,
+            },
+        )
+        .unwrap();
+    let boxed = keynote.drawable(made).and_then(|d| d.text).unwrap();
+
+    for (mut doc, storage, name) in [
+        (pages, storage, "iwork-words.pages"),
+        (keynote, boxed, "iwork-words.key"),
+    ] {
+        let mut text = doc.text_mut(storage).unwrap();
+        text.format(6..10, &TextLook::bold()).unwrap();
+        text.format(11..14, &TextLook::coloured(red)).unwrap();
+        text.format(15..18, &big).unwrap();
+        let out = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_file(&out);
+        doc.save(&out).unwrap();
+
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/word-oracle.sh");
+        let output = std::process::Command::new(&script)
+            .arg(&out)
+            .output()
+            .unwrap_or_else(|e| panic!("{}: {e}", script.display()));
+        assert!(
+            output.status.success(),
+            "{name}: the word oracle failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let answer = String::from_utf8_lossy(&output.stdout);
+        let rows: Vec<Vec<&str>> = answer
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| line.split('\t').collect())
+            .collect();
+        assert_eq!(rows.len(), 5, "{name}: {answer}");
+        let bold = |row: &[&str]| row[2].contains("Bold");
+        let red = |row: &[&str]| !row[3].starts_with("0,");
+        assert_eq!(
+            rows.iter().map(|r| bold(r)).collect::<Vec<_>>(),
+            vec![false, true, false, false, false],
+            "{name}: {answer}"
+        );
+        assert_eq!(
+            rows.iter().map(|r| red(r)).collect::<Vec<_>>(),
+            vec![false, false, true, false, false],
+            "{name}: {answer}"
+        );
+        assert_eq!(rows[3][1], "40.0", "{name}: {answer}");
+        assert_eq!(rows[0][1], rows[4][1], "{name}: {answer}");
+        assert_ne!(rows[4][1], "40.0", "{name}: {answer}");
+    }
 }

@@ -1999,3 +1999,54 @@ mod tests {
         assert!(report.tables.is_empty());
     }
 }
+
+/// How a run of characters differs from the paragraph it is in.
+///
+/// Every field is "leave it alone" when `None`. What is set is stored as the
+/// apps store a word somebody made bold: a `TSWP.CharacterStyleArchive` that
+/// is a variation of the stylesheet's `character-style-null`, holding only
+/// these properties, named by the storage's character-style table for exactly
+/// the run. See [`crate::Document::format_text`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TextLook {
+    /// The bold toggle.
+    pub bold: Option<bool>,
+    /// The italic toggle.
+    pub italic: Option<bool>,
+    /// Underlined, with a single line.
+    pub underline: Option<bool>,
+    /// Struck through, with a single line.
+    pub strikethrough: Option<bool>,
+    /// Font size, in points.
+    pub size: Option<f32>,
+    /// PostScript font name, e.g. `"AvenirNext-DemiBold"`.
+    pub font: Option<String>,
+    /// Text colour.
+    pub colour: Option<crate::drawable::Color>,
+}
+
+impl TextLook {
+    /// Bold, and nothing else changed.
+    pub fn bold() -> TextLook {
+        TextLook {
+            bold: Some(true),
+            ..TextLook::default()
+        }
+    }
+
+    /// Italic, and nothing else changed.
+    pub fn italic() -> TextLook {
+        TextLook {
+            italic: Some(true),
+            ..TextLook::default()
+        }
+    }
+
+    /// A colour, and nothing else changed.
+    pub fn coloured(colour: crate::drawable::Color) -> TextLook {
+        TextLook {
+            colour: Some(colour),
+            ..TextLook::default()
+        }
+    }
+}

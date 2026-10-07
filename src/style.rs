@@ -917,10 +917,12 @@ pub fn apply(table: &mut Message, range: Range<u64>, style: u64, text_len: u64) 
     }
     out.push((start, head));
     if end < text_len && !resumes_already {
-        if let Some(mut tail) = tail {
-            tail.set(1, Value::Varint(end));
-            out.push((end, tail));
-        }
+        // With nothing in force at `end` the run still has to stop there: a
+        // nil entry, the `30 nil` of the probe above. Without it a bold word
+        // in a storage that had no table made everything after it bold.
+        let mut tail = tail.unwrap_or_default();
+        tail.set(1, Value::Varint(end));
+        out.push((end, tail));
     }
     out.extend(existing.iter().filter(|(index, _)| *index >= end).cloned());
 
@@ -1192,6 +1194,34 @@ pub fn clone_sibling(stylesheet: &mut Message, parent: u64, old: u64, new: u64) 
         return true;
     }
     false
+}
+
+/// List a new variation in a stylesheet the way the apps do: once among the
+/// styles (1), once under its parent in the parent-to-children map (5).
+///
+/// Read off a deck Keynote wrote after three words were formatted by hand:
+/// each word's character style is in both places, the family entry being
+/// `{1: -> character-style-null, 2: -> child, 2: -> child, …}`.
+pub fn register_variation(stylesheet: &mut Message, parent: u64, child: u64) {
+    stylesheet.append_in_order(1, Value::Bytes(reference(child).encode()));
+    for field in stylesheet.fields.iter_mut().filter(|f| f.number == 5) {
+        let Value::Bytes(raw) = &field.value else {
+            continue;
+        };
+        let Some(mut entry) = pb::decode_nested(raw) else {
+            continue;
+        };
+        if reference_at(&entry, &[1, 1]) != Some(parent) {
+            continue;
+        }
+        entry.append_in_order(2, Value::Bytes(reference(child).encode()));
+        field.value = Value::Bytes(entry.encode());
+        return;
+    }
+    let mut entry = Message::default();
+    entry.set(1, Value::Bytes(reference(parent).encode()));
+    entry.append_in_order(2, Value::Bytes(reference(child).encode()));
+    stylesheet.append_in_order(5, Value::Bytes(entry.encode()));
 }
 
 /// Undo [`clone_sibling`]: drop `identifier` from the family entries.
