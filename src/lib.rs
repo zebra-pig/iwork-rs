@@ -111,7 +111,7 @@
 //!
 //! | | |
 //! |---|---|
-//! | [`document`] | [`Document`] itself, and the handles: [`document::TableHandle`], [`document::TextHandle`], [`document::SlideHandle`] |
+//! | [`document`] | [`Document`] itself, and the handles: [`document::TableMut`], [`document::TextMut`], [`document::SlideMut`] |
 //! | [`table`] | cells, values, formats, ranges, sheets — [`table::CellValue`], [`table::CellRef`], [`table::CellRange`], [`table::Format`], [`table::Sheet`] |
 //! | [`text`] | what an edit to a storage has to remap, and the rules it obeys |
 //! | [`style`] | text styles, which are shared objects a range of text points at |
@@ -150,6 +150,10 @@
 //! made to *look* right without being right, it is refused instead — with a
 //! [`Refusal`] saying which kind of wrong it would have been.
 
+// The handles are a thin layer over the flat functions 0.2 exposed, which are
+// deprecated for callers and are still how this crate does the work.
+#![allow(deprecated)]
+
 /// Recipes: a spreadsheet, a deck and a report that look designed.
 ///
 /// This module holds no code. It is `COOKBOOK.md`, included here so that every
@@ -187,7 +191,8 @@ pub use document::{Component, DataFile, Document, Kind, TextEdit, TextStorage};
 pub use drawable::{Color, Fill, Frame, Gradient, ImageFit, Outline, Shadow};
 pub use drawable::{Drawable, Geometry, Placement};
 pub use element::{
-    CanvasMut, Chart, ChartMut, Element, ElementMut, Image, Shape, TextBox, TextStyle,
+    CanvasMut, Chart, ChartMut, Element, ElementMut, Image, Shape, Table, TextBox, TextStyle,
+    TextStyleMut,
 };
 pub use formula::{Ast, Formula, Node, Reference};
 pub use keynote::{Layout, Placeholder, Show, Slide, SlideCopy, Transition};
@@ -195,7 +200,7 @@ pub use media::MediaReplacement;
 pub use package::{Form, Package};
 pub use style::{CreatedStyle, Label, StyleDeletion, StyleKind, StyleUse, TextStyleInfo};
 pub use table::Align;
-pub use table::{Cell, CellControl, CellFormat, CellValue, Merge, Table};
+pub use table::{Cell, CellControl, CellFormat, CellValue, Merge, TableInfo};
 pub use text::TextLook;
 
 /// `TSWP.StorageArchive` — a run of styled text. Same in all three apps.

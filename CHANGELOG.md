@@ -4,27 +4,31 @@ What changed, and — because this is a reverse-engineered format — **how it w
 established**. An entry that cannot say what the app did is an entry about
 bytes nobody has watched being read.
 
-## 0.3.0 — unreleased
+## 0.3.0 — 2026-10-07
 
 **The API is rebuilt around one idea: values to create, handles to edit.**
-`API.md` is the rule book and the plan; this is its first phase. 0.2 calls
-keep compiling, with a warning that names the replacement.
+`API.md` is the rule book. 0.2 calls keep compiling, with a warning that names
+the replacement; 0.4 removes them.
 
 ### Added
 
 - **`slide.add(value)`** — and `doc.sheet_mut(name)?.add(…)`,
   `doc.page_mut(1)?.add(…)`. The values are `Shape`, `TextBox`, `Image`,
-  `Chart` and `element::Table`; each says what it is, where it goes
-  (`.at(x, y)`, `.size(w, h)`) and how it looks, cannot fail to build, and
-  can be kept and added again. A refused `add` leaves the document as it was.
+  `Chart` and `Table`; each says what it is, where it goes (`.at(x, y)`,
+  `.size(w, h)`) and how it looks, cannot fail to build, and can be kept and
+  added again. A refused `add` leaves the document as it was.
 - **`Chart::new(kind).categories([…]).series(name, […]).title("…").legend()`**
   — a title and a legend, which are the chart's own settings (`showtitle`,
   `title`, `showlegend`); Keynote draws both and keeps them through its save.
+- **`Table::with_rows("Name", [[…], […]])`** — a table with what is in it.
 - **`doc.add_text_style(&TextStyle::new("Title").look(…).align(…))`** — a
   named paragraph style from typed values, no protobuf in sight.
 - **Handles for what is there**: `doc.element_mut(id)?` (`fill`, `stroke`,
-  `no_stroke`, `shadow`, `no_shadow`, `opacity`, `move_to`, `resize`, `text`)
-  and `doc.chart_mut(id)?` (`data`, `title`, `legend`, …).
+  `no_stroke`, `shadow`, `no_shadow`, `opacity`, `move_to`, `resize`, `text`),
+  `doc.chart_mut(id)?` (`data`, `title`, `legend`, …) and
+  `doc.text_style_mut(id)?` (`look`, `align`, `rename`, `property`, `delete`).
+- **Table cells take the same types**: `table.fill(range, colour)`,
+  `table.look(range, &TextLook)`, `table.align(range, Align)`.
 - `Color::rgb`, `Color::rgb8`, `Color::hex("#122B4A")?`, `Color::WHITE`;
   `TextLook::new().font(…).size(…).colour(…).bold()`.
 
@@ -32,24 +36,41 @@ keep compiling, with a warning that names the replacement.
 
 - **`Fill` is one type, read and written**: `None`, `Color`, `Gradient(…)`,
   `Image(…)`. It was a read-only summary (`Gradient { stops: usize, .. }`).
-  `slide.background(…)` takes anything that converts into one.
-- **`chart::Chart` is `ChartInfo` and `style::TextStyle` is `TextStyleInfo`**:
-  a snapshot of what a document holds is named `…Info`, and the bare noun is
-  the value you build.
+  `slide.background(…)` and `table.fill(…)` take anything that converts into
+  one, so `Some(colour)` and `None` still work.
+- **A snapshot of what a document holds is named `…Info`**, and the bare noun
+  is the value you build: `chart::Chart` → `ChartInfo`, `style::TextStyle` →
+  `TextStyleInfo`, `table::Table` → `TableInfo`.
 - `TextLook::bold()`, `::italic()` and `::coloured(c)` were constructors and
   are builder methods: `TextLook::new().bold()`.
 - `Document::add_chart` (copy a chart the document has) is `copy_chart`.
+- The handles are `SlideMut`, `TableMut` and `TextMut`; the old names are
+  deprecated aliases.
 
 ### Deprecated
 
-`add_shape`, `add_text_box`, `add_image`, `add_image_at`, `new_chart`,
-`set_object_fill` / `_gradient` / `_image_fill` / `_stroke` / `_opacity` /
-`_shadow`, `background_gradient`. Each warning names what to write instead.
+Every function on `Document` that a handle now covers, each with a warning
+that names what to write instead:
+
+- creating — `add_shape`, `add_text_box`, `add_image`, `add_image_at`,
+  `add_table_at`, `new_chart` → `container.add(value)`;
+- painting — `set_object_fill` / `_gradient` / `_image_fill` / `_stroke` /
+  `_opacity` / `_shadow`, `background_gradient` → `element_mut`, `background`;
+- cells — `set_cell`, `set_format`, `set_cell_fill`, `set_cell_text`,
+  `set_currency`, `set_formula`, `set_column_width`, `set_row_height`,
+  `set_sort_rules`, `merge_cells`, `unmerge_cells`, `TableMut::text_look` →
+  `table_mut`;
+- text — `set_text`, `append_paragraph`, `insert_text`, `delete_text`,
+  `replace_text`, `apply_text_style`, `format_text` → `text_mut`;
+- slides — `set_slide_skipped`, `move_slide`, `duplicate_slide`,
+  `set_transition`, `set_presenter_notes`, `set_slide_background` →
+  `slide_mut`;
+- styles — `rename_text_style`, `set_text_style_property`,
+  `set_text_style_color`, `delete_text_style` → `text_style_mut`.
 
 ### Fixed
 
 - A new chart carried the legend position of the chart it was copied from.
-
 
 ## 0.2.4 — 2026-10-07
 

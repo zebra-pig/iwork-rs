@@ -7,6 +7,10 @@
 //! style editing that does not depend on Apple's schema — which, deliberately,
 //! is all of it.
 
+// These exercise the 0.2 calls, which 0.3 keeps behind `#[deprecated]`;
+// `tests/elements.rs` is the same ground through the 0.3 API.
+#![allow(deprecated)]
+
 use std::ops::Range;
 
 use iwork::iwa::{ArchiveMessage, ArchiveObject};

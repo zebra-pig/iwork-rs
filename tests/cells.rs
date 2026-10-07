@@ -14,6 +14,10 @@
 //! and what the writer refuses to do rather than guess at. Finally, behind
 //! `IWORK_APP_CHECK=1`, Numbers is asked to read the result back.
 
+// These exercise the 0.2 calls, which 0.3 keeps behind `#[deprecated]`;
+// `tests/elements.rs` is the same ground through the 0.3 API.
+#![allow(deprecated)]
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 

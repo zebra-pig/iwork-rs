@@ -65,14 +65,13 @@ the parent's reference, and only what differs — which is how the apps store
 something somebody changed by hand.
 
 ```rust
-use iwork::drawable::Color;
-use iwork::table::CellText;
+use iwork::{Color, Shape, TextLook};
 
 let navy = Color::rgb(0.11, 0.22, 0.38);
 let white = Color::WHITE;
 
-q1.fill("A1:B1", Some(navy))?;                                  // cells, empty ones too
-q1.text_look("A1:B1", &CellText { colour: Some(white), ..CellText::bold() })?;
+q1.fill("A1:B1", navy)?;                                        // cells, empty ones too
+q1.look("A1:B1", &TextLook::new().colour(white).bold())?;
 
 doc.sheet_mut("Sales")?.add(                                    // a shape, on the sheet
     Shape::ellipse().text("Q1").at(420.0, 40.0).size(90.0, 90.0).fill(navy).stroke(white, 2.0),
@@ -491,7 +490,7 @@ header row, header column, footer — has a cell style and a text style, which
 the table model names slot by slot. And one cell that differs from its area
 carries two keys into the table's style list, whose entries are variations of
 the area's styles: `doc.cell_styles()` reads the first two, `table.fill` and
-`table.text_look` write the third, and `Table::audit` checks the rule that
+`table.look` write the third, and `Table::audit` checks the rule that
 ties the list to the cells — an entry's count is the number of cells naming it.
 [`FORMAT.md`](FORMAT.md) §"How a table looks" has the field numbers.
 
@@ -726,7 +725,7 @@ rather than registered with a guess. Pages, Numbers and Keynote all open the
 result, and Pages and Keynote resave it with the bytes intact.
 
 **A table is a drawable too**, so it can be placed the same way:
-`Document::add_table_at` puts one on a Numbers sheet, a Keynote slide or a
+`sheet.add(Table::new(…).at(x, y))` puts one on a Numbers sheet, a Keynote slide or a
 Pages page, and the whole difference between the three is the containment. It
 still borrows the styles of a table the document already has — a document with
 none is refused rather than given an invented table style — so this grows a

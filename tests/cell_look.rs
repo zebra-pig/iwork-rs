@@ -21,6 +21,10 @@
 //! What these tests cannot say is whether Numbers *draws* it. That is
 //! `numbers_draws_the_look_of_one_cell`, gated behind `IWORK_APP_CHECK=1`.
 
+// These exercise the 0.2 calls, which 0.3 keeps behind `#[deprecated]`;
+// `tests/elements.rs` is the same ground through the 0.3 API.
+#![allow(deprecated)]
+
 use std::path::{Path, PathBuf};
 
 use iwork::drawable::Color;
@@ -53,7 +57,7 @@ fn fresh() -> Document {
     Document::new_spreadsheet("Blatt", "Tabelle", 5, 4).unwrap()
 }
 
-fn table(doc: &Document) -> iwork::table::Table {
+fn table(doc: &Document) -> iwork::table::TableInfo {
     doc.table("Tabelle").expect("the table")
 }
 

@@ -54,8 +54,9 @@ public type is one or the other.
   `Stroke`, `TextLook`, `Frame`, `Color`. It owns its data, borrows nothing,
   cannot fail to build, and is `Debug + Clone + PartialEq`. It can be made by
   a helper function, tested without a document, and added twice.
-* A **handle** is a thing that *is* in a document: `SlideMut`, `SheetMut`,
-  `PageMut`, `ElementMut`, `ChartMut`, `TableMut`, `TextMut`. It borrows the
+* A **handle** is a thing that *is* in a document: `SlideMut`, `CanvasMut`
+  (a sheet or a page), `ElementMut`, `ChartMut`, `TableMut`, `TextMut`,
+  `TextStyleMut`. It borrows the
   document mutably, every method on it is one edit, and every edit returns
   `Result`. A handle is only ever obtained from its parent
   (`doc.slide_mut(0)?`, `doc.chart_mut(id)?`).
@@ -63,10 +64,9 @@ public type is one or the other.
 Reading is a third, older thing: `doc.slides()`, `doc.charts()`,
 `doc.drawables()` return plain snapshot structs. **A snapshot is named
 `…Info`**, so the bare noun is free for the value: `Chart` is what you build,
-`ChartInfo` is what `doc.charts()` tells you. `ChartInfo` and `TextStyleInfo`
-were renamed in 0.3.0; `Table`, `Slide`, `Drawable` and the rest follow in the
-phase that gives them a value, and until `table::Table` has moved the table
-value lives at `iwork::element::Table` rather than at the crate root.
+`ChartInfo` is what `doc.charts()` tells you. `ChartInfo`, `TextStyleInfo` and
+`TableInfo` were renamed in 0.3.0; `Slide`, `Drawable` and the rest follow
+in 0.4.
 
 ## The rules
 
@@ -127,9 +127,9 @@ TextStyle::new("Title").look(look).align(Align::Centre)
 Shape::rectangle() / ::ellipse() / ::line()   .fill() .stroke() .no_stroke() .shadow() .opacity() .text()
 TextBox::new("words")                         .style(id) .look(look) .format(range, look)
 Image::new(bytes).named("photo.png")
-Table::new("Name", rows, columns)             .rows([[…], […]])
+Table::new("Name", rows, columns)             Table::with_rows("Name", [[…], […]])   (only .at)
 Chart::new(ChartKind::Column)                 .categories([…]) .series("2025", […]) .title("…") .legend()
-// every one of them: .at(x, y) .size(w, h) .frame(Frame)
+// every one of them but Table: .at(x, y) .size(w, h) .frame(Frame)
 
 // document
 let title = doc.add_text_style(TextStyle::new("Title").look(…))?;
@@ -139,8 +139,9 @@ doc.slide_mut(0)?.background(Fill)?;
 // handles
 doc.element_mut(id)?   .fill() .stroke() .shadow() .opacity() .move_to() .resize() .text()
 doc.chart_mut(id)?     .data(…) .kind(…) .title(…) .legend() + everything on element_mut
-doc.table_mut(name)?   (as today, with .fill(range, Fill) and .look(range, &TextLook))
-doc.text_mut(id)?      (as today)
+doc.table_mut(name)?   .set() .formula() .currency() .format() .fill(range, Fill) .look(range, &TextLook) .align() …
+doc.text_mut(id)?      .set() .insert() .delete() .replace() .style() .format()
+doc.text_style_mut(id)? .look() .align() .rename() .property() .delete()
 ```
 
 ## Getting there
@@ -151,10 +152,17 @@ with warnings that name the replacement; 0.4 removes it.
 
 | phase | what | state |
 |---|---|---|
-| 1 | values + `add` for slides, sheets and pages: `Shape`, `TextBox`, `Image`, `Chart`, a first `Table`; one `Fill`; `Color` helpers; typed `TextStyle`; `element_mut` and `chart_mut`; the flat creation and paint functions deprecated | **done**, on branch `api-0.3` |
-| 2 | `Table` with initial rows, at the crate root (`table::Table` → `TableInfo`); table cells take `Fill` and `TextLook` (retiring `CellText`); `sheet_mut`/`page_mut` grow what `slide_mut` has; handles renamed `…Mut` (`SlideHandle` → `SlideMut`) | 0.3.0 |
-| 3 | every remaining `set_object_*`, `set_cell_*`, `set_*_style_*` on `Document` deprecated in favour of a handle; the CLI and the examples speak only the new API | 0.3.x |
-| 4 | typed identifiers (`ElementId`, `StyleId`) in place of `u64`; the deprecated layer removed | 0.4.0 |
+| 1 | values + `add` for slides, sheets and pages: `Shape`, `TextBox`, `Image`, `Chart`; one `Fill`; `Color` helpers; typed `TextStyle`; `element_mut` and `chart_mut` | **0.3.0** |
+| 2 | `Table` with its rows, at the crate root (`table::Table` → `TableInfo`); table cells take `Fill` and `TextLook`; handles renamed `…Mut` | **0.3.0** |
+| 3 | `text_style_mut`; every flat function on `Document` that a handle covers is deprecated; the cookbook, the README and the examples speak only the new API | **0.3.0** |
+| 4 | typed identifiers (`ElementId`, `StyleId`) in place of `u64`; the remaining snapshots renamed `…Info` (`Slide`, `Drawable`, `Sheet`); `CellText` retired; the deprecated layer removed | 0.4.0 |
+
+Not migrated, on purpose: the `iwork` binary. It is part of this crate and
+sits on the flat layer the handles themselves sit on; it moves when that
+layer is made private in 0.4. And what has no handle yet stays undeprecated
+on `Document` — `set_cells`, `fill_formula`, `set_filter_enabled`,
+`set_conditional_threshold`, `bind_chart`, `copy_chart`, `add_comment`,
+`replace_media`, the Pages structure — until a handle is the better home.
 
 Phase by phase the cookbook is rewritten first: if a recipe reads badly, the
 API is wrong, and that is cheaper to find before the code exists.

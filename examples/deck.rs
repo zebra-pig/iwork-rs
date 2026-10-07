@@ -11,10 +11,9 @@
 //! where it goes and how it looks, and is handed to `slide.add(…)`. The
 //! type is a handful of named paragraph styles, made once.
 
-use iwork::element::Table;
-use iwork::table::CellText;
 use iwork::{
-    Chart, ChartKind, Color, Document, Gradient, Kind, Shadow, Shape, TextBox, TextLook, TextStyle,
+    Chart, ChartKind, Color, Document, Gradient, Kind, Shadow, Shape, Table, TextBox, TextLook,
+    TextStyle,
 };
 
 struct Region {
@@ -243,22 +242,16 @@ fn summary(doc: &mut Document, index: usize, styles: &Type) -> Result<(), iwork:
     )?;
     // Big enough to read from the back of the room.
     let everything = format!("A1:C{total}");
-    cells.text_look(
-        everything,
-        &CellText {
-            size: Some(30.0),
-            ..CellText::default()
-        },
-    )?;
+    cells.look(everything, &TextLook::new().size(30.0))?;
     for column in 0..3 {
         cells.column_width(column, Some(520.0))?;
     }
     for row in 0..total {
         cells.row_height(row, Some(80.0))?;
     }
-    cells.fill("A1:C1", Some(NAVY))?;
-    cells.text_look("A1:C1", &CellText::coloured(Color::WHITE))?;
-    cells.fill(format!("A{total}:C{total}"), Some(SAND))?;
-    cells.text_look(format!("A{total}:C{total}"), &CellText::bold())?;
+    cells.fill("A1:C1", NAVY)?;
+    cells.look("A1:C1", &TextLook::new().colour(Color::WHITE))?;
+    cells.fill(format!("A{total}:C{total}"), SAND)?;
+    cells.look(format!("A{total}:C{total}"), &TextLook::new().bold())?;
     Ok(())
 }

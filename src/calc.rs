@@ -52,7 +52,7 @@
 use std::collections::BTreeSet;
 
 use crate::pb::{Message, Value};
-use crate::table::Table;
+use crate::table::TableInfo;
 use crate::Error;
 
 /// `TSCE.CalculationEngineArchive`.
@@ -159,7 +159,7 @@ pub fn precedents_of(
 /// document with no formulas in it and no `TSCE` at all.
 pub fn register_formula(
     document: &mut crate::Document,
-    table: &Table,
+    table: &TableInfo,
     dependency: &Dependency,
 ) -> Result<bool, Error> {
     let Some(engine) = object_of_type(document, TYPE_ENGINE) else {
@@ -270,7 +270,7 @@ fn expanded_record(dependency: &Dependency) -> Message {
 }
 
 /// The `FormulaOwnerDependenciesArchive` that owns a table's cells, and its id.
-fn cell_owner(document: &crate::Document, table: &Table) -> Result<Option<(u64, u64)>, Error> {
+fn cell_owner(document: &crate::Document, table: &TableInfo) -> Result<Option<(u64, u64)>, Error> {
     for (_, object) in document.objects() {
         if object.message_type() != TYPE_OWNER_DEPENDENCIES {
             continue;

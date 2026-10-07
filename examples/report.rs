@@ -276,21 +276,16 @@ fn main() -> Result<(), iwork::Error> {
     ];
 
     let mut styles = std::collections::HashMap::new();
-    for (index, (name, colour, properties)) in recipes.iter().enumerate() {
+    for (name, colour, properties) in recipes.iter() {
         let id = doc.create_text_style(body, name)?.identifier;
-        // Every named style in a real document carries its own internal
-        // identifier; a copy arrives holding the template's, so give it one
-        // in the shape the document already uses.
-        doc.set_text_style_property(
-            id,
-            iwork::style::STYLE_IDENTIFIER,
-            Some(font(&format!("text-{}-paragraphstyle-{name}", index + 1))),
-        )?;
+        let mut style = doc.text_style_mut(id)?;
+        // What `TextLook` does not cover — spacing, tracking — goes in by its
+        // path in the archive.
         for (path, value) in *properties {
-            doc.set_text_style_property(id, path, Some(value.clone()))?;
+            style.property(path, Some(value.clone()))?;
         }
         let (r, g, b) = rgb(*colour);
-        doc.set_text_style_color(id, r, g, b, 1.0)?;
+        style.look(&iwork::TextLook::new().colour(iwork::Color::rgb(r, g, b)))?;
         styles.insert(*name, id);
     }
 

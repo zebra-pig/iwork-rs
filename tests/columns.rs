@@ -14,6 +14,10 @@
 //! names a column at or after it. A refused insert leaves the document byte for
 //! byte as it was, which is what several of these assert.
 
+// These exercise the 0.2 calls, which 0.3 keeps behind `#[deprecated]`;
+// `tests/elements.rs` is the same ground through the 0.3 API.
+#![allow(deprecated)]
+
 use std::path::{Path, PathBuf};
 
 use iwork::table::CellValue;
@@ -53,7 +57,7 @@ fn inserting_a_column_into_a_plain_table() {
 
     let before = doc.table("Formate").unwrap();
     assert_eq!(before.columns, 3);
-    let format_of = |table: &iwork::table::Table, row: usize, column: usize| {
+    let format_of = |table: &iwork::table::TableInfo, row: usize, column: usize| {
         table
             .cell(row, column)
             .map(|cell| cell.format.to_string())

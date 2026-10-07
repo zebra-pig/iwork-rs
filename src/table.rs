@@ -1044,8 +1044,8 @@ impl Sheet {
     /// the sheet rather than a cheap lookup; a caller walking every sheet
     /// should call [`crate::Document::tables`] once instead and group by
     /// [`Table::sheet`].
-    pub fn tables(&self, document: &crate::Document) -> Vec<Table> {
-        let mut tables: Vec<Table> = document
+    pub fn tables(&self, document: &crate::Document) -> Vec<TableInfo> {
+        let mut tables: Vec<TableInfo> = document
             .tables()
             .into_iter()
             .filter(|table| self.drawables.contains(&table.identifier))
@@ -2542,7 +2542,7 @@ impl HiddenStates {
 
 /// A table, read.
 #[derive(Debug, Clone)]
-pub struct Table {
+pub struct TableInfo {
     /// `TST.TableInfoArchive` object identifier — the handle callers use.
     pub identifier: u64,
     /// `TST.TableModelArchive` object identifier.
@@ -2614,7 +2614,7 @@ pub struct Table {
     pub problems: Vec<String>,
 }
 
-impl Table {
+impl TableInfo {
     /// Every non-empty cell, in row-major order.
     pub fn cells(&self) -> &[Cell] {
         &self.cells
@@ -2990,7 +2990,7 @@ pub struct SideTables {
 }
 
 /// Read every table in a document.
-pub fn tables(document: &crate::Document) -> Vec<Table> {
+pub fn tables(document: &crate::Document) -> Vec<TableInfo> {
     let sheets = sheet_names(document);
     let mut out = Vec::new();
     for (stream, object) in document.objects() {
@@ -3042,7 +3042,7 @@ const OWNER_KIND_HAUNTED: u64 = 35;
 /// `base_owner_uid` — which *is* what an AST writes. Every cross-table
 /// reference in `numbers-formulas.numbers` matches a table this way, and none
 /// of them matches a table name, a `table_id` or a haunted UUID.
-fn resolve_base_uids(document: &crate::Document, tables: &mut [Table]) {
+fn resolve_base_uids(document: &crate::Document, tables: &mut [TableInfo]) {
     let mut bases: BTreeMap<Uuid, Uuid> = BTreeMap::new();
     for (_, object) in document.objects() {
         if object.message_type() != TYPE_FORMULA_OWNER_DEPENDENCIES {
@@ -3082,7 +3082,7 @@ fn resolve_base_uids(document: &crate::Document, tables: &mut [Table]) {
 ///
 /// This has to happen after every table is read, which is why it is a second
 /// pass rather than part of reading one.
-fn resolve_pivot_sources(tables: &mut [Table]) {
+fn resolve_pivot_sources(tables: &mut [TableInfo]) {
     let sources: Vec<(Uuid, String, UidMap)> = tables
         .iter()
         .map(|t| (t.haunted_uid, t.name.clone(), t.uids.clone()))
@@ -3168,7 +3168,7 @@ fn read_table(
     model: &Message,
     sheet: Option<String>,
     parent: Option<u64>,
-) -> Option<Table> {
+) -> Option<TableInfo> {
     let store = model.bytes(4).and_then(decode_nested)?;
     let rows = model.varint(6).unwrap_or(0) as usize;
     let columns = model.varint(7).unwrap_or(0) as usize;
@@ -3193,7 +3193,7 @@ fn read_table(
         .unwrap_or_default();
     let (column_states, row_states) = hidden_states(model, &uids);
 
-    let mut table = Table {
+    let mut table = TableInfo {
         identifier,
         model: model_id,
         stream: stream.to_string(),
@@ -3628,7 +3628,12 @@ fn merges_from_region_map(document: &crate::Document, store: &Message) -> Vec<Me
 /// The absolute row of a `TileRowInfo` is `tileid * tile_size + tile_row_index`.
 /// The alternative — counting `TileRowInfo`s against the row-header buckets —
 /// only works while the two stay in lockstep, and nothing enforces that.
-fn read_cells(document: &crate::Document, store: &Message, side: &SideTables, table: &mut Table) {
+fn read_cells(
+    document: &crate::Document,
+    store: &Message,
+    side: &SideTables,
+    table: &mut TableInfo,
+) {
     let Some(tiles) = store.bytes(3).and_then(decode_nested) else {
         return;
     };
@@ -3782,12 +3787,12 @@ pub struct FormulaCell {
 /// Order matters: where two tables carry the same header name, the first one
 /// here keeps the bare name. `tables()` returns tables sorted by object
 /// identifier, which is the order they were created in.
-pub fn names(tables: &[Table]) -> crate::formula::Names {
-    crate::formula::Names::new(tables.iter().map(Table::names).collect())
+pub fn names(tables: &[TableInfo]) -> crate::formula::Names {
+    crate::formula::Names::new(tables.iter().map(TableInfo::names).collect())
 }
 
 /// Every formula in every table, in reading order.
-pub fn formulas(tables: &[Table]) -> Vec<FormulaCell> {
+pub fn formulas(tables: &[TableInfo]) -> Vec<FormulaCell> {
     let index = names(tables);
     let mut out = Vec::new();
     for (position, table) in tables.iter().enumerate() {
@@ -3883,7 +3888,7 @@ pub fn custom_formats(document: &crate::Document) -> Vec<CustomFormat> {
 
 /// Fill in the text of the rich-text cells of a table, which lives in
 /// `TSWP.StorageArchive`s outside the table's own storage.
-pub(crate) fn resolve_rich_text(document: &crate::Document, table: &mut Table) {
+pub(crate) fn resolve_rich_text(document: &crate::Document, table: &mut TableInfo) {
     let Some(model) = archive(document, table.model) else {
         return;
     };

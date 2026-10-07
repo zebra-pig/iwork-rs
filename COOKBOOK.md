@@ -25,13 +25,11 @@ them to ranges of text.
 
 ```
 # std::env::set_current_dir(std::env::temp_dir()).unwrap();
-use iwork::drawable::Color;
-use iwork::table::{CellText, Format};
-use iwork::Document;
+use iwork::table::Format;
+use iwork::{Align, Color, Document, Table, TextLook};
 
-const NAVY: Color = Color { red: 0.07, green: 0.17, blue: 0.29, alpha: 1.0 };
-const SAND: Color = Color { red: 0.96, green: 0.93, blue: 0.85, alpha: 1.0 };
-const WHITE: Color = Color { red: 1.0, green: 1.0, blue: 1.0, alpha: 1.0 };
+const NAVY: Color = Color::rgb8(0x12, 0x2B, 0x4A);
+const SAND: Color = Color::rgb8(0xF6, 0xEC, 0xD9);
 
 // Sheet name, table name, rows, columns. Row 1 is a header row.
 let mut doc = Document::new_spreadsheet("Sales", "Q3", 4, 3)?;
@@ -53,19 +51,26 @@ t.formula("B4", "=SUM(B2:B3)", 2_220)?;
 t.format("B2:B4", &Format::Number { decimals: Some(0) })?;
 
 // The look: ranges, and empty cells can be painted too (C4 is one).
-t.fill("A1:C1", Some(NAVY))?;
-t.text_look("A1:C1", &CellText { colour: Some(WHITE), ..CellText::bold() })?;
-t.fill("A4:C4", Some(SAND))?;
-t.text_look("A4:C4", &CellText::bold())?;
+t.fill("A1:C1", NAVY)?;
+t.look("A1:C1", &TextLook::new().colour(Color::WHITE).bold())?;
+t.fill("A4:C4", SAND)?;
+t.look("A4:C4", &TextLook::new().bold())?;
+t.align("B1:C1", Align::Right)?;
 t.column_width(0, Some(160.0))?;
+
+
+// A sheet is a canvas, not a grid: a second table beside the first, made
+// with what is in it.
+doc.sheet_mut("Sales")?.add(
+    Table::with_rows("Notes", [["Source", "Checked"], ["Ledger", "7 Oct"]]).at(520.0, 0.0),
+)?;
 
 doc.save("Sales.numbers")?;
 # Ok::<(), iwork::Error>(())
 ```
 
-A sheet is a canvas, not a grid: `doc.add_table_at("Sales", "Notes", 3, 2,
-(520.0, 0.0))` puts a second table beside the first, and `doc.add_sheet(…)`
-adds another sheet.
+`doc.add_sheet(…)` adds another sheet, and a sheet takes shapes, text boxes,
+images and charts the same way it takes a table: `sheet.add(…)`.
 
 ## Keynote: a deck
 
@@ -170,8 +175,7 @@ Things worth knowing:
   deck from nothing has one plain layout, a title over a body; start from one
   of Apple's themes with `Document::from_template("…/Wide.kth")` to get
   layouts worth the name.
-- **A table** is `slide.add(iwork::element::Table::new("Name", rows,
-  columns).at(x, y))?`, which returns an identifier `doc.table_mut(id)?`
+- **A table** is `slide.add(Table::new("Name", rows, columns).at(x, y))?`, which returns an identifier `doc.table_mut(id)?`
   takes — and then everything in the Numbers recipe applies to it.
 - **The same values go on a Numbers sheet and a Pages page**:
   `doc.sheet_mut("Sheet 1")?.add(…)`, `doc.page_mut(1)?.add(…)`.

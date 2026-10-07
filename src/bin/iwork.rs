@@ -2502,7 +2502,7 @@ fn hidden_list(extents: &[iwork::table::Extent]) -> Vec<String> {
 
 /// The one-line-per-feature view `iwork tables` shows; `iwork organise` prints
 /// the same things in full.
-fn organisation_summary(table: &iwork::Table, indent: &str) {
+fn organisation_summary(table: &iwork::TableInfo, indent: &str) {
     if !table.sort_rules.is_empty() {
         let rules: Vec<String> = table
             .sort_rules
@@ -2992,7 +2992,7 @@ fn join_or(parts: &[String], empty: &str) -> String {
     }
 }
 
-fn find_table(path: &str, wanted: &str) -> Result<iwork::Table, Error> {
+fn find_table(path: &str, wanted: &str) -> Result<iwork::TableInfo, Error> {
     let doc = Document::open(path)?;
     doc.table(wanted)
         .ok_or_else(|| Error::Format(format!("no table called '{wanted}' in {path}")))

@@ -1979,7 +1979,7 @@ pub const MEDIATOR_FUNCTION: u64 = 175;
 pub fn bind_chart(
     document: &mut crate::Document,
     chart: u64,
-    table: &crate::table::Table,
+    table: &crate::table::TableInfo,
     binding: &ChartBinding,
 ) -> Result<u64, crate::Error> {
     use crate::{Error, Refusal};
@@ -2100,7 +2100,7 @@ pub fn bind_chart(
 /// One mediator formula: a reference to a range of a table, wrapped in function
 /// 175.
 fn reference_formula(
-    table: &crate::table::Table,
+    table: &crate::table::TableInfo,
     range: &crate::table::CellRange,
 ) -> Result<Vec<u8>, crate::Error> {
     let rectangle = range.resolve()?;

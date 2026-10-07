@@ -230,12 +230,12 @@ impl ListCache {
 /// same name with the storage already named, so the remapping every edit does —
 /// style runs, hyperlinks, list levels, anchored drawables, comment anchors —
 /// is the same code and the same refusals behind both.
-pub struct TextHandle<'a> {
+pub struct TextMut<'a> {
     document: &'a mut Document,
     storage: u64,
 }
 
-impl TextHandle<'_> {
+impl TextMut<'_> {
     /// The storage's identifier, for a caller that needs it elsewhere.
     pub fn identifier(&self) -> u64 {
         self.storage
@@ -302,12 +302,12 @@ impl TextHandle<'_> {
 /// Forwarding and nothing more, with one thing of its own: it knows which
 /// storage a placeholder lays out, so `title` and `body` are writes a caller
 /// can make without going through the slide's object graph to find them.
-pub struct SlideHandle<'a> {
+pub struct SlideMut<'a> {
     document: &'a mut Document,
     slide: u64,
 }
 
-impl SlideHandle<'_> {
+impl SlideMut<'_> {
     /// The `KN.SlideArchive` identifier.
     pub fn identifier(&self) -> u64 {
         self.slide
@@ -425,7 +425,7 @@ impl SlideHandle<'_> {
     /// everything subtler is [`Document::set_transition`] and a
     /// [`crate::keynote::TransitionEdit`] of one's own.
     /// The duration and delay are the app's own unless
-    /// [`SlideHandle::transition_with`] says otherwise — which is the call to
+    /// [`SlideMut::transition_with`] says otherwise — which is the call to
     /// use for those, because `(Some(1.5), None)` is two `Option<f64>` in a row
     /// and nothing but the reader's memory says which is which.
     pub fn transition(&mut self, effect: &str) -> Result<crate::keynote::Transition, Error> {
@@ -517,21 +517,31 @@ impl SlideHandle<'_> {
     }
 }
 
+/// The 0.2 name of [`TextMut`].
+#[deprecated(since = "0.3.0", note = "renamed `TextMut`")]
+pub type TextHandle<'a> = TextMut<'a>;
+/// The 0.2 name of [`SlideMut`].
+#[deprecated(since = "0.3.0", note = "renamed `SlideMut`")]
+pub type SlideHandle<'a> = SlideMut<'a>;
+/// The 0.2 name of [`TableMut`].
+#[deprecated(since = "0.3.0", note = "renamed `TableMut`")]
+pub type TableHandle<'a> = TableMut<'a>;
+
 /// One table, held for writing — see [`Document::table_mut`].
 ///
 /// A forwarding layer and nothing more: every method here calls the `Document`
 /// method of the same name with the table already resolved, so there is one
 /// implementation of each write and one set of refusals behind both.
-pub struct TableHandle<'a> {
+pub struct TableMut<'a> {
     document: &'a mut Document,
     /// The table's identifier as text, which is what the write path takes and
     /// what makes it unambiguous whatever the caller named.
     table: String,
 }
 
-impl TableHandle<'_> {
+impl TableMut<'_> {
     /// The table as it is now — the snapshot to read many cells from.
-    pub fn read(&self) -> crate::table::Table {
+    pub fn read(&self) -> crate::table::TableInfo {
         self.document
             .table(&self.table)
             .expect("the handle resolved this table")
@@ -542,7 +552,7 @@ impl TableHandle<'_> {
         self.table.parse().expect("resolved from an identifier")
     }
 
-    /// One cell's value. Reading many is [`TableHandle::read`] — this decodes
+    /// One cell's value. Reading many is [`TableMut::read`] — this decodes
     /// the table each time it is called.
     pub fn value(&self, cell: impl Into<crate::table::CellRef>) -> Result<CellValue, Error> {
         let (row, column) = cell.into().resolve()?;
@@ -662,10 +672,64 @@ impl TableHandle<'_> {
     pub fn fill(
         &mut self,
         cells: impl Into<crate::table::CellRange>,
-        colour: Option<crate::drawable::Color>,
+        fill: impl Into<crate::drawable::Fill>,
     ) -> Result<usize, Error> {
+        use crate::drawable::Fill;
+        let colour = match fill.into() {
+            Fill::None => None,
+            Fill::Color(colour) => Some(colour),
+            Fill::Gradient(_) | Fill::Image(_) => {
+                return Err(Error::refused(
+                    Refusal::UnwritableValue,
+                    "a cell takes a colour or no fill; gradients and pictures are not \
+                     something this crate writes into a cell",
+                ))
+            }
+        };
         let cells = cells.into().cells()?;
         self.document.set_cell_fill(&self.table, cells, colour)
+    }
+
+    /// How the text of these cells looks: font, size, colour, bold, italic —
+    /// the same [`TextLook`](crate::TextLook) a paragraph style and a run of
+    /// text take. Underline and strikethrough are refused: no app was watched
+    /// drawing one written into a cell here.
+    pub fn look(
+        &mut self,
+        cells: impl Into<crate::table::CellRange>,
+        look: &crate::text::TextLook,
+    ) -> Result<usize, Error> {
+        if look.underline.is_some() || look.strikethrough.is_some() {
+            return Err(Error::refused(
+                Refusal::UnwritableValue,
+                "underline and strikethrough are not something this crate writes into a cell",
+            ));
+        }
+        let text = crate::table::CellText {
+            bold: look.bold,
+            italic: look.italic,
+            size: look.size,
+            font: look.font.clone(),
+            colour: look.colour,
+            align: None,
+        };
+        let cells = cells.into().cells()?;
+        self.document.set_cell_text(&self.table, cells, &text)
+    }
+
+    /// How these cells are ranged: left, right, centre, justified, or
+    /// automatic (text left, numbers right).
+    pub fn align(
+        &mut self,
+        cells: impl Into<crate::table::CellRange>,
+        align: crate::table::Align,
+    ) -> Result<usize, Error> {
+        let text = crate::table::CellText {
+            align: Some(align),
+            ..crate::table::CellText::default()
+        };
+        let cells = cells.into().cells()?;
+        self.document.set_cell_text(&self.table, cells, &text)
     }
 
     /// Change how the text of a range of cells is set. See
@@ -678,6 +742,10 @@ impl TableHandle<'_> {
     /// t.text_look("A4:C4", &CellText::bold())?;
     /// # Ok::<(), iwork::Error>(())
     /// ```
+    #[deprecated(
+        since = "0.3.0",
+        note = "use `.look(range, &TextLook::new()…)` and `.align(range, …)`"
+    )]
     pub fn text_look(
         &mut self,
         cells: impl Into<crate::table::CellRange>,
@@ -1046,7 +1114,7 @@ struct StagedRow {
 /// Reproduce a merge's node array, for the test that compares it with the app's.
 #[doc(hidden)]
 pub fn merge_range_node_for_test(
-    table: &crate::table::Table,
+    table: &crate::table::TableInfo,
     row: usize,
     column: usize,
     rows: usize,
@@ -1064,7 +1132,7 @@ pub fn merge_range_node_for_test(
 /// naming **this table's own** `base_owner_uid`, which is what the four merges
 /// of `numbers-formats.numbers` carry.
 fn merge_range_node(
-    table: &crate::table::Table,
+    table: &crate::table::TableInfo,
     row: usize,
     column: usize,
     rows: usize,
@@ -1202,7 +1270,7 @@ fn encode_uuid(uuid: crate::table::Uuid) -> Vec<u8> {
 /// collide.
 fn mint_row_uuid(
     existing: &BTreeSet<crate::table::Uuid>,
-    table: &crate::table::Table,
+    table: &crate::table::TableInfo,
     at: usize,
 ) -> crate::table::Uuid {
     // splitmix64 seeded from the table id and the insertion point.
@@ -1774,6 +1842,7 @@ impl Document {
     /// new text are given entries of their own where the storage had one per
     /// paragraph before; nothing is left pointing at a character that is not
     /// there any more.
+    #[deprecated(since = "0.3.0", note = "use `doc.text_mut(storage)?.set(text)`")]
     pub fn set_text(&mut self, identifier: u64, new_text: &str) -> Result<TextEdit, Error> {
         let length = text::length(&self.storage_text(identifier)?);
         self.replace_text(identifier, 0..length, new_text)
@@ -1831,6 +1900,7 @@ impl Document {
     /// Everything anchored into the body moves with the insert, exactly as it
     /// does for [`Document::insert_text`]: this is that call with the index
     /// worked out.
+    #[deprecated(since = "0.3.0", note = "use `doc.text_mut(storage)?.append(text)`")]
     pub fn append_paragraph(&mut self, text: &str) -> Result<TextEdit, Error> {
         self.refuse_if_body_is_not_drawn()?;
         let Some(storage) = self.body_storage() else {
@@ -1855,6 +1925,10 @@ impl Document {
     ///
     /// `at` counts **UTF-16 code units**, like every character index in the
     /// format; see [`Document::replace_text`].
+    #[deprecated(
+        since = "0.3.0",
+        note = "use `doc.text_mut(storage)?.insert(at, text)`"
+    )]
     pub fn insert_text(
         &mut self,
         identifier: u64,
@@ -1868,6 +1942,7 @@ impl Document {
     /// and dropping what was inside it.
     ///
     /// `range` counts **UTF-16 code units**; see [`Document::replace_text`].
+    #[deprecated(since = "0.3.0", note = "use `doc.text_mut(storage)?.delete(range)`")]
     pub fn delete_text(&mut self, identifier: u64, range: Range<u64>) -> Result<TextEdit, Error> {
         self.replace_text(identifier, range, "")
     }
@@ -1897,6 +1972,10 @@ impl Document {
     /// * text containing `U+FFFC`, `U+0004` or `U+0005`
     ///   ([`Error::UnwritableCharacter`]), which stand for objects;
     /// * an index inside a surrogate pair, or outside the text.
+    #[deprecated(
+        since = "0.3.0",
+        note = "use `doc.text_mut(storage)?.replace(range, text)`"
+    )]
     pub fn replace_text(
         &mut self,
         identifier: u64,
@@ -2260,7 +2339,7 @@ impl Document {
     /// }
     /// # Ok(()) }
     /// ```
-    pub fn tables(&self) -> Vec<crate::table::Table> {
+    pub fn tables(&self) -> Vec<crate::table::TableInfo> {
         let mut tables = crate::table::tables(self);
         for table in &mut tables {
             crate::table::resolve_rich_text(self, table);
@@ -2306,7 +2385,7 @@ impl Document {
     }
 
     /// One table by its `TST.TableInfoArchive` identifier, or by name.
-    pub fn table(&self, wanted: &str) -> Option<crate::table::Table> {
+    pub fn table(&self, wanted: &str) -> Option<crate::table::TableInfo> {
         let by_id: Option<u64> = wanted.parse().ok();
         self.tables()
             .into_iter()
@@ -2349,6 +2428,7 @@ impl Document {
     /// cell covered by a merge, and any object carrying version patches — see
     /// [`Document::patched_objects`]. A row with no stored cells is *not*
     /// refused: the write brings the row into being.
+    #[deprecated(since = "0.3.0", note = "use `doc.table_mut(name)?.set(cell, value)`")]
     pub fn set_cell(
         &mut self,
         wanted: &str,
@@ -2431,7 +2511,7 @@ impl Document {
     /// half-written table.
     fn write_cells(
         &mut self,
-        table: &crate::table::Table,
+        table: &crate::table::TableInfo,
         cells: Vec<(usize, usize, CellValue)>,
     ) -> Result<usize, Error> {
         self.write_cells_with(table, cells, ListCache::default())
@@ -2445,7 +2525,7 @@ impl Document {
     /// borrow — which a table holding no money has none of.
     fn write_cells_with(
         &mut self,
-        table: &crate::table::Table,
+        table: &crate::table::TableInfo,
         cells: Vec<(usize, usize, CellValue)>,
         cache: ListCache,
     ) -> Result<usize, Error> {
@@ -2528,7 +2608,7 @@ impl Document {
     /// snapshot covers a later cell refusing.
     fn apply_cell_batch(
         &mut self,
-        table: &crate::table::Table,
+        table: &crate::table::TableInfo,
         site: &TableSite,
         by_row: std::collections::BTreeMap<usize, Vec<(usize, CellValue)>>,
         mut cache: ListCache,
@@ -2736,7 +2816,7 @@ impl Document {
     /// sheets, and silently editing the first one is how a caller writes into the
     /// wrong table without ever being told there was a choice. A name that names
     /// more than one table is refused with the identifiers to disambiguate by.
-    fn table_for_write(&self, wanted: &str) -> Result<crate::table::Table, Error> {
+    fn table_for_write(&self, wanted: &str) -> Result<crate::table::TableInfo, Error> {
         let by_id: Option<u64> = wanted.parse().ok();
         let mut matches = self
             .tables()
@@ -2790,7 +2870,7 @@ impl Document {
     /// Reading it is the expensive half of a cell write — the model, the data
     /// store, the tile map and the side-table references — so a batch reads it
     /// once and every cell of every row shares it.
-    fn table_site(&self, table: &crate::table::Table) -> Result<TableSite, Error> {
+    fn table_site(&self, table: &crate::table::TableInfo) -> Result<TableSite, Error> {
         let where_ = &table.name;
         let model = self.archive_of(table.model)?;
         let store = model
@@ -2872,7 +2952,7 @@ impl Document {
     /// Where a cell's bytes live, and which side tables reach it.
     fn cell_site(
         &self,
-        table: &crate::table::Table,
+        table: &crate::table::TableInfo,
         row: usize,
         column: usize,
     ) -> Result<CellSite, Error> {
@@ -2926,7 +3006,7 @@ impl Document {
     fn rewrite_record(
         &self,
         cache: &mut ListCache,
-        table: &crate::table::Table,
+        table: &crate::table::TableInfo,
         site: &TableSite,
         old: crate::table::CellRecord,
         value: &CellValue,
@@ -3137,7 +3217,7 @@ impl Document {
     fn donor_format(
         &self,
         cache: &mut ListCache,
-        table: &crate::table::Table,
+        table: &crate::table::TableInfo,
         list: u64,
         slot: crate::table::FormatSlot,
     ) -> Option<u32> {
@@ -3165,7 +3245,7 @@ impl Document {
         &self,
         cache: &mut ListCache,
         list: u64,
-        table: &crate::table::Table,
+        table: &crate::table::TableInfo,
     ) -> Option<u32> {
         let entries = crate::table::DataList::decode(cache.read(self, list).ok()?).entries;
         let format_type = |key: u32| {
@@ -3563,11 +3643,11 @@ impl Document {
     /// Indices are **UTF-16 code units**, which is what iWork counts text in
     /// and what every range here means — the one thing a handle cannot make go
     /// away.
-    pub fn text_mut(&mut self, storage: u64) -> Result<TextHandle<'_>, Error> {
+    pub fn text_mut(&mut self, storage: u64) -> Result<TextMut<'_>, Error> {
         // Resolve now, so a wrong identifier is an error here rather than on
         // the first edit.
         self.storage_text(storage)?;
-        Ok(TextHandle {
+        Ok(TextMut {
             document: self,
             storage,
         })
@@ -3576,7 +3656,7 @@ impl Document {
     /// The document body of a Pages document, as a handle.
     ///
     /// Pages only: a Numbers or Keynote document has no body, and says so.
-    pub fn body_mut(&mut self) -> Result<TextHandle<'_>, Error> {
+    pub fn body_mut(&mut self) -> Result<TextMut<'_>, Error> {
         self.refuse_if_body_is_not_drawn()?;
         let storage = self.body_storage().ok_or_else(|| {
             Error::refused(
@@ -3598,7 +3678,7 @@ impl Document {
     /// **A slide is not a page with a title slot.** What a slide can hold is
     /// decided by the *layout* it is built on: the placeholders that layout
     /// defines — title, body, slide number, object — and any drawables the
-    /// slide owns besides. So [`SlideHandle::title`] writes the title
+    /// slide owns besides. So [`SlideMut::title`] writes the title
     /// placeholder when the layout has one and refuses by name when it does
     /// not, rather than inventing a text box and calling it a title.
     ///
@@ -3614,7 +3694,7 @@ impl Document {
     pub fn slide_mut(
         &mut self,
         slide: impl Into<crate::keynote::SlideRef>,
-    ) -> Result<SlideHandle<'_>, Error> {
+    ) -> Result<SlideMut<'_>, Error> {
         let wanted = slide.into();
         let slides = self.slides();
         if slides.is_empty() {
@@ -3636,7 +3716,7 @@ impl Document {
                 format!("no slide {wanted} — the deck has {} of them", slides.len()),
             )
         })?;
-        Ok(SlideHandle {
+        Ok(SlideMut {
             document: self,
             slide: identifier,
         })
@@ -3671,14 +3751,14 @@ impl Document {
     ///
     /// The handle stores no cells, so it cannot go stale: every call reads what
     /// is there now. That also means reading cell by cell re-reads the table
-    /// each time — [`TableHandle::read`] hands back a snapshot for that.
+    /// each time — [`TableMut::read`] hands back a snapshot for that.
     pub fn table_mut<'a>(
         &'a mut self,
         table: impl Into<crate::table::TableRef<'a>>,
-    ) -> Result<TableHandle<'a>, Error> {
+    ) -> Result<TableMut<'a>, Error> {
         let wanted = table.into();
         let identifier = self.resolve_table(&wanted)?;
-        Ok(TableHandle {
+        Ok(TableMut {
             document: self,
             table: identifier.to_string(),
         })
@@ -3689,7 +3769,7 @@ impl Document {
     fn resolve_table(&self, wanted: &crate::table::TableRef<'_>) -> Result<u64, Error> {
         use crate::table::TableRef;
         let tables = self.tables();
-        let matches: Vec<&crate::table::Table> = match wanted {
+        let matches: Vec<&crate::table::TableInfo> = match wanted {
             TableRef::Identifier(id) => tables.iter().filter(|t| t.identifier == *id).collect(),
             TableRef::Name(name) => tables.iter().filter(|t| t.name == *name).collect(),
             TableRef::On(sheet, name) => tables
@@ -3770,6 +3850,7 @@ impl Document {
     /// be: every table in the corpus has a frame 494pt wide whatever its
     /// columns — three of them, seven of them, one of them 150pt — so the app
     /// lays the table out from the column widths rather than from the frame.
+    #[deprecated(since = "0.3.0", note = "use `doc.table_mut(name)?.column_width(…)`")]
     pub fn set_column_width(
         &mut self,
         wanted: &str,
@@ -3802,6 +3883,7 @@ impl Document {
     /// The row half of [`Document::set_column_width`], and the one asymmetry is
     /// Apple's: a table's rows are counted across a *list* of buckets where its
     /// columns share one, so the row's own bucket has to be found first.
+    #[deprecated(since = "0.3.0", note = "use `doc.table_mut(name)?.row_height(…)`")]
     pub fn set_row_height(
         &mut self,
         wanted: &str,
@@ -3892,6 +3974,10 @@ impl Document {
     /// Refused by name: a format whose family the cell's value cannot use (a
     /// date pattern on a text cell), an empty cell, a cell holding rich text,
     /// and a table with no format list.
+    #[deprecated(
+        since = "0.3.0",
+        note = "use `doc.table_mut(name)?.format(range, &format)`"
+    )]
     pub fn set_format(
         &mut self,
         wanted: &str,
@@ -3981,7 +4067,7 @@ impl Document {
     /// The applying half of [`Document::set_format`], behind the snapshot.
     fn apply_format(
         &mut self,
-        table: &crate::table::Table,
+        table: &crate::table::TableInfo,
         site: &TableSite,
         cells: &[(usize, usize)],
         slots: &[crate::table::FormatSlot],
@@ -4072,6 +4158,10 @@ impl Document {
     ///
     /// Refused by name: a cell outside the table, a cell a merge covers, a
     /// table with no style list, and any object carrying version patches.
+    #[deprecated(
+        since = "0.3.0",
+        note = "use `doc.table_mut(name)?.fill(range, colour)`"
+    )]
     pub fn set_cell_fill(
         &mut self,
         wanted: &str,
@@ -4088,6 +4178,10 @@ impl Document {
     /// parent is the text style the cell had, carrying only what `look`
     /// changes. A colour goes to the font colour *and* to the fill inside the
     /// glyphs, because the fill is what the app paints with.
+    #[deprecated(
+        since = "0.3.0",
+        note = "use `doc.table_mut(name)?.look(range, &TextLook::new()…)` and `.align(range, …)`"
+    )]
     pub fn set_cell_text(
         &mut self,
         wanted: &str,
@@ -4175,7 +4269,7 @@ impl Document {
     /// `footer_row_` slots, for the cell style or the text style.
     fn area_style(
         &self,
-        table: &crate::table::Table,
+        table: &crate::table::TableInfo,
         row: usize,
         column: usize,
         text: bool,
@@ -4331,7 +4425,7 @@ impl Document {
 
     fn apply_cell_look(
         &mut self,
-        table: &crate::table::Table,
+        table: &crate::table::TableInfo,
         site: &TableSite,
         cells: &[(usize, usize)],
         list: u64,
@@ -4587,6 +4681,10 @@ impl Document {
     /// q1.currency("C2", 184_300.0, "CHF")?;
     /// # Ok(()) }
     /// ```
+    #[deprecated(
+        since = "0.3.0",
+        note = "use `doc.table_mut(name)?.currency(cell, amount, code)`"
+    )]
     pub fn set_currency(
         &mut self,
         wanted: &str,
@@ -4649,6 +4747,7 @@ impl Document {
     /// The `type` the table already carries is kept. Every one in the corpus is
     /// `0`, which is "the whole table" — the other values name a row range and
     /// nothing here has seen one.
+    #[deprecated(since = "0.3.0", note = "use `doc.table_mut(name)?.sort_by(…)`")]
     pub fn set_sort_rules(
         &mut self,
         wanted: &str,
@@ -4804,6 +4903,10 @@ impl Document {
     /// object carrying version patches — and, from the parser, everything whose
     /// dependency edges this crate cannot write: another table, a whole row or
     /// column, a header name, a function it does not know.
+    #[deprecated(
+        since = "0.3.0",
+        note = "use `doc.table_mut(name)?.formula(cell, text, value)`"
+    )]
     pub fn set_formula(
         &mut self,
         wanted: &str,
@@ -5380,7 +5483,7 @@ impl Document {
     /// Locate every object a row delete rewrites and build each one's new form.
     fn plan_row_delete(
         &self,
-        table: &crate::table::Table,
+        table: &crate::table::TableInfo,
         at: usize,
         where_: &str,
     ) -> Result<DeletePlan, Error> {
@@ -5539,7 +5642,7 @@ impl Document {
     /// Locate every object a column delete rewrites and build its new form.
     fn plan_column_delete(
         &self,
-        table: &crate::table::Table,
+        table: &crate::table::TableInfo,
         at: usize,
         where_: &str,
     ) -> Result<DeletePlan, Error> {
@@ -5797,6 +5900,7 @@ impl Document {
     /// worth knowing: a formula elsewhere that reads a covered cell keeps its
     /// cached value and reads an empty cell the next time the app
     /// recalculates — the same staleness any cell write causes.
+    #[deprecated(since = "0.3.0", note = "use `doc.table_mut(name)?.merge(range)`")]
     pub fn merge_cells(
         &mut self,
         wanted: &str,
@@ -5910,6 +6014,7 @@ impl Document {
     /// The formula naming the range goes out of the merge owner's store;
     /// `next_formula_index` is left alone, because it is a high-water mark and
     /// the app only ever raises it.
+    #[deprecated(since = "0.3.0", note = "use `doc.table_mut(name)?.unmerge(range)`")]
     pub fn unmerge_cells(&mut self, wanted: &str, row: usize, column: usize) -> Result<(), Error> {
         let table = self.table_for_write(wanted)?;
         let where_ = format!(
@@ -6157,7 +6262,7 @@ impl Document {
     /// either way — and no fixture here proves any of them across a delete.
     fn refuse_if_organised(
         &self,
-        table: &crate::table::Table,
+        table: &crate::table::TableInfo,
         row: bool,
         where_: &str,
     ) -> Result<(), Error> {
@@ -6226,7 +6331,7 @@ impl Document {
     /// sides of it, and any reference this crate cannot read.
     fn delete_would_break_a_formula(
         &self,
-        target: &crate::table::Table,
+        target: &crate::table::TableInfo,
         at: usize,
         row: bool,
     ) -> Option<String> {
@@ -6434,7 +6539,7 @@ impl Document {
     /// safe only when host and referent fall on the same side of it.
     fn column_insert_would_break_a_formula(
         &self,
-        target: &crate::table::Table,
+        target: &crate::table::TableInfo,
         at: usize,
     ) -> Option<String> {
         use crate::formula::Axis;
@@ -6504,7 +6609,7 @@ impl Document {
     /// form. Pure, like [`Document::plan_row_insert`].
     fn plan_column_insert(
         &self,
-        table: &crate::table::Table,
+        table: &crate::table::TableInfo,
         at: usize,
         where_: &str,
     ) -> Result<ColumnInsertPlan, Error> {
@@ -6693,7 +6798,7 @@ impl Document {
         &self,
         uid_map: u64,
         at: usize,
-        table: &crate::table::Table,
+        table: &crate::table::TableInfo,
         where_: &str,
     ) -> Result<Message, Error> {
         use crate::table::Uuid;
@@ -6776,7 +6881,7 @@ impl Document {
     /// not read — is treated as unsafe rather than assumed harmless.
     fn row_insert_would_break_a_formula(
         &self,
-        target: &crate::table::Table,
+        target: &crate::table::TableInfo,
         at: usize,
     ) -> Option<String> {
         use crate::formula::Axis;
@@ -6852,7 +6957,7 @@ impl Document {
     /// hidden-state extent that keys rows — refuses here.
     fn plan_row_insert(
         &self,
-        table: &crate::table::Table,
+        table: &crate::table::TableInfo,
         at: usize,
         where_: &str,
     ) -> Result<RowInsertPlan, Error> {
@@ -7116,7 +7221,7 @@ impl Document {
         &self,
         uid_map: u64,
         at: usize,
-        table: &crate::table::Table,
+        table: &crate::table::TableInfo,
         where_: &str,
     ) -> Result<Message, Error> {
         use crate::table::Uuid;
@@ -7319,13 +7424,12 @@ impl Document {
     }
 
     /// Give the document a named paragraph style, and get its identifier —
-    /// what [`crate::TextBox::style`] and [`TextHandle::style`] take.
+    /// what [`crate::TextBox::style`] and [`TextMut::style`] take.
     ///
     /// The style is the document's body style with what the
     /// [`crate::TextStyle`] says changed, and the app offers it in its style
     /// menu under its name.
     pub fn add_text_style(&mut self, style: &crate::element::TextStyle) -> Result<u64, Error> {
-        use style::property;
         let paragraph_styles: Vec<_> = self
             .text_styles()
             .into_iter()
@@ -7343,53 +7447,67 @@ impl Document {
                 )
             })?;
         let (streams, package) = (self.streams.clone(), self.package.clone());
-        let mut make = || -> Result<u64, Error> {
-            let made = self.create_text_style(base, &style.name)?.identifier;
-            let look = &style.look;
-            let toggles = [
-                (property::BOLD, look.bold),
-                (property::ITALIC, look.italic),
-                (property::UNDERLINE, look.underline),
-                (property::STRIKETHROUGH, look.strikethrough),
-            ];
-            for (path, value) in toggles {
-                if let Some(value) = value {
-                    self.set_text_style_property(
-                        made,
-                        path,
-                        Some(Value::Varint(u64::from(value))),
-                    )?;
-                }
-            }
-            if let Some(size) = look.size {
-                let value = Value::Fixed32(size.to_le_bytes());
-                self.set_text_style_property(made, property::FONT_SIZE, Some(value))?;
-            }
-            if let Some(font) = &look.font {
-                let value = Value::Bytes(font.as_bytes().to_vec());
-                self.set_text_style_property(made, property::FONT_NAME, Some(value))?;
-            }
-            if let Some(colour) = look.colour {
-                self.set_text_style_color(
-                    made,
-                    colour.red,
-                    colour.green,
-                    colour.blue,
-                    colour.alpha,
-                )?;
-            }
-            if let Some(align) = style.align {
-                let value = Value::Varint(align as u64);
-                self.set_text_style_property(made, property::ALIGNMENT, Some(value))?;
-            }
-            Ok(made)
-        };
-        let made = make();
+        let made = self
+            .create_text_style(base, &style.name)
+            .map(|created| created.identifier)
+            .and_then(|made| {
+                self.apply_style_look(made, &style.look, style.align)?;
+                Ok(made)
+            });
         if made.is_err() {
             self.streams = streams;
             self.package = package;
         }
         made
+    }
+
+    /// Write what a [`TextLook`](crate::TextLook) sets, and an alignment,
+    /// into a named text style.
+    pub(crate) fn apply_style_look(
+        &mut self,
+        style: u64,
+        look: &text::TextLook,
+        align: Option<crate::table::Align>,
+    ) -> Result<(), Error> {
+        use style::property;
+        let toggles = [
+            (property::BOLD, look.bold),
+            (property::ITALIC, look.italic),
+            (property::UNDERLINE, look.underline),
+            (property::STRIKETHROUGH, look.strikethrough),
+        ];
+        for (path, value) in toggles {
+            if let Some(value) = value {
+                self.set_text_style_property(style, path, Some(Value::Varint(u64::from(value))))?;
+            }
+        }
+        if let Some(size) = look.size {
+            let value = Value::Fixed32(size.to_le_bytes());
+            self.set_text_style_property(style, property::FONT_SIZE, Some(value))?;
+        }
+        if let Some(font) = &look.font {
+            let value = Value::Bytes(font.as_bytes().to_vec());
+            self.set_text_style_property(style, property::FONT_NAME, Some(value))?;
+        }
+        if let Some(colour) = look.colour {
+            self.set_text_style_color(style, colour.red, colour.green, colour.blue, colour.alpha)?;
+        }
+        if let Some(align) = align {
+            let value = Value::Varint(align as u64);
+            self.set_text_style_property(style, property::ALIGNMENT, Some(value))?;
+        }
+        Ok(())
+    }
+
+    /// A named text style, to change: its look, its alignment, its name.
+    pub fn text_style_mut(
+        &mut self,
+        style: u64,
+    ) -> Result<crate::element::TextStyleMut<'_>, Error> {
+        if self.text_style(style).is_none() {
+            return Err(Error::NoSuchStyle(style));
+        }
+        Ok(crate::element::TextStyleMut::new(self, style))
     }
 
     /// Make a chart from data where there is none to copy. See
@@ -8299,6 +8417,7 @@ impl Document {
     ///
     /// Naming an unnamed variation style is allowed and gives it a name; the
     /// field is created if it is not there.
+    #[deprecated(since = "0.3.0", note = "use `doc.text_style_mut(id)?.rename(name)`")]
     pub fn rename_text_style(&mut self, identifier: u64, name: &str) -> Result<(), Error> {
         self.set_text_style_property(
             identifier,
@@ -8329,6 +8448,10 @@ impl Document {
     ///
     /// `iwork style <file> <id>` prints those paths. Nothing here knows what a
     /// given field *means* — see [`crate::style`].
+    #[deprecated(
+        since = "0.3.0",
+        note = "use `doc.text_style_mut(id)?.property(path, value)`, or `.look(…)` for what `TextLook` covers"
+    )]
     pub fn set_text_style_property(
         &mut self,
         identifier: u64,
@@ -8364,6 +8487,10 @@ impl Document {
     /// a style that has one, with [`Document::copy_text_style_property`].
     ///
     /// Channels are `0.0..=1.0`, as the format stores them.
+    #[deprecated(
+        since = "0.3.0",
+        note = "use `doc.text_style_mut(id)?.look(&TextLook::new().colour(c))`"
+    )]
     pub fn set_text_style_color(
         &mut self,
         identifier: u64,
@@ -8462,6 +8589,10 @@ impl Document {
     /// and the document is left untouched. iWork is unforgiving about dangling
     /// references, so a delete that cannot be completed cleanly is not
     /// completed at all.
+    #[deprecated(
+        since = "0.3.0",
+        note = "use `doc.text_style_mut(id)?.delete(replace_with)`"
+    )]
     pub fn delete_text_style(
         &mut self,
         identifier: u64,
@@ -8607,6 +8738,10 @@ impl Document {
     /// is for [`Document::replace_text`]. Clamping it instead is how
     /// `500..600` came to restyle the only paragraph of a 54-unit body and
     /// report success.
+    #[deprecated(
+        since = "0.3.0",
+        note = "use `doc.text_mut(storage)?.style(range, style)`"
+    )]
     pub fn apply_text_style(
         &mut self,
         storage: u64,
@@ -8705,6 +8840,10 @@ impl Document {
     /// bold over `0..9` and then red over `5..12` leaves `5..9` bold and red.
     /// Runs asking for the same look share one style. The range is in UTF-16
     /// code units and may cross paragraphs.
+    #[deprecated(
+        since = "0.3.0",
+        note = "use `doc.text_mut(storage)?.format(range, &look)`"
+    )]
     pub fn format_text(
         &mut self,
         storage: u64,
@@ -9009,12 +9148,14 @@ impl Document {
     ///
     /// The slide may be named by its `KN.SlideArchive` or by its
     /// `KN.SlideNodeArchive`; both are printed by `iwork slides`.
+    #[deprecated(since = "0.3.0", note = "use `doc.slide_mut(index)?.skip(…)`")]
     pub fn set_slide_skipped(&mut self, slide: u64, skipped: bool) -> Result<bool, Error> {
         crate::keynote::set_slide_skipped(self, slide, skipped)
     }
 
     /// Move a slide to another position in the deck, counting from 0. Returns
     /// where it landed.
+    #[deprecated(since = "0.3.0", note = "use `doc.slide_mut(index)?.move_to(…)`")]
     pub fn move_slide(&mut self, slide: u64, to: usize) -> Result<usize, Error> {
         crate::keynote::move_slide(self, slide, to)
     }
@@ -9023,6 +9164,7 @@ impl Document {
     ///
     /// See [`crate::keynote::duplicate_slide`] for what a copy has to touch and
     /// how that was measured.
+    #[deprecated(since = "0.3.0", note = "use `doc.slide_mut(index)?.duplicate()`")]
     pub fn duplicate_slide(&mut self, slide: u64) -> Result<crate::keynote::SlideCopy, Error> {
         crate::keynote::duplicate_slide(self, slide)
     }
@@ -9051,6 +9193,10 @@ impl Document {
     /// A table is a drawable like any other, so the containment rules are the
     /// ones in [`Document::add_text_box`]: a sheet and a slide own theirs and
     /// are named as the parent, a page owns nothing.
+    #[deprecated(
+        since = "0.3.0",
+        note = "use `slide.add(Table::new(name, rows, columns).at(x, y))`"
+    )]
     pub fn add_table_at(
         &mut self,
         container: &str,
@@ -9252,6 +9398,10 @@ impl Document {
     /// See [`crate::keynote::set_transition`]: the effect may be named the way
     /// `iwork slides` prints it or by its archive identifier, and `"none"`
     /// removes it.
+    #[deprecated(
+        since = "0.3.0",
+        note = "use `doc.slide_mut(index)?.transition_with(…)`"
+    )]
     pub fn set_transition(
         &mut self,
         slide: u64,
@@ -9269,6 +9419,7 @@ impl Document {
     /// style is inferred from the convention the other style archives keep
     /// rather than read off a deck Keynote wrote; the doc comment there says
     /// so at length.
+    #[deprecated(since = "0.3.0", note = "use `doc.slide_mut(index)?.background(fill)`")]
     pub fn set_slide_background(
         &mut self,
         slide: u64,
@@ -9309,6 +9460,7 @@ impl Document {
     /// now enforces — so writing text into an empty-note slide must set the
     /// flag, and clearing it must unset it, or the flag comes to say the
     /// opposite of what the storage holds.
+    #[deprecated(since = "0.3.0", note = "use `doc.slide_mut(index)?.notes(text)`")]
     pub fn set_presenter_notes(&mut self, slide: u64, text: &str) -> Result<TextEdit, Error> {
         let show = self
             .show()

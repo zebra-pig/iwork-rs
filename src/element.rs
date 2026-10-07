@@ -4,7 +4,7 @@
 //! **Values to create, handles to edit.** A [`Shape`], a [`TextBox`], an
 //! [`Image`] or a [`Chart`] here is a description: it borrows nothing, cannot
 //! fail to build, and becomes part of a document when a slide, a sheet or a
-//! page is told to [`add`](crate::document::SlideHandle::add) it. Where it
+//! page is told to [`add`](crate::document::SlideMut::add) it. Where it
 //! goes and how big it is are properties of the value like any other —
 //! `.at(x, y)`, `.size(w, h)`.
 //!
@@ -455,27 +455,53 @@ impl Element for Chart {
 
 // -- table -------------------------------------------------------------------
 
-/// A table: a name, and how many rows and columns. Its first row is a
-/// header row.
+/// A table: a name, how many rows and columns, and what is in the cells.
 ///
-/// What goes in the cells is written afterwards, through
-/// [`Document::table_mut`] with the identifier `add` returns. A table has no
-/// size of its own to set: it is as big as its rows and columns are.
+/// Its first row is a header row. It has no size of its own to set: it is as
+/// big as its rows and columns are (`doc.table_mut(id)?.column_width(…)`).
+/// `add` returns the identifier [`Document::table_mut`] takes, for formats,
+/// formulas, fills and everything else a table does.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Table {
     name: String,
     rows: usize,
     columns: usize,
     position: (f32, f32),
+    cells: Vec<Vec<crate::table::CellValue>>,
 }
 
 impl Table {
+    /// An empty table of this size.
     pub fn new(name: impl Into<String>, rows: usize, columns: usize) -> Table {
         Table {
             name: name.into(),
             rows,
             columns,
             position: (0.0, 0.0),
+            cells: Vec::new(),
+        }
+    }
+
+    /// A table exactly as big as what is in it: one inner list per row, the
+    /// first being the header row.
+    pub fn with_rows<Row, Value>(
+        name: impl Into<String>,
+        rows: impl IntoIterator<Item = Row>,
+    ) -> Table
+    where
+        Row: IntoIterator<Item = Value>,
+        Value: Into<crate::table::CellValue>,
+    {
+        let cells: Vec<Vec<crate::table::CellValue>> = rows
+            .into_iter()
+            .map(|row| row.into_iter().map(Into::into).collect())
+            .collect();
+        Table {
+            name: name.into(),
+            rows: cells.len(),
+            columns: cells.iter().map(Vec::len).max().unwrap_or(0),
+            position: (0.0, 0.0),
+            cells,
         }
     }
 
@@ -489,13 +515,17 @@ impl Table {
 impl sealed::Sealed for Table {}
 impl Element for Table {
     fn add_to(&self, document: &mut Document, container: &str) -> Result<u64, Error> {
-        document.add_table_at(
+        let made = document.add_table_at(
             container,
             &self.name,
             self.rows,
             self.columns,
             self.position,
-        )
+        )?;
+        if !self.cells.is_empty() {
+            document.table_mut(made)?.set_block("A1", &self.cells)?;
+        }
+        Ok(made)
     }
 }
 
@@ -597,13 +627,13 @@ impl<'a> ElementMut<'a> {
     }
 
     /// Its text, to edit, style and format. Refused for an element with none.
-    pub fn text(&mut self) -> Result<crate::document::TextHandle<'_>, Error> {
+    pub fn text(&mut self) -> Result<crate::document::TextMut<'_>, Error> {
         let storage = self.storage()?;
         self.document.text_mut(storage)
     }
 
     /// The same, giving up the element handle for it.
-    pub fn into_text(self) -> Result<crate::document::TextHandle<'a>, Error> {
+    pub fn into_text(self) -> Result<crate::document::TextMut<'a>, Error> {
         let storage = self.storage()?;
         self.document.text_mut(storage)
     }
@@ -684,5 +714,50 @@ impl<'a> CanvasMut<'a> {
     /// get its identifier. A refused `add` leaves the document as it was.
     pub fn add(&mut self, element: impl Element) -> Result<u64, Error> {
         self.document.add_element(&self.container, &element)
+    }
+}
+
+/// A named text style that is in a document, to change. From
+/// [`Document::text_style_mut`].
+pub struct TextStyleMut<'a> {
+    document: &'a mut Document,
+    style: u64,
+}
+
+impl<'a> TextStyleMut<'a> {
+    pub(crate) fn new(document: &'a mut Document, style: u64) -> TextStyleMut<'a> {
+        TextStyleMut { document, style }
+    }
+
+    pub fn identifier(&self) -> u64 {
+        self.style
+    }
+
+    /// Change what the [`TextLook`] sets, and leave the rest of the style.
+    pub fn look(&mut self, look: &TextLook) -> Result<(), Error> {
+        self.document.apply_style_look(self.style, look, None)
+    }
+
+    /// How its paragraphs are ranged.
+    pub fn align(&mut self, align: Align) -> Result<(), Error> {
+        self.document
+            .apply_style_look(self.style, &TextLook::default(), Some(align))
+    }
+
+    pub fn rename(&mut self, name: &str) -> Result<(), Error> {
+        self.document.rename_text_style(self.style, name)
+    }
+
+    /// One property by its path in the archive (`iwork::style::property`),
+    /// for what [`TextLook`] does not cover; `None` clears it.
+    pub fn property(&mut self, path: &[u32], value: Option<crate::pb::Value>) -> Result<(), Error> {
+        self.document
+            .set_text_style_property(self.style, path, value)
+    }
+
+    /// Delete the style, pointing the text that used it at `replace_with` or
+    /// at nothing.
+    pub fn delete(self, replace_with: Option<u64>) -> Result<crate::style::StyleDeletion, Error> {
+        self.document.delete_text_style(self.style, replace_with)
     }
 }

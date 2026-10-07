@@ -11,11 +11,15 @@
 //! Without `tests/fixtures/generated`, both halves pass having asserted
 //! nothing and say so — `scripts/make-fixtures.sh` builds it.
 
+// These exercise the 0.2 calls, which 0.3 keeps behind `#[deprecated]`;
+// `tests/elements.rs` is the same ground through the 0.3 API.
+#![allow(deprecated)]
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use iwork::pb::{decode_nested, Message, Value};
-use iwork::table::{CellFormat, CellValue, Merge, Table};
+use iwork::table::{CellFormat, CellValue, Merge, TableInfo};
 use iwork::Document;
 
 fn generated(name: &str) -> Option<PathBuf> {
@@ -30,7 +34,7 @@ fn open(name: &str) -> Option<Document> {
     Some(Document::open(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())))
 }
 
-fn table(doc: &Document, name: &str) -> Table {
+fn table(doc: &Document, name: &str) -> TableInfo {
     doc.table(name)
         .unwrap_or_else(|| panic!("no table called {name}"))
 }

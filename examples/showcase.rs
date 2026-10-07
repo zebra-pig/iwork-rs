@@ -13,8 +13,8 @@
 //! than assuming the sheet *is* one.
 
 use iwork::drawable::Color;
-use iwork::table::{CellText, CellValue, Decimal, Format, SortRule};
-use iwork::Document;
+use iwork::table::{CellValue, Decimal, Format, SortRule};
+use iwork::{Document, Table, TextLook};
 
 /// The house colours: a navy for banners, a sand for totals, and white.
 const NAVY: Color = Color {
@@ -125,13 +125,15 @@ fn main() -> Result<(), iwork::Error> {
 
     // A second table on the *same* sheet, placed to the right of the first.
     // This is the thing a spreadsheet library built for Excel cannot express.
-    doc.add_table_at("Revenue", "Headline", 4, 2, (620.0, 0.0))?;
+    doc.sheet_mut("Revenue")?
+        .add(Table::new("Headline", 4, 2).at(620.0, 0.0))?;
     headline(&mut doc)?;
 
     doc.add_sheet("Fleet", "Rolling Stock", FLEET.len() + 2, 4)?;
     fleet(&mut doc)?;
 
-    doc.add_table_at("Fleet", "Maintenance", 3, 2, (620.0, 0.0))?;
+    doc.sheet_mut("Fleet")?
+        .add(Table::new("Maintenance", 3, 2).at(620.0, 0.0))?;
     maintenance(&mut doc)?;
 
     doc.save(&out)?;
@@ -157,14 +159,7 @@ fn revenue(doc: &mut Document) -> Result<(), iwork::Error> {
     // of the style its area has — which is how Numbers stores a cell somebody
     // coloured by hand. The merge's own cell is the one that takes it.
     t.fill("A1", Some(NAVY))?;
-    t.text_look(
-        "A1",
-        &CellText {
-            size: Some(16.0),
-            colour: Some(WHITE),
-            ..CellText::bold()
-        },
-    )?;
+    t.look("A1", &TextLook::new().size(16.0).colour(WHITE).bold())?;
 
     t.set_block("A2", &[vec!["Route", "Passengers", "Revenue", "Load"]])?;
 
@@ -223,7 +218,7 @@ fn revenue(doc: &mut Document) -> Result<(), iwork::Error> {
     // The total row: painted and bold, across a range that includes a text
     // cell, two numbers and money. An empty cell could be painted too.
     t.fill(format!("A{total}:D{total}"), Some(SAND))?;
-    t.text_look(format!("A{total}:D{total}"), &CellText::bold())?;
+    t.look(format!("A{total}:D{total}"), &TextLook::new().bold())?;
 
     // What to sort *by*. Nothing here reorders a row — this is the rule the
     // app's own sort applies when you ask it to.
@@ -255,7 +250,7 @@ fn headline(doc: &mut Document) -> Result<(), iwork::Error> {
     t.set("A1", "Headline")?;
     t.merge("A1:B1")?;
     t.fill("A1", Some(NAVY))?;
-    t.text_look("A1", &CellText::coloured(WHITE))?;
+    t.look("A1", &TextLook::new().colour(WHITE))?;
 
     t.set("A2", "Routes")?;
     t.set("B2", ROUTES.len() as u32)?;

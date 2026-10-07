@@ -8,6 +8,10 @@
 //! formula reads. `tests/formula_write.rs::the_app_recalculates_a_filled_cell`
 //! is the one that proves it, and it needs Numbers.
 
+// These exercise the 0.2 calls, which 0.3 keeps behind `#[deprecated]`;
+// `tests/elements.rs` is the same ground through the 0.3 API.
+#![allow(deprecated)]
+
 use std::path::{Path, PathBuf};
 
 use iwork::table::{CellValue, Decimal};

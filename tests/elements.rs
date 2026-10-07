@@ -5,8 +5,8 @@ use std::path::Path;
 
 use iwork::drawable::{ImageFit, ImageSource, StrokePattern};
 use iwork::{
-    Align, Chart, ChartKind, Color, Document, Fill, Gradient, Image, Kind, Shadow, Shape, TextBox,
-    TextLook, TextStyle,
+    Align, Chart, ChartKind, Color, Document, Fill, Gradient, Image, Kind, Shadow, Shape, Table,
+    TextBox, TextLook, TextStyle,
 };
 
 const NAVY: Color = Color::rgb8(0x12, 0x2B, 0x4A);
@@ -383,4 +383,95 @@ fn keynote_keeps_a_deck_built_from_values() {
         Some(iwork::pb::Value::Bytes(b"Umsatz".to_vec())),
         "title"
     );
+}
+
+/// A table is a value with what is in it, and its cells take the same `Fill`
+/// and `TextLook` everything else does.
+#[test]
+fn a_table_is_a_value_and_its_cells_take_the_same_looks() {
+    let rows = [["Region", "Units"], ["Zürich", "1240"], ["Genève", "980"]];
+    let mut deck = Document::new(Kind::Keynote).unwrap();
+    let on_slide = deck
+        .slide_mut(0)
+        .unwrap()
+        .add(Table::with_rows("Summe", rows).at(160.0, 220.0))
+        .unwrap();
+    let read = deck.table(&on_slide.to_string()).unwrap();
+    assert_eq!((read.rows, read.columns), (3, 2));
+    assert_eq!(
+        read.cell(1, 0).unwrap().value,
+        iwork::CellValue::Text("Zürich".to_string())
+    );
+    assert_eq!(frame_of(&deck, on_slide).0, (160.0, 220.0));
+
+    let mut sheet = Document::new_spreadsheet("Blatt", "Erste", 2, 2).unwrap();
+    let made = sheet
+        .sheet_mut("Blatt")
+        .unwrap()
+        .add(Table::new("Zweite", 3, 3).at(500.0, 0.0))
+        .unwrap();
+    let mut table = sheet.table_mut(made).unwrap();
+    table.set("A1", "Kopf").unwrap();
+    table.fill("A1:C1", NAVY).unwrap();
+    table
+        .look(
+            "A1:C1",
+            &TextLook::new().colour(Color::WHITE).bold().size(14.0),
+        )
+        .unwrap();
+    table.align("A1:C1", Align::Centre).unwrap();
+    table.fill("A1", Fill::None).unwrap();
+    // What a cell cannot take is refused, not half-written.
+    assert!(table.fill("A2", Gradient::linear(NAVY, RUST, 0.0)).is_err());
+    assert!(table.look("A2", &TextLook::new().underline()).is_err());
+    assert!(sheet.problems().is_empty(), "{:?}", sheet.problems());
+
+    // Too much for the table it was given is refused, and nothing is left.
+    let before = deck.objects().count();
+    let mut too_wide = Table::new("Eng", 1, 1);
+    too_wide = too_wide.clone();
+    assert!(deck.slide_mut(0).unwrap().add(&too_wide).is_ok());
+    let overfull = Table::with_rows("Leer", Vec::<Vec<&str>>::new());
+    assert!(
+        deck.slide_mut(0).unwrap().add(overfull).is_err(),
+        "no rows, no table"
+    );
+    assert!(deck.objects().count() > before);
+}
+
+/// A style that is there is changed through its handle.
+#[test]
+fn a_text_style_is_changed_through_its_handle() {
+    let mut doc = Document::new(Kind::Keynote).unwrap();
+    let style = doc.add_text_style(&TextStyle::new("Kicker")).unwrap();
+    let mut handle = doc.text_style_mut(style).unwrap();
+    handle.look(&TextLook::new().size(22.0).italic()).unwrap();
+    handle.align(Align::Centre).unwrap();
+    handle.rename("Dachzeile").unwrap();
+    handle
+        .property(
+            iwork::style::property::FONT_NAME,
+            Some(iwork::pb::Value::Bytes(b"Georgia".to_vec())),
+        )
+        .unwrap();
+    let made = doc.text_style(style).unwrap();
+    assert_eq!(made.name.as_deref(), Some("Dachzeile"));
+    use iwork::pb::Value;
+    use iwork::style::property;
+    let get = |path: &[u32]| iwork::style::get_path(&made.archive, path);
+    assert_eq!(
+        get(property::FONT_SIZE),
+        Some(Value::Fixed32(22.0f32.to_le_bytes()))
+    );
+    assert_eq!(get(property::ITALIC), Some(Value::Varint(1)));
+    assert_eq!(get(property::ALIGNMENT), Some(Value::Varint(2)));
+    assert_eq!(
+        get(property::FONT_NAME),
+        Some(Value::Bytes(b"Georgia".to_vec()))
+    );
+
+    doc.text_style_mut(style).unwrap().delete(None).unwrap();
+    assert!(doc.text_style(style).is_none());
+    assert!(doc.text_style_mut(style).is_err());
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
 }
