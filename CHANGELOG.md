@@ -10,6 +10,15 @@ The release in which a document made here stops looking unfinished.
 
 ### Fixed
 
+- **Keynote 15.4 refused every deck this crate made from nothing** — "Keynote
+  couldn't read the file" — including those of 0.2.0 to 0.2.2, which 15.3.1
+  opened. `MessageInfo.object_references`, the list of what each object owns,
+  was never written; 15.4 resolves an owning reference only if it is declared.
+  The list is now derived at save for every object, by a rule that reproduces
+  the app's own list for 769,085 of 769,095 objects in the corpus and Apple's
+  templates. Read from the apps' own assertion log, which
+  `scripts/assertions.sh` now prints for any document; `iwork check` reports a
+  file without the lists. **If you generate Keynote decks, upgrade.**
 - **No text style this crate applied was drawn in a document it made.** It was
   one table. A storage's paragraph-style table has an entry for *every*
   paragraph — 4 for 4, 12 for 12, in every storage of the corpus — and it was

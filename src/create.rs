@@ -1800,11 +1800,25 @@ fn table_text_style(identifier: &str, name: &str, stylesheet: u64, list: u64) ->
                 reference(5, stylesheet),
             ],
         ),
-        // Four character properties below, two paragraph. See `OVERRIDE_COUNT`.
-        varint(crate::style::OVERRIDE_COUNT[0], 6),
+        // Five character properties below, two paragraph. See `OVERRIDE_COUNT`.
+        varint(crate::style::OVERRIDE_COUNT[0], 7),
         nested(
             property::FONT_SIZE[0],
             vec![
+                // **The bold toggle, as well as the bold face.** Numbers' own
+                // header style ("Table Style 1") carries both, and the toggle
+                // is the one it draws by: a header given the face
+                // `HelveticaNeue-Bold` and no toggle was measured in Numbers,
+                // which reported its font as plain `HelveticaNeue`. The label
+                // levels are the bold face with the toggle off, as Numbers
+                // writes them.
+                varint(
+                    property::BOLD[1],
+                    u64::from(matches!(
+                        name,
+                        "Table Header" | "Table Header Column" | "Table Footer"
+                    )),
+                ),
                 float(property::FONT_SIZE[1], 10.0),
                 string(
                     property::FONT_NAME[1],
@@ -3256,6 +3270,7 @@ mod tests {
         let mut document =
             Document::from_package(blueprint.finish()).expect("a blueprint has to parse");
         document.declare_external_references();
+        document.declare_object_references();
         document
     }
 

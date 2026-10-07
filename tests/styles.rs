@@ -1002,8 +1002,12 @@ fn split_document() -> Document {
 
 #[test]
 fn a_document_that_declares_its_cross_component_references_has_no_problems() {
-    let doc = split_document();
+    let mut doc = split_document();
     assert_eq!(doc.undeclared_references(), Vec::new());
+    // The package is built by hand here and says nothing of what each object
+    // owns, which is a problem of its own — and one `save` would put right.
+    assert_eq!(doc.problems().len(), 1, "{:?}", doc.problems());
+    assert!(doc.declare_object_references() > 0);
     assert_eq!(doc.problems(), Vec::<String>::new());
 }
 

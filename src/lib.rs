@@ -174,6 +174,7 @@ pub mod package;
 pub mod pages;
 pub mod pb;
 pub mod plist;
+mod references;
 pub mod registry;
 pub mod style;
 pub mod table;

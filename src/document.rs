@@ -1456,6 +1456,7 @@ impl Document {
         // document nobody has edited has to report no changed streams —
         // `changed_streams` is how a caller sees what an edit touched, and how
         // several tests prove a refused edit touched nothing.
+        document.declare_object_references();
         document.package = document.saved_package();
         Ok(document)
     }
@@ -9063,6 +9064,29 @@ impl Document {
             ));
         }
 
+        // What an object owns, it says it owns. Keynote 15.4 refuses a deck
+        // that does not; see `crate::references`.
+        // Only for streams still as they were read: `save` derives the list
+        // for everything it writes, so an edit in memory cannot be missing it.
+        let mut as_read = BTreeMap::new();
+        let undeclared: Vec<_> = self
+            .undeclared_object_references()
+            .into_iter()
+            .filter(|(stream, ..)| {
+                *as_read.entry(*stream).or_insert_with(|| {
+                    self.stream_matches(stream, &iwa::serialize_stream(&self.streams[*stream]))
+                })
+            })
+            .collect();
+        if let Some((stream, index, _)) = undeclared.first() {
+            problems.push(format!(
+                "{} object(s) do not list in MessageInfo.object_references exactly what \
+                 they strongly refer to — the first is {} in {stream}",
+                undeclared.len(),
+                self.streams[*stream][*index].identifier
+            ));
+        }
+
         // The Pages spine checks itself: sections that begin on a break,
         // section templates with their three zones each, threads whose boxes
         // exist. See `structure_problems`.
@@ -10358,11 +10382,56 @@ impl Document {
         names.len()
     }
 
+    /// Every object whose `MessageInfo.object_references` is not the list of
+    /// what its payload strongly refers to: its stream, its place in it, and
+    /// the list it should carry. See [`crate::references`] for the rule and
+    /// for what Keynote 15.4 does to a document that breaks it.
+    pub(crate) fn undeclared_object_references(&self) -> Vec<(&str, usize, Vec<u64>)> {
+        let all: std::collections::HashSet<u64> = self
+            .objects()
+            .map(|(_, object)| object.identifier)
+            .collect();
+        let mut out = Vec::new();
+        for (name, objects) in &self.streams {
+            for (index, object) in objects.iter().enumerate() {
+                if let Some(wanted) = crate::references::wanted(object, |id| all.contains(&id)) {
+                    out.push((name.as_str(), index, wanted));
+                }
+            }
+        }
+        out
+    }
+
+    /// Give every object the `MessageInfo.object_references` its payload
+    /// calls for, now rather than at [`Document::save`], and return how many
+    /// changed. `save` does this anyway; it is here for a document that has to
+    /// be right in memory — one just built from a blueprint.
+    pub fn declare_object_references(&mut self) -> usize {
+        let fixes: Vec<(String, usize, Vec<u64>)> = self
+            .undeclared_object_references()
+            .into_iter()
+            .map(|(stream, index, references)| (stream.to_string(), index, references))
+            .collect();
+        for (stream, index, references) in &fixes {
+            let objects = self.streams.get_mut(stream).expect("stream was just read");
+            crate::references::declare(&mut objects[*index], references);
+        }
+        fixes.len()
+    }
+
     /// The package [`Document::save`] would write.
     fn saved_package(&self) -> Package {
         let mut package = self.package.clone();
+        let fixes = self.undeclared_object_references();
         for (name, objects) in &self.streams {
-            let framed = iwa::serialize_stream(objects);
+            // `MessageInfo.object_references` is derived here rather than kept
+            // up by every edit, so no edit can forget it. On a document the
+            // apps wrote there is nothing to fix and nothing is copied.
+            let mut objects = std::borrow::Cow::Borrowed(objects);
+            for (_, index, references) in fixes.iter().filter(|(stream, ..)| stream == name) {
+                crate::references::declare(&mut objects.to_mut()[*index], references);
+            }
+            let framed = iwa::serialize_stream(&objects);
             if !self.stream_matches(name, &framed) {
                 package.set(name, iwa::compress(&framed));
             }

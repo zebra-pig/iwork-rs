@@ -66,6 +66,24 @@ on run argv
 						try
 							set end of harvest to (object text of i) as text
 						end try
+						repeat with t in tables of s
+						try
+							set end of harvest to "table " & (name of t)
+							repeat with c in cells of t
+								set v to value of c
+								if v is not missing value then set end of harvest to v as text
+							end repeat
+						end try
+					end repeat
+				end repeat
+					repeat with t in tables of s
+						try
+							set end of harvest to "table " & (name of t)
+							repeat with c in cells of t
+								set v to value of c
+								if v is not missing value then set end of harvest to v as text
+							end repeat
+						end try
 					end repeat
 				end repeat
 			on error message number code

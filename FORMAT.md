@@ -221,6 +221,8 @@ repeat until end of stream:
 | 1 | varint | message type — index into iWork's message registry |
 | 2 | packed varints | schema version, e.g. `[1, 0, 5]` |
 | 3 | varint | payload length in bytes |
+| 5 | packed varints | `object_references` — the objects this payload **owns** |
+| 6 | packed varints | `data_references` — the `TSP.DataInfo` it names |
 
 Payloads follow the `ArchiveInfo` immediately, in declaration order. Almost
 every object carries exactly one message; the exceptions are below.
@@ -233,6 +235,47 @@ is reserved — and **an `ArchiveInfo` with no `MessageInfo` in it is legal
 protobuf**, three bytes long, and an object with no payload at all. Its type is
 0 and its payload is empty; indexing the first message of it is a crash in the
 middle of an otherwise ordinary document.
+
+### `object_references` — what an object owns, said outside the payload
+
+A reference in a payload is `{1: identifier}` and nothing says whether it
+*owns* its target (a slide its drawables, a show its theme) or merely points
+at it (a drawable its parent, a style its stylesheet). The app knows from its
+classes, and writes the answer down next to the payload: `object_references`
+lists every **strong** reference in it, each identifier once, and no weak one.
+
+Through 15.3 a reader could ignore the list and a writer could leave it out.
+**Keynote 15.4 resolves a strong reference only if the list declares it.** A
+deck with no lists loses its show, theme, stylesheet and every placeholder
+text one by one — each logged as `TSPUnarchiver
+validateReferenceToObjectIdentifier… Object [KNTheme-1058] is not strongly
+referenced from message [KN.ShowArchive-2]` — until something downstream is
+nil that may not be, and the user is told "Keynote couldn't read the file".
+Every deck this crate made from nothing up to 0.2.2 is one of those. Numbers
+and Pages 15.4 log the same assertion and still open the document.
+
+Which references are weak is measured, since no schema says. Over the fixture
+corpus and all 990 templates in the three 15.4 app bundles (769,095 objects):
+take every reference in the payload, drop those at 117 `(message type, field
+path)` pairs — `src/references.rs` has the table; a style's stylesheet
+`[1,5]`, a drawable's parent `[1,…,2]`, and a stylesheet's flat list of styles
+`401 [1]` are typical — and what is left is the app's own list, exactly, for
+all but ten objects. The ten are Numbers' type 12026, which declares objects
+its payload does not visibly name. A stylesheet is the instructive case: its
+style list is weak, and a style is owned through the identifier map (2) or as
+a parent in the parent-to-children map (5), so the variations nobody
+identified are owned by no one but their users. That is what lets the app cull
+them.
+
+`Document::save` derives the list for every object it writes, so an edit
+cannot forget it and a document the apps wrote is left byte for byte as it
+was. `iwork check` reports a file whose lists are wrong.
+
+**How this was read**, since it is the method for the next one: the apps log
+every invariant they find broken, in category `TSUAssertCat` of the unified
+log, with the class, the source line and what was nil. `scripts/assertions.sh
+<document>` opens a document and prints them. A document the app wrote opens
+with none.
 
 ### Version patches — `MessageInfo.type == 0`
 

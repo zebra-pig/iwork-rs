@@ -558,3 +558,25 @@ fn the_apps_open_a_table_and_notes_made_from_nothing() {
     check(&out, "Notizen aus dem Nichts");
     let _ = std::fs::remove_file(&out);
 }
+
+/// What an object owns, its `MessageInfo.object_references` lists — for every
+/// object of a document made from nothing, as built and as saved. Keynote 15.4
+/// refuses a deck without the lists ("Keynote couldn't read the file"), and
+/// every deck this crate made from nothing before 0.2.3 was one.
+#[test]
+fn every_object_made_from_nothing_declares_what_it_owns() {
+    for kind in [Kind::Keynote, Kind::Numbers, Kind::Pages] {
+        let mut doc = Document::new(kind).unwrap();
+        assert_eq!(doc.declare_object_references(), 0, "{kind:?} as built");
+        if kind == Kind::Keynote {
+            // An edit does not have to remember: `save` derives the lists.
+            doc.add_slide(None).unwrap();
+        }
+        let path = std::env::temp_dir().join(format!("iwork-rs-owns-{kind:?}"));
+        doc.save(&path).unwrap();
+        let mut saved = Document::open(&path).unwrap();
+        assert_eq!(saved.problems(), Vec::<String>::new(), "{kind:?}");
+        assert_eq!(saved.declare_object_references(), 0, "{kind:?} as saved");
+        let _ = std::fs::remove_file(&path).or_else(|_| std::fs::remove_dir_all(&path));
+    }
+}
