@@ -8346,6 +8346,31 @@ impl Document {
                 touched += removed;
             }
 
+            // …and from the theme's text presets, which are a menu and not
+            // a use: a style the theme merely offers is not a style in use.
+            if matches!(
+                message.message_type,
+                crate::keynote::TYPE_THEME | crate::pages::TYPE_THEME | 12009
+            ) {
+                if let Some(mut inner) = edited.bytes(1).and_then(crate::pb::decode_nested) {
+                    if let Some(mut presets) = inner.bytes(110).and_then(crate::pb::decode_nested) {
+                        let before = presets.fields.len();
+                        presets.fields.retain(|field| match &field.value {
+                            Value::Bytes(raw) => !crate::pb::decode_nested(raw)
+                                .is_some_and(|r| style::is_reference_to(&r, identifier)),
+                            _ => true,
+                        });
+                        let removed = before - presets.fields.len();
+                        if removed > 0 {
+                            inner.set(110, Value::Bytes(presets.encode()));
+                            edited.set(1, Value::Bytes(inner.encode()));
+                            deletion.registrations_removed += removed;
+                            touched += removed;
+                        }
+                    }
+                }
+            }
+
             if style::count_references(&edited, identifier) > 0 {
                 still_referenced.push(object.identifier);
             } else if touched > 0 {

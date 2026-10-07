@@ -26,11 +26,9 @@ which ground rule 1a calls a defect:
 | Keynote | 2 per slide | `TSPCopyArchiver setStrongReference: invalid nil value for 'object'` | unknown; on a background thread right after load — the thumbnailer, or a copy of the slide |
 | Numbers | 1 | `TSTTableModel upgradeDuringDocumentUpgradeIfNeeded: Seeing table corruption before upgrade` | the table from nothing is missing something a current-version table has |
 | Numbers, Keynote with a table | 1 | `formulaOwnerDependencies: Want to replace owner (1) with (1) - highly unexpected` | two owners with one id in what `give_tables_their_owners` writes |
-| Pages | 18 + 18 | `Missing paragraph style`, `invalid nil value for 'fragmentStorage'` in `i_updateHeaderFooterLayouts` | no section, so no header and footer storages (2 × 3 × 3 of them) |
-| Pages | 2 | `invalid nil value for 'self.theme'`, `'defaultCharacterStyle'` | no theme at all; the blueprint was reduced to what opens |
 | Keynote, themed deck + `add_table` | 12 | `Object [TSTTableModel…] was modified during read unexpectedly` | the table this crate adds is upgraded on read — same root as the Numbers line, probably |
 
-| Pages, chart from `new_chart` | 1 | `TSCHReferenceLineStyle … invalid value axis label paragraph style` | Pages only, and only on a document from nothing — no theme again, probably |
+| Pages, chart from `new_chart` | 1 | `TSCHReferenceLineStyle … invalid value axis label paragraph style` | seen before the Pages blueprint had a theme; not re-measured since |
 
 A chart from `new_chart` has no legend (the kit's chart was made by
 AppleScript's `add chart`, which leaves it off) and nothing here turns one on.

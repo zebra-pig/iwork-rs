@@ -581,10 +581,14 @@ impl Paper {
 /// 71    TSP.DocumentMetadata
 /// ```
 ///
-/// What is *not* here is as measured as what is: no theme, no section, no
-/// section templates, no headers or footers, no view state, no calculation
-/// engine, no annotation authors, no previews, no build history. Pages opens
-/// this and reads the text back out of it.
+/// …and a theme (`TP.ThemeArchive`) with its presets, added when Pages' own
+/// log said what the lack of one cost: it opened the document and repaired it
+/// with forty complaints on every load.
+///
+/// What is *not* here is as measured as what is: no section, no section
+/// templates, no headers or footers, no view state, no annotation authors, no
+/// previews, no build history. Pages opens this and reads the text back out
+/// of it.
 pub(crate) fn pages(paper: Paper) -> Blueprint {
     let mut blueprint = Blueprint::new(Kind::Pages);
     let document = blueprint.document();
@@ -690,11 +694,39 @@ pub(crate) fn pages(paper: Paper) -> Blueprint {
             ),
         );
     }
+    // The theme's drawing presets — line, shape, text-box, image and movie
+    // styles. A theme without them sends Pages looking for "TSSLineStylePresetKind
+    // preset for out of bounds index 0" and it refuses the document.
+    let mut named: Vec<(String, u64)> = Vec::new();
+    let presets = theme_presets(&mut blueprint, styles, stylesheet, &mut named);
+    // "None", the character style that changes nothing — the theme's default,
+    // and the parent of every run's own look. Pages asks for it by name:
+    // "invalid nil value for 'defaultCharacterStyle'".
+    let no_character_style = blueprint.add(
+        styles,
+        crate::style::TYPE_CHARACTER_STYLE,
+        message(vec![nested(
+            1,
+            vec![
+                string(1, "None"),
+                string(2, "character-style-null"),
+                reference(5, stylesheet),
+            ],
+        )]),
+    );
+    named.push(("character-style-null".to_string(), no_character_style));
     blueprint.put(
         styles,
         stylesheet,
         TYPE_STYLESHEET,
-        stylesheet_archive(column, body_column, body_style, text_box_style, image_style),
+        stylesheet_archive(
+            column,
+            body_column,
+            body_style,
+            text_box_style,
+            image_style,
+            &named,
+        ),
     );
 
     // -- the body, and the document that points at it -------------------------
@@ -719,11 +751,35 @@ pub(crate) fn pages(paper: Paper) -> Blueprint {
         crate::pages::TYPE_ZORDER,
         message(vec![reference(1, body)]),
     );
+    // A theme: the stylesheet, the palette, and the text styles the Format
+    // sidebar offers. Pages opens a document without one and says so — "invalid
+    // nil value for 'self.theme'" — and its paragraph-style menu is the
+    // theme's presets, so without one there is a style and nothing to change
+    // it to.
+    let theme = blueprint.add(
+        document,
+        crate::pages::TYPE_THEME,
+        numbers_theme_with(
+            stylesheet,
+            vec![
+                presets,
+                nested(
+                    110,
+                    vec![
+                        reference(1, list),
+                        reference(6, no_character_style),
+                        reference(7, body_style),
+                    ],
+                ),
+            ],
+            Vec::new(),
+        ),
+    );
     blueprint.put(
         document,
         ROOT,
         TYPE_PAGES_DOCUMENT,
-        pages_document(stylesheet, body, floating, zorder, paper),
+        pages_document(stylesheet, body, floating, zorder, theme, paper),
     );
     blueprint
 }
@@ -788,43 +844,47 @@ fn stylesheet_archive(
     body_style: u64,
     text_box_style: u64,
     image_style: u64,
+    presets: &[(String, u64)],
 ) -> Message {
+    let mut versioned = vec![
+        reference(1, body_style),
+        reference(1, text_box_style),
+        reference(1, image_style),
+        nested(
+            2,
+            vec![string(1, BODY_IDENTIFIER), reference(2, body_style)],
+        ),
+        // The style a paragraph falls back to, under the name a real
+        // stylesheet gives it. Without the entry Pages mints a default
+        // of its own on opening — "Free Form", 12 pt Helvetica — and
+        // that, not `Body`, is what a paragraph with no style of its
+        // own was drawn in.
+        nested(
+            2,
+            vec![
+                string(1, DEFAULT_PARAGRAPH_IDENTIFIER),
+                reference(2, body_style),
+            ],
+        ),
+        nested(
+            2,
+            vec![string(1, TEXT_BOX_IDENTIFIER), reference(2, text_box_style)],
+        ),
+        nested(
+            2,
+            vec![string(1, IMAGE_IDENTIFIER), reference(2, image_style)],
+        ),
+    ];
+    // The theme's drawing presets, listed and keyed like the rest.
+    for (identifier, style) in presets {
+        versioned.push(reference(1, *style));
+        versioned.push(nested(2, vec![string(1, identifier), reference(2, *style)]));
+    }
     message(vec![
         varint(4, 0),
         nested(5, vec![reference(1, column), reference(2, body_column)]),
         varint(6, 1),
-        nested(
-            8,
-            vec![
-                reference(1, body_style),
-                reference(1, text_box_style),
-                reference(1, image_style),
-                nested(
-                    2,
-                    vec![string(1, BODY_IDENTIFIER), reference(2, body_style)],
-                ),
-                // The style a paragraph falls back to, under the name a real
-                // stylesheet gives it. Without the entry Pages mints a default
-                // of its own on opening — "Free Form", 12 pt Helvetica — and
-                // that, not `Body`, is what a paragraph with no style of its
-                // own was drawn in.
-                nested(
-                    2,
-                    vec![
-                        string(1, DEFAULT_PARAGRAPH_IDENTIFIER),
-                        reference(2, body_style),
-                    ],
-                ),
-                nested(
-                    2,
-                    vec![string(1, TEXT_BOX_IDENTIFIER), reference(2, text_box_style)],
-                ),
-                nested(
-                    2,
-                    vec![string(1, IMAGE_IDENTIFIER), reference(2, image_style)],
-                ),
-            ],
-        ),
+        nested(8, versioned),
     ])
 }
 
@@ -1027,12 +1087,20 @@ fn body_storage(stylesheet: u64, paragraph: u64, list: u64, column: u64) -> Mess
 /// Field 15 is the `TSA.DocumentArchive` every app's document archive is built
 /// on — the locale, the language, and which template this came from. A document
 /// this crate made came from no template, so it says so by leaving field 9 out.
-fn pages_document(stylesheet: u64, body: u64, floating: u64, zorder: u64, paper: Paper) -> Message {
+fn pages_document(
+    stylesheet: u64,
+    body: u64,
+    floating: u64,
+    zorder: u64,
+    theme: u64,
+    paper: Paper,
+) -> Message {
     let (width, height, margin, header, footer) = paper.measurements();
     message(vec![
         reference(2, stylesheet),
         reference(3, floating),
         reference(4, body),
+        reference(6, theme),
         nested(
             15,
             vec![nested(

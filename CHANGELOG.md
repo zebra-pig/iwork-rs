@@ -4,7 +4,7 @@ What changed, and — because this is a reverse-engineered format — **how it w
 established**. An entry that cannot say what the app did is an entry about
 bytes nobody has watched being read.
 
-## 0.2.4 — unreleased
+## 0.2.4 — 2026-10-07
 
 ### Fixed
 
@@ -22,6 +22,12 @@ bytes nobody has watched being read.
   copy now has a name and no identifier, as a style added in the app has. And
   the theme offered nothing: the menu is the theme's text presets, which a
   blueprint now carries and to which a new style is added.
+- **A Pages document made from nothing had no theme**, which Pages repaired
+  on every load with some forty complaints (no theme, no default character
+  style, no header or footer layouts) and which left its style menu with
+  nothing to offer. It has one now — the stylesheet, the palette, the drawing
+  presets, "None" for a character style and Body for a paragraph — and Pages
+  opens it without a word about any of them.
 - **A character style applied to a run ran on to the end of the text** when
   the storage had no character table yet. The run is closed with a nil entry,
   as Pages closes it.
