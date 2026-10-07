@@ -4,7 +4,7 @@ Short recipes for writing Numbers, Keynote and Pages documents with this
 crate, each one **run** by `cargo test --doc`. The README says how the format
 works and what was measured; this says what to type.
 
-**Use 0.2.3 or later.** Earlier versions wrote documents with no way to give
+**Use 0.2.4 or later.** Earlier versions wrote documents with no way to give
 anything a look, and 0.2.0 wrote a deck Keynote aborts on if it used one
 picture twice.
 
@@ -134,6 +134,85 @@ Things worth knowing:
   Numbers recipe applies to it.
 - **The same picture on many slides** is fine: `add_image` stores it once.
 
+## Keynote: emphasis, gradients, shadows, pictures, a chart
+
+```
+# std::env::set_current_dir(std::env::temp_dir()).unwrap();
+use iwork::chart::{ChartData, ChartKind};
+use iwork::drawable::{Color, Frame, Gradient, ImageFit, Outline, Shadow};
+use iwork::text::TextLook;
+use iwork::{Document, Kind};
+
+const NAVY: Color = Color { red: 0.07, green: 0.17, blue: 0.29, alpha: 1.0 };
+const TEAL: Color = Color { red: 0.12, green: 0.54, blue: 0.49, alpha: 1.0 };
+const RUST: Color = Color { red: 0.71, green: 0.29, blue: 0.17, alpha: 1.0 };
+const WHITE: Color = Color { red: 1.0, green: 1.0, blue: 1.0, alpha: 1.0 };
+
+let mut doc = Document::new(Kind::Keynote)?;
+doc.add_slide(None)?;
+let first = doc.slides()[0].identifier.to_string();
+let second = doc.slides()[1].identifier.to_string();
+
+// A background that runs from navy at the top to teal at the bottom. The
+// angle is the one Keynote's inspector shows.
+doc.slide_mut(0)?.background_gradient(&Gradient::linear(NAVY, TEAL, 270.0))?;
+
+// One sentence, three looks: ranges are UTF-16 code units, and each run gets
+// only what its `TextLook` sets.
+let words = "Revenue grew 18 % on last year";
+let text_box = doc.slide_mut(0)?.add_text_box(
+    words,
+    Frame { x: 120.0, y: 120.0, width: 1500.0, height: 120.0 },
+)?;
+let storage = doc.drawable(text_box).and_then(|d| d.text).expect("a text box has text");
+let mut text = doc.text_mut(storage)?;
+text.format(0..30, &TextLook { size: Some(64.0), colour: Some(WHITE), ..TextLook::default() })?;
+text.format(13..17, &TextLook { bold: Some(true), colour: Some(RUST), ..TextLook::default() })?;
+
+// A card: white, no outline, a soft shadow under it.
+let card = doc.add_shape(&first, Outline::Rectangle, "", (120.0, 320.0), (760.0, 520.0))?;
+doc.set_object_fill(card, Some(WHITE))?;
+doc.set_object_stroke(card, WHITE, 0.0)?;
+doc.set_object_shadow(card, Some(Shadow { offset: 14.0, radius: 30, ..Shadow::default() }))?;
+
+// A shape filled with a gradient of its own, three stops.
+let band = doc.add_shape(&first, Outline::Ellipse, "", (1000.0, 320.0), (520.0, 520.0))?;
+doc.set_object_gradient(
+    band,
+    &Gradient { stops: vec![(RUST, 0.0), (WHITE, 0.5), (TEAL, 1.0)], angle: 45.0 },
+)?;
+
+// A picture as a fill: PNG or JPEG bytes, cropped by the shape it fills.
+# let picture: Vec<u8> = {
+#     // A 1 × 1 PNG.
+#     let hex = "89504e470d0a1a0a0000000d4948445200000001000000010802000000907753de0000000c4944415408d763f8cfc000000301010018dd8db00000000049454e44ae426082";
+#     (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect()
+# };
+let photo = doc.add_shape(&first, Outline::Ellipse, "", (1560.0, 120.0), (240.0, 240.0))?;
+doc.set_object_image_fill(photo, &picture, "portrait.png", ImageFit::ScaleToFill)?;
+
+// A chart from data: each row a series, each column a category.
+let data = ChartData::numbers(
+    &["2025", "2026"],
+    &["Q1", "Q2", "Q3", "Q4"],
+    &[&[31.0, 35.5, 40.8, 42.0], &[40.1, 44.5, 48.2, 51.0]],
+);
+doc.new_chart(&second, ChartKind::Column, &data, (260.0, 140.0), (1400.0, 800.0))?;
+
+doc.save("Looks.key")?;
+# Ok::<(), iwork::Error>(())
+```
+
+- **A chart is a real chart**, editable in the app: column, bar, line, area,
+  pie and the stacked three. On a deck made from one of Apple's themes it
+  takes the theme's look; on one made from nothing it brings the look of
+  Keynote's white theme with it. It has no legend until somebody turns one on
+  in the app.
+- **`format` works in Pages too** — `doc.body_mut()?.format(range, &look)` —
+  and on any text storage of a document the apps made.
+- **Gradients are linear.** Shadows are drop shadows; `set_object_shadow(id,
+  None)` switches one off.
+
 ## Pages: a title, a heading and body text
 
 ```
@@ -181,11 +260,11 @@ doc.save("Report.pages")?;
 # Ok::<(), iwork::Error>(())
 ```
 
-A blank Pages document has exactly one paragraph style to copy, `Body`, no
-character styles and no list styles — so bold *words* inside a paragraph and
-real bullet lists are not available on a document made from nothing. Open a
-document Pages made (`Document::open`) and its Title, Heading and list styles
-are all there to apply.
+A blank Pages document has exactly one paragraph style to copy, `Body`, and
+no list styles — so real bullet lists are not available on a document made
+from nothing. Bold *words* are: `doc.body_mut()?.format(range,
+&TextLook::bold())`. Open a document Pages made (`Document::open`) and its
+Title, Heading and list styles are all there to apply.
 
 ## From the shell
 

@@ -1499,6 +1499,280 @@ pub fn add_chart(
     Ok(chart)
 }
 
+/// The kinds of chart [`new_chart`] makes: the 2D ones whose data is a plain
+/// rectangle of numbers, each of which Keynote was watched making from the
+/// same preset with nothing but this number different.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChartKind {
+    Column = 1,
+    Bar = 2,
+    Line = 3,
+    Area = 4,
+    Pie = 5,
+    StackedColumn = 6,
+    StackedBar = 7,
+    StackedArea = 8,
+}
+
+/// `TSCH.ChartStylePreset` — a chart style, a legend style, axis styles, six
+/// series styles and the paragraph styles, as one named look.
+const TYPE_CHART_PRESET: u32 = 5020;
+/// The identifier the kit's styles name as their stylesheet.
+const KIT_STYLESHEET: u64 = 1;
+
+/// A column chart Keynote made, with its preset and every style the preset
+/// names — 46 objects. See `examples/chart_kit.rs`, which cuts it out of
+/// `keynote-charts.key`.
+fn chart_kit() -> Vec<crate::iwa::ArchiveObject> {
+    crate::iwa::parse(include_bytes!("chart_kit.iwa")).expect("the chart kit is a stream")
+}
+
+/// The references of an archive by where they sit: `(field path, target)`,
+/// in order. Two presets list the same roles at the same paths, which is how
+/// one preset's styles are matched to another's.
+fn references_by_path(message: &Message, path: &mut Vec<u32>, out: &mut Vec<(Vec<u32>, u64)>) {
+    for field in &message.fields {
+        let Value::Bytes(raw) = &field.value else {
+            continue;
+        };
+        let Some(nested) = decode_nested(raw) else {
+            continue;
+        };
+        path.push(field.number);
+        match crate::style::reference_target(&nested) {
+            Some(target) => out.push((path.clone(), target)),
+            None => references_by_path(&nested, path, out),
+        }
+        path.pop();
+    }
+}
+
+/// Make a chart from data — on a slide, a sheet or a page — where the
+/// document has none to copy.
+///
+/// **Still copied, not invented.** What is copied is a chart Keynote made:
+/// the crate carries one column chart with its preset and the 37 styles the
+/// preset names. Every 2D chart type Keynote makes from a preset is that same
+/// set of objects with one number different — `chart_type` — which is what
+/// [`ChartKind`] sets.
+///
+/// A document that already has chart presets (any the apps made, any made
+/// from a theme) keeps its own look: the new chart is pointed at the
+/// document's first preset, role for role. A document with none — one made
+/// from nothing — is given the kit's preset, registered in its stylesheet and
+/// theme the way the apps register theirs.
+///
+/// `data` is rows of numbers; each row is a series, each column a category.
+pub fn new_chart(
+    document: &mut crate::Document,
+    container: &str,
+    kind: ChartKind,
+    data: &ChartData,
+    position: (f32, f32),
+    size: (f32, f32),
+) -> Result<u64, crate::Error> {
+    use std::collections::BTreeMap;
+
+    if size.0 <= 0.0 || size.1 <= 0.0 {
+        return Err(crate::Error::Format(format!(
+            "a chart needs a size, and {} × {} is not one",
+            size.0, size.1
+        )));
+    }
+    if data.rows.is_empty() || data.column_names.is_empty() {
+        return Err(crate::Error::refused(
+            crate::Refusal::UnwritableValue,
+            "a chart needs at least one row and one column of data",
+        ));
+    }
+    let container = crate::drawable::container_of(document, container)?;
+    let stylesheet = document
+        .objects()
+        .find(|(_, object)| object.message_type() == crate::create::TYPE_STYLESHEET)
+        .map(|(_, object)| object.identifier)
+        .ok_or_else(|| crate::Error::Format("the document has no stylesheet".into()))?;
+
+    let kit = chart_kit();
+    let decoded = |object: &crate::iwa::ArchiveObject| {
+        Message::decode(object.payload()).expect("the kit's objects are messages")
+    };
+    let kit_preset = kit
+        .iter()
+        .find(|object| object.message_type() == TYPE_CHART_PRESET)
+        .expect("the kit has a preset");
+    // What a chart owns and what it shares: the drawable, its non-styles and
+    // its caption stand-ins are its own; the preset and the styles are shared.
+    let private = |message_type: u32| {
+        message_type == TYPE_CHART_DRAWABLE
+            || message_type == crate::drawable::TYPE_STANDIN_CAPTION
+            || (NON_STYLES.contains(&message_type) && message_type != TYPE_CHART_STYLE_PRESET)
+    };
+
+    let mut map: BTreeMap<u64, u64> = BTreeMap::new();
+    map.insert(KIT_STYLESHEET, stylesheet);
+    let existing = document
+        .objects()
+        .find(|(_, object)| object.message_type() == TYPE_CHART_PRESET)
+        .map(|(_, object)| object.identifier);
+    match existing {
+        Some(preset) => {
+            // Role for role: the same path in both presets, the nth at it.
+            let (mut theirs, mut ours) = (Vec::new(), Vec::new());
+            references_by_path(&document.archive(preset)?, &mut Vec::new(), &mut theirs);
+            references_by_path(&decoded(kit_preset), &mut Vec::new(), &mut ours);
+            let mut taken = vec![false; theirs.len()];
+            for (path, kit_style) in ours {
+                let found = theirs
+                    .iter()
+                    .enumerate()
+                    .find(|(index, (other, _))| !taken[*index] && *other == path);
+                let Some((index, (_, style))) = found else {
+                    return Err(crate::Error::refused(
+                        crate::Refusal::Missing,
+                        format!(
+                            "chart preset {preset} has no style at {path:?} for the new chart \
+                             to be drawn with"
+                        ),
+                    ));
+                };
+                taken[index] = true;
+                map.insert(kit_style, *style);
+            }
+            map.insert(kit_preset.identifier, preset);
+        }
+        None => {
+            // The preset and its styles come in whole.
+            let shared: Vec<&crate::iwa::ArchiveObject> = kit
+                .iter()
+                .filter(|object| !private(object.message_type()))
+                .collect();
+            let theme = document
+                .objects()
+                .find(|(_, object)| {
+                    matches!(
+                        object.message_type(),
+                        crate::keynote::TYPE_THEME | crate::pages::TYPE_THEME | 12009
+                    )
+                })
+                .map(|(_, object)| object.identifier);
+            let mut grow = crate::create::Grow::new(document);
+            for object in &shared {
+                map.insert(object.identifier, grow.allocate());
+            }
+            for object in &shared {
+                let mut archive = decoded(object);
+                crate::keynote::remap_references(&mut archive, &map, crate::keynote::MAX_DEPTH);
+                // The preset lives with the theme that lists it; the styles
+                // with the stylesheet.
+                let beside = match (object.message_type(), theme) {
+                    (TYPE_CHART_PRESET, Some(theme)) => theme,
+                    _ => stylesheet,
+                };
+                grow.beside(
+                    beside,
+                    map[&object.identifier],
+                    object.message_type(),
+                    &archive,
+                )?;
+            }
+            grow.finish()?;
+
+            // Listed as the apps list a style: among the styles, by its
+            // identifier, and under its parent.
+            let mut sheet = document.archive(stylesheet)?;
+            for object in shared
+                .iter()
+                .filter(|object| object.message_type() != TYPE_CHART_PRESET)
+            {
+                let archive = decoded(object);
+                let new = map[&object.identifier];
+                let reference = Value::Bytes(crate::style::reference(new).encode());
+                let parent = crate::style::reference_at(&archive, &[1, 3, 1])
+                    .and_then(|parent| map.get(&parent).copied());
+                match parent {
+                    Some(parent) => crate::style::register_variation(&mut sheet, parent, new),
+                    None => sheet.append_in_order(1, reference.clone()),
+                }
+                if let Some(identifier) = crate::style::string_at(&archive, &[1, 2]) {
+                    let mut entry = Message::default();
+                    entry.set_in_order(1, Value::Bytes(identifier.into_bytes()));
+                    entry.set_in_order(2, reference);
+                    sheet.append_in_order(2, Value::Bytes(entry.encode()));
+                }
+            }
+            document.set_archive_for(stylesheet, &sheet)?;
+
+            // `TSCH.ChartPresetsArchive`, extension 120 of the theme.
+            if let Some(theme) = theme {
+                let mut archive = document.archive(theme)?;
+                let mut inner = archive.bytes(1).and_then(decode_nested).unwrap_or_default();
+                let mut presets = inner.bytes(120).and_then(decode_nested).unwrap_or_default();
+                presets.append_in_order(
+                    1,
+                    Value::Bytes(crate::style::reference(map[&kit_preset.identifier]).encode()),
+                );
+                inner.set_in_order(120, Value::Bytes(presets.encode()));
+                archive.set_in_order(1, Value::Bytes(inner.encode()));
+                document.set_archive_for(theme, &archive)?;
+            }
+        }
+    }
+
+    // The chart itself, and what it owns.
+    let own: Vec<&crate::iwa::ArchiveObject> = kit
+        .iter()
+        .filter(|object| private(object.message_type()))
+        .collect();
+    let mut grow = crate::create::Grow::new(document);
+    for object in &own {
+        map.insert(object.identifier, grow.allocate());
+    }
+    let neighbour = container.neighbour();
+    let mut chart = 0;
+    for object in &own {
+        let mut archive = decoded(object);
+        crate::keynote::remap_references(&mut archive, &map, crate::keynote::MAX_DEPTH);
+        if object.message_type() == TYPE_CHART_DRAWABLE {
+            chart = map[&object.identifier];
+            place(&mut archive, container.parent(), position, size);
+            let mut model = archive
+                .bytes(EXTENSION)
+                .and_then(decode_nested)
+                .expect("the kit's chart carries a chart archive");
+            let ids = |count: usize| -> Vec<(String, u32)> {
+                (0..count)
+                    .map(|index| (crate::metadata::uuid(), index as u32))
+                    .collect()
+            };
+            model.set_in_order(field::CHART_TYPE, Value::Varint(kind as u64));
+            model.set_in_order(field::CONTAINS_DEFAULT_DATA, Value::Varint(0));
+            // Each row a series, each column a category — the reading a
+            // caller expects of "rows of numbers", and the other of the two
+            // the kit's chart was made with.
+            model.set_in_order(field::SERIES_DIRECTION, Value::Varint(1));
+            model.set_in_order(
+                field::GRID,
+                Value::Bytes(
+                    encode_grid(data, &ids(data.rows.len()), &ids(data.column_names.len()))
+                        .encode(),
+                ),
+            );
+            archive.set_in_order(EXTENSION, Value::Bytes(model.encode()));
+        }
+        grow.beside(
+            neighbour,
+            map[&object.identifier],
+            object.message_type(),
+            &archive,
+        )?;
+    }
+    grow.finish()?;
+
+    crate::drawable::hold(document, &container, chart)?;
+    document.declare_external_references();
+    Ok(chart)
+}
+
 /// Put a copied drawable where it was asked for: its rectangle, and the parent
 /// its new container does or does not give it.
 ///

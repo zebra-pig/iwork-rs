@@ -32,6 +32,14 @@ bytes nobody has watched being read.
   ImageFit::ScaleToFill)` — and `slide.background_gradient(&Gradient)`. Each
   is shaped as a theme's own presets shape it; Keynote draws them and keeps
   them through its own save. Gradients are linear.
+- **A chart from data, where the document has none to copy** —
+  `doc.new_chart(container, ChartKind::Column, &data, position, size)`, on a
+  slide, a sheet or a page: column, bar, line, area, pie and the stacked
+  three. Still copied rather than invented: the crate carries one column
+  chart Keynote made, with its preset and the 37 styles the preset names
+  (5.6 KB; `examples/chart_kit.rs` regenerates it), and every one of those
+  types is that chart with one number different. A document with chart
+  presets of its own — anything made from a theme — keeps its own look.
 
 ## 0.2.3 — 2026-10-07
 

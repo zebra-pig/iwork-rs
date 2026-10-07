@@ -7210,6 +7210,19 @@ impl Document {
         crate::chart::add_chart(self, container, from, data, position, size)
     }
 
+    /// Make a chart from data where there is none to copy. See
+    /// [`crate::chart::new_chart`].
+    pub fn new_chart(
+        &mut self,
+        container: &str,
+        kind: crate::chart::ChartKind,
+        data: &crate::chart::ChartData,
+        position: (f32, f32),
+        size: (f32, f32),
+    ) -> Result<u64, Error> {
+        crate::chart::new_chart(self, container, kind, data, position, size)
+    }
+
     /// One drawable by object identifier.
     pub fn drawable(&self, identifier: u64) -> Option<crate::drawable::Drawable> {
         self.drawables()

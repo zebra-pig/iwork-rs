@@ -30,6 +30,13 @@ which ground rule 1a calls a defect:
 | Pages | 2 | `invalid nil value for 'self.theme'`, `'defaultCharacterStyle'` | no theme at all; the blueprint was reduced to what opens |
 | Keynote, themed deck + `add_table` | 12 | `Object [TSTTableModel…] was modified during read unexpectedly` | the table this crate adds is upgraded on read — same root as the Numbers line, probably |
 
+| Pages, chart from `new_chart` | 1 | `TSCHReferenceLineStyle … invalid value axis label paragraph style` | Pages only, and only on a document from nothing — no theme again, probably |
+
+A chart from `new_chart` has no legend (the kit's chart was made by
+AppleScript's `add chart`, which leaves it off) and nothing here turns one on.
+`add_chart` shares the source chart's two caption stand-ins (3097) with the
+copy rather than copying them; `new_chart` copies them.
+
 Also open: `iwork check` reported, on documents the apps had resaved, a
 format-list count on a table this crate created and a slide's table living in
 the `CalculationEngine` stream. Both need a resaved file to bisect.

@@ -543,3 +543,242 @@ fn numbers_recalculates_a_chart_bound_by_this_crate() {
     );
     let _ = std::fs::remove_file(&out);
 }
+
+// -- a chart where there was none ----------------------------------------------
+
+use iwork::chart::ChartKind;
+use iwork::Kind;
+
+fn quarters() -> ChartData {
+    ChartData::numbers(
+        &["2025", "2026"],
+        &["Q1", "Q2", "Q3", "Q4"],
+        &[&[31.0, 35.5, 40.8, 42.0], &[40.1, 44.5, 48.2, 51.0]],
+    )
+}
+
+fn count(doc: &Document, message_type: u32) -> usize {
+    doc.objects()
+        .filter(|(_, object)| object.message_type() == message_type)
+        .count()
+}
+
+/// A document made from nothing has no chart to copy and no preset to draw
+/// one with, so the first chart brings the preset — one, with its styles —
+/// and the second uses it. The chart reads back as what was asked for.
+#[test]
+fn a_chart_is_made_from_data_on_a_document_made_from_nothing() {
+    for (kind, container) in [
+        (Kind::Keynote, None),
+        (Kind::Numbers, None),
+        (Kind::Pages, Some("page 1".to_string())),
+    ] {
+        let mut doc = Document::new(kind).unwrap();
+        let container = container.unwrap_or_else(|| match kind {
+            Kind::Keynote => doc.slides()[0].identifier.to_string(),
+            _ => doc.sheets()[0].name.clone(),
+        });
+        assert_eq!(count(&doc, 5020), 0, "{kind:?} starts with no preset");
+        let first = doc
+            .new_chart(
+                &container,
+                ChartKind::Line,
+                &quarters(),
+                (50.0, 300.0),
+                (600.0, 400.0),
+            )
+            .unwrap();
+        let styles = count(&doc, 2022) + count(&doc, 5028);
+        let second = doc
+            .new_chart(
+                &container,
+                ChartKind::Pie,
+                &quarters(),
+                (50.0, 800.0),
+                (400.0, 400.0),
+            )
+            .unwrap();
+        assert_eq!(count(&doc, 5020), 1, "{kind:?}: one preset for both");
+        assert_eq!(count(&doc, 2022) + count(&doc, 5028), styles, "{kind:?}");
+        assert!(doc.problems().is_empty(), "{kind:?}: {:?}", doc.problems());
+
+        let out = scratch(&format!("iwork-new-chart-{kind:?}"));
+        doc.save(&out).unwrap();
+        let doc = Document::open(&out).unwrap();
+        assert!(doc.problems().is_empty(), "{kind:?}: {:?}", doc.problems());
+        let charts = doc.charts();
+        let line = charts.iter().find(|c| c.identifier == first).unwrap();
+        assert_eq!(line.type_name(), "lineChartType2D", "{kind:?}");
+        assert_eq!(line.series_count(), 2, "{kind:?}: a row is a series");
+        assert_eq!(line.categories(), ["Q1", "Q2", "Q3", "Q4"], "{kind:?}");
+        let pie = charts.iter().find(|c| c.identifier == second).unwrap();
+        assert_eq!(pie.type_name(), "pieChartType2D", "{kind:?}");
+        // Two charts, and nothing of one is the other's.
+        assert_ne!(line.chart_non_style, pie.chart_non_style, "{kind:?}");
+    }
+
+    let mut doc = Document::new(Kind::Keynote).unwrap();
+    let slide = doc.slides()[0].identifier.to_string();
+    let empty = ChartData::default();
+    assert!(doc
+        .new_chart(
+            &slide,
+            ChartKind::Column,
+            &empty,
+            (0.0, 0.0),
+            (100.0, 100.0)
+        )
+        .is_err());
+    assert!(doc
+        .new_chart(
+            &slide,
+            ChartKind::Column,
+            &quarters(),
+            (0.0, 0.0),
+            (0.0, 100.0)
+        )
+        .is_err());
+}
+
+/// A deck made from one of Apple's themes has presets of its own, and a new
+/// chart is drawn with the first of them — nothing of the kit's look comes
+/// in.
+#[test]
+fn a_chart_on_a_themed_deck_takes_the_theme_s_preset() {
+    let Some(theme) = bundled_theme() else {
+        eprintln!("no bundled Keynote themes on this machine — skipping");
+        return;
+    };
+    let mut doc = Document::from_template(&theme).unwrap();
+    let presets = count(&doc, 5020);
+    let styles = count(&doc, 5028);
+    assert!(presets > 0, "a theme has chart presets");
+    let slide = doc.slides()[0].identifier.to_string();
+    let chart = doc
+        .new_chart(
+            &slide,
+            ChartKind::StackedColumn,
+            &quarters(),
+            (200.0, 200.0),
+            (900.0, 600.0),
+        )
+        .unwrap();
+    assert_eq!(count(&doc, 5020), presets);
+    assert_eq!(count(&doc, 5028), styles);
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+    let made = doc
+        .charts()
+        .into_iter()
+        .find(|c| c.identifier == chart)
+        .unwrap();
+    assert_eq!(made.type_name(), "stackedColumnChartType2D");
+}
+
+fn bundled_theme() -> Option<PathBuf> {
+    let root =
+        Path::new("/Applications/Keynote Creator Studio.app/Contents/SharedSupport/Templates");
+    let mut found: Vec<PathBuf> = std::fs::read_dir(root)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|e| e.path().join("Wide.kth"))
+        .filter(|p| p.exists())
+        .collect();
+    found.sort();
+    found.into_iter().next()
+}
+
+/// **The apps open a chart made from nothing, and Keynote keeps it through
+/// its own save** — on a deck from nothing and on a themed one. Off unless
+/// `IWORK_APP_CHECK=1`.
+#[test]
+fn the_apps_open_a_chart_made_from_nothing() {
+    if std::env::var("IWORK_APP_CHECK").as_deref() != Ok("1") {
+        eprintln!("IWORK_APP_CHECK is not 1 — skipping the app round trip");
+        return;
+    }
+    let run = |script: &str, path: &Path| {
+        let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("scripts")
+            .join(script);
+        let output = std::process::Command::new(&script)
+            .arg(path)
+            .output()
+            .unwrap_or_else(|e| panic!("{}: {e}", script.display()));
+        assert!(
+            output.status.success(),
+            "{} {}:\n{}\n{}",
+            script.display(),
+            path.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+
+    let mut decks = vec![(
+        "iwork-chart-nothing.key",
+        Document::new(Kind::Keynote).unwrap(),
+    )];
+    if let Some(theme) = bundled_theme() {
+        decks.push((
+            "iwork-chart-themed.key",
+            Document::from_template(&theme).unwrap(),
+        ));
+    }
+    for (name, mut deck) in decks {
+        let slide = deck.slides()[0].identifier.to_string();
+        let chart = deck
+            .new_chart(
+                &slide,
+                ChartKind::Bar,
+                &quarters(),
+                (200.0, 150.0),
+                (1200.0, 700.0),
+            )
+            .unwrap();
+        let out = scratch(name);
+        deck.save(&out).unwrap();
+        run("resave.sh", &out);
+        let after = Document::open(&out).unwrap();
+        let kept = after
+            .charts()
+            .into_iter()
+            .find(|c| c.identifier == chart)
+            .unwrap_or_else(|| panic!("{name}: Keynote dropped the chart"));
+        assert_eq!(kept.type_name(), "barChartType2D", "{name}");
+        assert_eq!(kept.series_count(), 2, "{name}");
+        assert_eq!(kept.categories(), ["Q1", "Q2", "Q3", "Q4"], "{name}");
+        assert!(
+            after.problems().is_empty(),
+            "{name}: {:?}",
+            after.problems()
+        );
+    }
+
+    let mut sheet = Document::new(Kind::Numbers).unwrap();
+    let name = sheet.sheets()[0].name.clone();
+    sheet
+        .new_chart(
+            &name,
+            ChartKind::Column,
+            &quarters(),
+            (50.0, 400.0),
+            (600.0, 400.0),
+        )
+        .unwrap();
+    let out = scratch("iwork-chart-nothing.numbers");
+    sheet.save(&out).unwrap();
+    run("app-check.sh", &out);
+
+    let mut page = Document::new(Kind::Pages).unwrap();
+    page.new_chart(
+        "page 1",
+        ChartKind::Area,
+        &quarters(),
+        (72.0, 200.0),
+        (450.0, 300.0),
+    )
+    .unwrap();
+    let out = scratch("iwork-chart-nothing.pages");
+    page.save(&out).unwrap();
+    run("app-check.sh", &out);
+}
