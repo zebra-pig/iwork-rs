@@ -16,9 +16,9 @@
 //! in its own component is copied and renumbered, and what lives in the theme
 //! is shared, exactly as two charts made from one preset share it in the app.
 
-// These exercise the 0.2 calls, which 0.3 keeps behind `#[deprecated]`;
-// `tests/elements.rs` is the same ground through the 0.3 API.
-#![allow(deprecated)]
+mod common;
+#[allow(unused_imports)]
+use common::{Flat, FlatSlide};
 
 use std::path::{Path, PathBuf};
 

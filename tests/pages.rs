@@ -19,9 +19,9 @@
 //! and write it out again, and what is on disk afterwards was written by Pages.
 //! A header this crate invented badly does not come back from that.
 
-// These exercise the 0.2 calls, which 0.3 keeps behind `#[deprecated]`;
-// `tests/elements.rs` is the same ground through the 0.3 API.
-#![allow(deprecated)]
+mod common;
+#[allow(unused_imports)]
+use common::{Flat, FlatSlide};
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

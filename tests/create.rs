@@ -12,9 +12,9 @@
 //! until the component index declared a component's root the way iWork declares
 //! one, and nothing on this side of the file could have told us.
 
-// These exercise the 0.2 calls, which 0.3 keeps behind `#[deprecated]`;
-// `tests/elements.rs` is the same ground through the 0.3 API.
-#![allow(deprecated)]
+mod common;
+#[allow(unused_imports)]
+use common::{Flat, FlatSlide};
 
 use std::path::Path;
 

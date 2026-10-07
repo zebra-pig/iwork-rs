@@ -4800,7 +4800,7 @@ pub fn set_conditional_threshold(
 /// style as its parent and holding only what differs. That is what Numbers
 /// writes when a cell is made bold, and it is what this makes.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct CellText {
+pub(crate) struct CellText {
     /// The bold toggle.
     pub bold: Option<bool>,
     /// The italic toggle.
@@ -4814,6 +4814,12 @@ pub struct CellText {
     pub colour: Option<crate::drawable::Color>,
     /// Horizontal alignment.
     pub align: Option<Align>,
+}
+
+impl CellText {
+    pub(crate) fn is_empty(&self) -> bool {
+        *self == CellText::default()
+    }
 }
 
 /// How a paragraph is ranged — `TSWP`'s `TextAlignmentType`, whose values the
@@ -4830,28 +4836,6 @@ pub enum Align {
     Justified = 3,
     /// Text left, numbers right — what a table cell does unless told.
     Automatic = 4,
-}
-
-impl CellText {
-    /// Bold, and nothing else changed.
-    pub fn bold() -> CellText {
-        CellText {
-            bold: Some(true),
-            ..CellText::default()
-        }
-    }
-
-    /// A colour, and nothing else changed.
-    pub fn coloured(colour: crate::drawable::Color) -> CellText {
-        CellText {
-            colour: Some(colour),
-            ..CellText::default()
-        }
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        *self == CellText::default()
-    }
 }
 
 /// `TST.CellStyleArchive` — how a table cell is painted.

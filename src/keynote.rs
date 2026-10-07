@@ -133,7 +133,7 @@ pub mod slide_tree_field {
     /// `rootSlideNode`, deprecated and absent from every deck here.
     pub const ROOT: u32 = 1;
     /// The deck, in order. **This repeated field is the slide order** — see
-    /// [`crate::Document::move_slide`].
+    /// [`crate::document::SlideMut::move_to`].
     pub const SLIDES: u32 = 2;
 }
 
@@ -385,7 +385,7 @@ pub struct Placeholder {
     pub identifier: u64,
     pub kind: PlaceholderKind,
     /// The `TSWP.StorageArchive` it lays out. This is what
-    /// [`crate::Document::set_text`] takes.
+    /// [`crate::document::TextMut::set`] takes.
     pub storage: Option<u64>,
     pub text: String,
     /// Whether the slide owns it — the app's `title showing` / `body showing`.

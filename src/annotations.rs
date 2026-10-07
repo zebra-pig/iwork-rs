@@ -79,7 +79,7 @@
 //! text of a storage with tracked changes contains text nobody is going to see,
 //! and a remap that treats field 22 as an ordinary run table will move a
 //! deletion marker onto characters nobody deleted. Since no probe here can
-//! watch Pages do it, [`crate::Document::replace_text`] refuses instead —
+//! watch Pages do it, [`crate::document::TextMut::replace`] refuses instead —
 //! [`crate::Error::TrackedChanges`].
 
 use std::collections::BTreeMap;

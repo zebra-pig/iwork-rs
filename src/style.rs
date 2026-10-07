@@ -278,7 +278,7 @@ pub mod property {
     /// what gets drawn** — a title whose `11.7` was set to red and whose
     /// `11.46.1` stayed black renders black.
     ///
-    /// [`crate::Document::set_text_style_color`] writes the lot. The text
+    /// [`crate::element::TextStyleMut::look`] writes the lot. The text
     /// background at [`TEXT_BACKGROUND`] and the outline colour inside
     /// [`TEXT_STROKE`] are deliberately not here: those are different colours
     /// that happen to share a shape.
@@ -526,7 +526,7 @@ pub struct CreatedStyle {
     pub name: Option<String>,
 }
 
-/// What [`crate::Document::delete_text_style`] did.
+/// What [`crate::element::TextStyleMut::delete`] did.
 #[derive(Debug, Clone)]
 pub struct StyleDeletion {
     pub identifier: u64,

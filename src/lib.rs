@@ -150,10 +150,6 @@
 //! made to *look* right without being right, it is refused instead — with a
 //! [`Refusal`] saying which kind of wrong it would have been.
 
-// The handles are a thin layer over the flat functions 0.2 exposed, which are
-// deprecated for callers and are still how this crate does the work.
-#![allow(deprecated)]
-
 /// Recipes: a spreadsheet, a deck and a report that look designed.
 ///
 /// This module holds no code. It is `COOKBOOK.md`, included here so that every

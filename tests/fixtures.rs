@@ -7,9 +7,9 @@
 //! them. With no fixtures present they pass without asserting anything, and say
 //! so.
 
-// These exercise the 0.2 calls, which 0.3 keeps behind `#[deprecated]`;
-// `tests/elements.rs` is the same ground through the 0.3 API.
-#![allow(deprecated)]
+mod common;
+#[allow(unused_imports)]
+use common::{Flat, FlatSlide};
 
 use std::path::{Path, PathBuf};
 

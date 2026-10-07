@@ -453,7 +453,7 @@ impl NumberField {
 #[derive(Debug, Clone)]
 pub struct HeaderFooter {
     /// Object identifier of the `TSWP.StorageArchive`. This is what
-    /// [`crate::Document::set_text`] takes.
+    /// [`crate::document::TextMut::set`] takes.
     pub storage: u64,
     /// Index of the section it belongs to, in document order.
     pub section: usize,

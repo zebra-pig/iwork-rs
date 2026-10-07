@@ -37,7 +37,7 @@ use crate::pb::{Field, Message, Value};
 /// Field numbers holding attribute tables of the run-table shape —
 /// `{character_index, reference}` — that a *style* can be reached through.
 ///
-/// This is the narrower list [`crate::Document::delete_text_style`] and
+/// This is the narrower list [`crate::element::TextStyleMut::delete`] and
 /// [`crate::Document::text_style_usage`] walk, so that dropping a style cannot
 /// leave a dangling reference behind in one of them. The complete inventory of
 /// what a storage can carry, which is what an *edit* has to remap, is
@@ -965,7 +965,7 @@ pub fn destroyed_sections(storage: &Message, text: &str, edit: Edit) -> Vec<(u64
 /// Why an edit to a storage is refused — everything [`apply`] requires of its
 /// caller, in one value.
 ///
-/// [`crate::Document::replace_text`] turns each of these into the
+/// [`crate::document::TextMut::replace`] turns each of these into the
 /// [`crate::Error`] that names it; the storage identifier, which this module
 /// does not have, is what it adds.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1031,7 +1031,7 @@ impl Refusal {
 ///
 /// One function rather than five call sites, so that the contract [`apply`]
 /// documents and the checks a caller performs cannot drift apart: `apply`
-/// asserts this in debug builds, and [`crate::Document::replace_text`] is the
+/// asserts this in debug builds, and [`crate::document::TextMut::replace`] is the
 /// caller that turns it into an error.
 ///
 /// The order is the order the answers are worth having: what the crate cannot
@@ -1076,7 +1076,7 @@ pub fn refusal(storage: &Message, edit: Edit) -> Option<Refusal> {
 /// carries.
 ///
 /// `new_text` must be the storage's text with the edit already performed;
-/// [`crate::Document::replace_text`] is what computes it. This function is the
+/// [`crate::document::TextMut::replace`] is what computes it. This function is the
 /// part that has to be right about the tables, and is separated so that it can
 /// be tested on storages built by hand.
 ///
@@ -2006,7 +2006,7 @@ mod tests {
 /// apps store a word somebody made bold: a `TSWP.CharacterStyleArchive` that
 /// is a variation of the stylesheet's `character-style-null`, holding only
 /// these properties, named by the storage's character-style table for exactly
-/// the run. See [`crate::Document::format_text`].
+/// the run. See [`crate::document::TextMut::format`].
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TextLook {
     /// The bold toggle.

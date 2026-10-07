@@ -7,9 +7,9 @@
 //! style editing that does not depend on Apple's schema — which, deliberately,
 //! is all of it.
 
-// These exercise the 0.2 calls, which 0.3 keeps behind `#[deprecated]`;
-// `tests/elements.rs` is the same ground through the 0.3 API.
-#![allow(deprecated)]
+mod common;
+#[allow(unused_imports)]
+use common::{Flat, FlatSlide};
 
 use std::ops::Range;
 
@@ -535,10 +535,7 @@ fn setting_a_colour_sets_every_place_the_style_keeps_one() {
     })
     .unwrap();
 
-    assert_eq!(
-        doc.set_text_style_color(BODY, 0.85, 0.1, 0.1, 1.0).unwrap(),
-        2
-    );
+    doc.set_text_style_color(BODY, 0.85, 0.1, 0.1, 1.0).unwrap();
 
     let doc = reopen(&doc, "colour-everywhere");
     let archive = doc.text_style(BODY).unwrap().archive;
@@ -561,11 +558,12 @@ fn setting_a_colour_sets_every_place_the_style_keeps_one() {
 
     // A style that keeps no colour is left alone and says so.
     let mut doc = document();
-    assert_eq!(
-        doc.set_text_style_color(EMPHASIS, 1.0, 0.0, 0.0, 1.0)
-            .unwrap(),
-        0
-    );
+    let before = doc.text_style(EMPHASIS).unwrap().archive;
+    let refused = doc
+        .set_text_style_color(EMPHASIS, 1.0, 0.0, 0.0, 1.0)
+        .expect_err("no colour to write to");
+    assert!(refused.to_string().contains("keeps no colour"), "{refused}");
+    assert_eq!(doc.text_style(EMPHASIS).unwrap().archive, before);
 }
 
 /// The supported way to get a container you do not have: take a working one.

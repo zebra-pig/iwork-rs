@@ -9,9 +9,9 @@
 //! Numbers behind `IWORK_APP_CHECK=1`: one more row, the new row empty, and
 //! every row below the insertion still holding its value and its format.
 
-// These exercise the 0.2 calls, which 0.3 keeps behind `#[deprecated]`;
-// `tests/elements.rs` is the same ground through the 0.3 API.
-#![allow(deprecated)]
+mod common;
+#[allow(unused_imports)]
+use common::{Flat, FlatSlide};
 
 use std::path::{Path, PathBuf};
 

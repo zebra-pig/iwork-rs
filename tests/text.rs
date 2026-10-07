@@ -8,9 +8,9 @@
 //! `IWORK_APP_CHECK=1` — that the app opens the result and reads the new words
 //! back.
 
-// These exercise the 0.2 calls, which 0.3 keeps behind `#[deprecated]`;
-// `tests/elements.rs` is the same ground through the 0.3 API.
-#![allow(deprecated)]
+mod common;
+#[allow(unused_imports)]
+use common::{Flat, FlatSlide};
 
 use std::path::{Path, PathBuf};
 
@@ -1606,16 +1606,18 @@ fn a_style_made_from_nothing_has_a_fill_for_its_colour_to_go_in() {
             .create_text_style(template.identifier, "Akzent")
             .unwrap()
             .identifier;
-        let written = doc
-            .set_text_style_color(made, 0.83, 0.18, 0.18, 1.0)
+        doc.set_text_style_color(made, 0.83, 0.18, 0.18, 1.0)
             .unwrap();
-        assert!(
-            written >= 2,
-            "{kind:?}: the colour reached {written} place(s); the font colour and the \
-             fill are the least a style needs to be drawn in it"
-        );
 
+        // Both places: the font colour, and the fill the app paints with.
         let archive = doc.text_style(made).unwrap().archive;
+        assert!(
+            matches!(
+                iwork::style::get_path(&archive, iwork::style::property::RED),
+                Some(iwork::pb::Value::Fixed32(_))
+            ),
+            "{kind:?}: the font colour has no red channel"
+        );
         match iwork::style::get_path(&archive, &[11, 46, 1, 3]) {
             Some(iwork::pb::Value::Fixed32(bytes)) => {
                 assert!((f32::from_le_bytes(bytes) - 0.83).abs() < 1e-6, "{kind:?}");

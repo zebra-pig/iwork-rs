@@ -1,8 +1,5 @@
 //! `iwork` — inspect and edit Pages, Numbers and Keynote documents.
 
-// The CLI still speaks the 0.2 calls; API.md phase 3 moves it.
-#![allow(deprecated)]
-
 use std::collections::BTreeMap;
 use std::process::ExitCode;
 
@@ -957,7 +954,9 @@ fn add_table(
         None => (0.0, 0.0),
     };
     let mut doc = Document::open(path)?;
-    let table = doc.add_table_at(container, name, rows, columns, position)?;
+    let table = doc
+        .canvas_mut(container)?
+        .add(iwork::Table::new(name, rows, columns).at(position.0, position.1))?;
     doc.save(out)?;
     println!("added table {name:?} (object {table}) to {container}, {rows}×{columns}");
     report_streams(&doc, out);
@@ -994,7 +993,12 @@ fn add_text_box(
     let position = (number("a position", x)?, number("a position", y)?);
     let size = (number("a size", w)?, number("a size", h)?);
     let mut doc = Document::open(path)?;
-    let shape = doc.add_shape(where_, outline, text, position, size)?;
+    let shape = doc.canvas_mut(where_)?.add(
+        iwork::Shape::new(outline)
+            .text(text)
+            .at(position.0, position.1)
+            .size(size.0, size.1),
+    )?;
     doc.save(out)?;
     let what = match outline {
         Outline::Rectangle if text.is_empty() => "rectangle",
@@ -1035,7 +1039,13 @@ fn add_image(
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "image".to_string());
     let mut doc = Document::open(path)?;
-    let drawable = doc.add_image(where_, &bytes, &name, position, size)?;
+    let mut image = iwork::Image::new(bytes.clone())
+        .named(name.clone())
+        .at(position.0, position.1);
+    if let Some((width, height)) = size {
+        image = image.size(width, height);
+    }
+    let drawable = doc.canvas_mut(where_)?.add(image)?;
     doc.save(out)?;
     println!(
         "added image {drawable} at {},{} — {} byte(s) as {name}",
@@ -1070,7 +1080,9 @@ fn set_transition(
         ..Default::default()
     };
     let mut doc = Document::open(path)?;
-    let now = doc.set_transition(slide, &edit)?;
+    let now = doc
+        .slide_mut(iwork::keynote::SlideRef::Identifier(slide))?
+        .transition_with(&edit)?;
     doc.save(out)?;
     if now.is_none() {
         println!("slide {slide} now leaves with no transition");
@@ -1234,7 +1246,7 @@ fn text(path: &str) -> Result<(), Error> {
 
 fn set_text(path: &str, identifier: u64, new_text: &str, out: &str) -> Result<(), Error> {
     let mut doc = Document::open(path)?;
-    report_edit(doc.set_text(identifier, new_text)?);
+    report_edit(doc.text_mut(identifier)?.set(new_text)?);
     save(&doc, out)
 }
 
@@ -1246,7 +1258,7 @@ fn insert_text(
     out: &str,
 ) -> Result<(), Error> {
     let mut doc = Document::open(path)?;
-    report_edit(doc.insert_text(identifier, at, new_text)?);
+    report_edit(doc.text_mut(identifier)?.insert(at, new_text)?);
     save(&doc, out)
 }
 
@@ -1257,7 +1269,7 @@ fn delete_text(
     out: &str,
 ) -> Result<(), Error> {
     let mut doc = Document::open(path)?;
-    report_edit(doc.delete_text(identifier, range)?);
+    report_edit(doc.text_mut(identifier)?.delete(range)?);
     save(&doc, out)
 }
 
@@ -1748,14 +1760,18 @@ fn layouts(path: &str) -> Result<(), Error> {
 
 fn set_notes(path: &str, slide: u64, new_text: &str, out: &str) -> Result<(), Error> {
     let mut doc = Document::open(path)?;
-    let edit = doc.set_presenter_notes(slide, new_text)?;
+    let edit = doc
+        .slide_mut(iwork::keynote::SlideRef::Identifier(slide))?
+        .notes(new_text)?;
     report_edit(edit);
     save(&doc, out)
 }
 
 fn skip_slide(path: &str, slide: u64, skipped: bool, out: &str) -> Result<(), Error> {
     let mut doc = Document::open(path)?;
-    let changed = doc.set_slide_skipped(slide, skipped)?;
+    let changed = doc
+        .slide_mut(iwork::keynote::SlideRef::Identifier(slide))?
+        .skip(skipped)?;
     println!(
         "slide {slide} is {}{}",
         if skipped { "skipped" } else { "in the show" },
@@ -1766,14 +1782,18 @@ fn skip_slide(path: &str, slide: u64, skipped: bool, out: &str) -> Result<(), Er
 
 fn move_slide(path: &str, slide: u64, to: usize, out: &str) -> Result<(), Error> {
     let mut doc = Document::open(path)?;
-    let landed = doc.move_slide(slide, to)?;
+    let landed = doc
+        .slide_mut(iwork::keynote::SlideRef::Identifier(slide))?
+        .move_to(to)?;
     println!("slide {slide} is now at position {landed}");
     save(&doc, out)
 }
 
 fn duplicate_slide(path: &str, slide: u64, out: &str) -> Result<(), Error> {
     let mut doc = Document::open(path)?;
-    let copy = doc.duplicate_slide(slide)?;
+    let copy = doc
+        .slide_mut(iwork::keynote::SlideRef::Identifier(slide))?
+        .duplicate()?;
     println!(
         "copied slide {} to {} (node {}) at position {}",
         copy.source, copy.identifier, copy.node, copy.index
@@ -3092,7 +3112,7 @@ fn set_cell(
 ) -> Result<(), Error> {
     let value = parse_cell_value(value)?;
     let mut doc = Document::open(path)?;
-    let previous = doc.set_cell(table, row, column, value.clone())?;
+    let previous = doc.table_mut(table)?.set((row, column), value.clone())?;
     println!(
         "{} of table {table}: {} -> {}",
         reference_name(row, column),
@@ -3151,7 +3171,8 @@ fn set_formula(
 ) -> Result<(), Error> {
     let value = parse_cell_value(value)?;
     let mut doc = Document::open(path)?;
-    doc.set_formula(table, row, column, formula, value.clone())?;
+    doc.table_mut(table)?
+        .formula((row, column), formula, value.clone())?;
     println!(
         "{} of table {table}: {formula} showing {}",
         reference_name(row, column),
@@ -3171,7 +3192,7 @@ fn set_format(
 ) -> Result<(), Error> {
     let format = parse_format(format)?;
     let mut doc = Document::open(path)?;
-    doc.set_format(table, [(row, column)], &format)?;
+    doc.table_mut(table)?.format((row, column), &format)?;
     println!(
         "{} of table {table}: {}",
         reference_name(row, column),
@@ -3231,9 +3252,8 @@ fn parse_colour_or_none(text: &str) -> Result<Option<iwork::drawable::Color>, Er
 /// `iwork fill` — paint a range of cells.
 fn fill_cells(path: &str, table: &str, range: &str, colour: &str, out: &str) -> Result<(), Error> {
     let colour = parse_colour_or_none(colour)?;
-    let cells = iwork::table::CellRange::from(range).cells()?;
     let mut doc = Document::open(path)?;
-    let changed = doc.set_cell_fill(table, cells, colour)?;
+    let changed = doc.table_mut(table)?.fill(range, colour)?;
     match colour {
         Some(colour) => println!("{range} of table {table}: painted {colour} ({changed} cell(s))"),
         None => println!("{range} of table {table}: unpainted ({changed} cell(s))"),
@@ -3243,8 +3263,9 @@ fn fill_cells(path: &str, table: &str, range: &str, colour: &str, out: &str) -> 
 
 /// `iwork text-look` — how the text of a range of cells is set.
 fn text_look(path: &str, table: &str, range: &str, what: &[&str], out: &str) -> Result<(), Error> {
-    use iwork::table::{Align, CellText};
-    let mut look = CellText::default();
+    use iwork::Align;
+    let mut look = iwork::TextLook::new();
+    let mut align = None;
     for word in what {
         match word.split_once('=') {
             None => match *word {
@@ -3271,7 +3292,7 @@ fn text_look(path: &str, table: &str, range: &str, what: &[&str], out: &str) -> 
             Some(("font", value)) => look.font = Some(value.to_string()),
             Some(("color" | "colour", value)) => look.colour = Some(parse_colour(value)?),
             Some(("align", value)) => {
-                look.align = Some(match value {
+                align = Some(match value {
                     "left" => Align::Left,
                     "right" => Align::Right,
                     "centre" | "center" => Align::Centre,
@@ -3292,9 +3313,15 @@ fn text_look(path: &str, table: &str, range: &str, what: &[&str], out: &str) -> 
             }
         }
     }
-    let cells = iwork::table::CellRange::from(range).cells()?;
     let mut doc = Document::open(path)?;
-    let changed = doc.set_cell_text(table, cells, &look)?;
+    let mut cells = doc.table_mut(table)?;
+    let mut changed = 0;
+    if look != iwork::TextLook::new() {
+        changed = cells.look(range, &look)?;
+    }
+    if let Some(align) = align {
+        changed = changed.max(cells.align(range, align)?);
+    }
     println!(
         "{range} of table {table}: {} ({changed} cell(s))",
         what.join(" ")
@@ -3312,7 +3339,9 @@ fn paint(path: &str, drawable: u64, what: &[&str], out: &str) -> Result<(), Erro
             ))
         })?;
         match key {
-            "fill" => doc.set_object_fill(drawable, parse_colour_or_none(value)?)?,
+            "fill" => doc
+                .element_mut(drawable)?
+                .fill(parse_colour_or_none(value)?)?,
             "stroke" => {
                 // `#RRGGBB:width`. The split is from the right, so a colour
                 // written `r,g,b` keeps its commas.
@@ -3325,10 +3354,10 @@ fn paint(path: &str, drawable: u64, what: &[&str], out: &str) -> Result<(), Erro
                     ),
                     None => (value, 1.0),
                 };
-                doc.set_object_stroke(drawable, parse_colour(colour)?, width)?
+                doc.element_mut(drawable)?
+                    .stroke(parse_colour(colour)?, width)?
             }
-            "opacity" => doc.set_object_opacity(
-                drawable,
+            "opacity" => doc.element_mut(drawable)?.opacity(
                 value
                     .parse()
                     .map_err(|_| Error::Format(format!("'{value}' is not an opacity in 0..1")))?,
@@ -3357,7 +3386,8 @@ fn slide_background(path: &str, slide: u64, colour: &str, out: &str) -> Result<(
         .or_else(|| slide.checked_sub(1).and_then(|at| slides.get(at as usize)))
         .map(|found| found.identifier)
         .ok_or_else(|| Error::Format(format!("no slide {slide} in a deck of {}", slides.len())))?;
-    doc.set_slide_background(target, colour)?;
+    doc.slide_mut(iwork::keynote::SlideRef::Identifier(target))?
+        .background(colour)?;
     match colour {
         Some(colour) => println!("slide {slide}: background {colour}"),
         None => println!("slide {slide}: its layout's background"),
@@ -3431,9 +3461,9 @@ fn set_size(
     };
     let mut doc = Document::open(path)?;
     if column {
-        doc.set_column_width(table, index, size)?;
+        doc.table_mut(table)?.column_width(index, size)?;
     } else {
-        doc.set_row_height(table, index, size)?;
+        doc.table_mut(table)?.row_height(index, size)?;
     }
     println!(
         "table {table}: {} {index} is now {}",
@@ -3478,7 +3508,14 @@ fn merge(
     out: &str,
 ) -> Result<(), Error> {
     let mut doc = Document::open(path)?;
-    doc.merge_cells(table, row, column, rows, columns)?;
+    doc.table_mut(table)?.merge(iwork::table::CellRange {
+        start: (row, column).into(),
+        end: (
+            row + rows.saturating_sub(1),
+            column + columns.saturating_sub(1),
+        )
+            .into(),
+    })?;
     println!(
         "table {table}: {} spans {rows} row(s) × {columns} column(s)",
         reference_name(row, column)
@@ -3488,7 +3525,7 @@ fn merge(
 
 fn unmerge(path: &str, table: &str, row: usize, column: usize, out: &str) -> Result<(), Error> {
     let mut doc = Document::open(path)?;
-    doc.unmerge_cells(table, row, column)?;
+    doc.table_mut(table)?.unmerge((row, column))?;
     println!(
         "table {table}: the merge at {} is gone; its cells stay empty",
         reference_name(row, column)
@@ -3689,7 +3726,7 @@ fn add_chart(
     let size = (number("a size", w)?, number("a size", h)?);
     let data = chart_data(csv)?;
     let mut doc = Document::open(path)?;
-    let chart = doc.add_chart(where_, from, &data, position, size)?;
+    let chart = doc.copy_chart(where_, from, &data, position, size)?;
     doc.save(out)?;
     println!(
         "added chart {chart}, copied from {from}, at {},{} — {} × {}",
@@ -3959,14 +3996,10 @@ fn set_color(path: &str, id: &str, r: &str, g: &str, b: &str, out: &str) -> Resu
             .map_err(|_| Error::Format(format!("'{text}' is not a channel value in 0.0..=1.0")))
     };
     let mut doc = Document::open(path)?;
-    let set = doc.set_text_style_color(id, channel(r)?, channel(g)?, channel(b)?, 1.0)?;
-    if set == 0 {
-        return Err(Error::Format(format!(
-            "style {id} keeps no colour of its own, and one invented here would \
-             make Pages refuse the document — copy a style that has one"
-        )));
-    }
-    println!("set {set} colour field(s) on style {id}");
+    let colour = iwork::Color::rgb(channel(r)?, channel(g)?, channel(b)?);
+    doc.text_style_mut(id)?
+        .look(&iwork::TextLook::new().colour(colour))?;
+    println!("set the colour of style {id}");
     save(&doc, out)
 }
 
@@ -3977,13 +4010,13 @@ fn set_style(path: &str, id: u64, assignment: &str, out: &str) -> Result<(), Err
 
     let mut doc = Document::open(path)?;
     if field == "name" {
-        doc.rename_text_style(id, value)?;
+        doc.text_style_mut(id)?.rename(value)?;
         println!("renamed style {id} to {value:?}");
     } else {
         let field_path = parse_path(field)?;
         let value = parse_value(value)?;
         let cleared = value.is_none();
-        doc.set_text_style_property(id, &field_path, value)?;
+        doc.text_style_mut(id)?.property(&field_path, value)?;
         match cleared {
             true => println!("cleared field {field} of style {id}"),
             false => println!("set field {field} of style {id}"),
@@ -3994,7 +4027,7 @@ fn set_style(path: &str, id: u64, assignment: &str, out: &str) -> Result<(), Err
 
 fn delete_style(path: &str, id: u64, replacement: Option<u64>, out: &str) -> Result<(), Error> {
     let mut doc = Document::open(path)?;
-    let deleted = doc.delete_text_style(id, replacement)?;
+    let deleted = doc.text_style_mut(id)?.delete(replacement)?;
     println!(
         "deleted style {id}: {} run(s) repointed, {} dropped, {} stylesheet entries removed",
         deleted.runs_repointed, deleted.runs_dropped, deleted.registrations_removed
@@ -4016,7 +4049,7 @@ fn apply_style(
     let style = identifier(style)?;
 
     let mut doc = Document::open(path)?;
-    doc.apply_text_style(storage, start..end, style)?;
+    doc.text_mut(storage)?.style(start..end, style)?;
     println!("storage {storage} chars {start}..{end} now use style {style}");
     save(&doc, out)
 }
