@@ -55,7 +55,7 @@
 //!
 //! A skipped slide has no number. The app answers `slide number` with **-1** for
 //! it, and numbers the rest 1, 2, 3 … skipping over it — so the number is a
-//! function of the deck, not a field on the slide. [`Slide::number`] is `None`
+//! function of the deck, not a field on the slide. [`SlideInfo::number`] is `None`
 //! for a skipped slide for exactly that reason.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -840,7 +840,7 @@ impl std::fmt::Display for SlideRef {
 
 /// One slide of the deck.
 #[derive(Debug, Clone)]
-pub struct Slide {
+pub struct SlideInfo {
     /// The `KN.SlideArchive`, which is also the component's identifier.
     pub identifier: u64,
     /// The `KN.SlideNodeArchive` that puts it in the deck.
@@ -888,7 +888,7 @@ pub struct Slide {
     pub texts: Vec<SlideText>,
 }
 
-impl Slide {
+impl SlideInfo {
     /// The title text, or the empty string.
     pub fn title_text(&self) -> &str {
         self.title.as_ref().map(|p| p.text.as_str()).unwrap_or("")
@@ -986,7 +986,7 @@ pub struct Show {
     pub height: f32,
     /// `KN.ShowArchive.slideNumbersVisible` (6). **Absent from every deck in
     /// this corpus, including the one whose numbers are on**: the app writes
-    /// the per-slide flag instead. See [`Slide::number_visible`] and
+    /// the per-slide flag instead. See [`SlideInfo::number_visible`] and
     /// [`Show::numbers_shown_on`].
     pub slide_numbers_visible: bool,
     /// `loop_presentation` (8) — the app's `auto loop`. **Measured**: true in
@@ -1019,7 +1019,7 @@ pub struct Show {
     /// The theme's live-video sources — one `"Default Camera"` in every deck
     /// here. Identify-and-report, like the recording.
     pub live_video_sources: Vec<LiveVideoSource>,
-    pub slides: Vec<Slide>,
+    pub slides: Vec<SlideInfo>,
     pub layouts: Vec<Layout>,
 }
 
@@ -1041,7 +1041,7 @@ impl Show {
 
     /// The slide with this identifier, whichever way it was named — by the
     /// slide archive or by its node.
-    pub fn slide(&self, identifier: u64) -> Option<&Slide> {
+    pub fn slide(&self, identifier: u64) -> Option<&SlideInfo> {
         self.slides
             .iter()
             .find(|s| s.identifier == identifier || s.node == identifier)
@@ -1061,7 +1061,7 @@ impl Show {
     }
 
     /// The layout a slide is built on.
-    pub fn layout_of(&self, slide: &Slide) -> Option<&Layout> {
+    pub fn layout_of(&self, slide: &SlideInfo) -> Option<&Layout> {
         slide
             .layout
             .and_then(|id| self.layouts.iter().find(|l| l.identifier == id))
@@ -1497,7 +1497,7 @@ pub fn show(document: &crate::Document) -> Option<Show> {
             });
         }
 
-        slides.push(Slide {
+        slides.push(SlideInfo {
             identifier,
             node: *node,
             stream: stream_of.get(&identifier).cloned().unwrap_or_default(),
@@ -2478,7 +2478,7 @@ fn placeholders_from_layout(
 pub fn add_slide(
     document: &mut crate::Document,
     layout: Option<u64>,
-) -> Result<crate::keynote::Slide, Error> {
+) -> Result<crate::keynote::SlideInfo, Error> {
     let deck = show(document).ok_or_else(|| Error::Format("not a Keynote document".into()))?;
     let master = match layout {
         Some(wanted) => deck

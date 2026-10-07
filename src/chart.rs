@@ -672,7 +672,7 @@ const CHART_EXTENSIONS: &[(u32, &str)] = &[
 
 /// Every chart in the document.
 ///
-/// The walk is over [`crate::Document::drawables`] rather than over the objects,
+/// The walk is over [`crate::Document::elements`] rather than over the objects,
 /// because a chart's placement, rectangle and rotation come from the drawable
 /// chain and are worth having beside its data. A Numbers chart's references are
 /// then resolved against the document's tables, which is what turns a reference
@@ -688,7 +688,7 @@ pub fn charts(document: &crate::Document) -> Vec<ChartInfo> {
     }
 
     let mut out = Vec::new();
-    for drawable in document.drawables() {
+    for drawable in document.elements() {
         if drawable.message_type != TYPE_CHART_DRAWABLE {
             continue;
         }
@@ -704,7 +704,7 @@ pub fn charts(document: &crate::Document) -> Vec<ChartInfo> {
 }
 
 fn decode(
-    drawable: &crate::drawable::Drawable,
+    drawable: &crate::drawable::ElementInfo,
     archive: &Message,
     objects: &BTreeMap<u64, (u32, Message)>,
     names: &Names,
@@ -796,7 +796,7 @@ fn decode(
             .collect(),
         placement: drawable.placement.clone(),
         // The rectangle the app reports, with the rotated-bounding-box
-        // correction `Drawable::frame` applies — the same the drawable reader
+        // correction `ElementInfo::frame` applies — the same the drawable reader
         // uses. It equals `base_rect` whenever the chart is unrotated, which is
         // every chart in the corpus, but a rotated one is now framed correctly.
         frame: drawable.frame(None),

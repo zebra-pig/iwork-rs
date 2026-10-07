@@ -13,6 +13,10 @@
 //! `TST.TableStyleArchive` is a stub and nothing routes a row to a cell style
 //! by role. Both facts are asserted below, the second as the limitation it is.
 
+mod common;
+#[allow(unused_imports)]
+use common::{Flat, FlatSlide};
+
 use std::path::{Path, PathBuf};
 
 use iwork::drawable::{Color, Fill};

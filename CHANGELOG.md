@@ -4,7 +4,43 @@ What changed, and — because this is a reverse-engineered format — **how it w
 established**. An entry that cannot say what the app did is an entry about
 bytes nobody has watched being read.
 
-## 0.3.1 — unreleased
+## 0.4.0 — unreleased
+
+**One way to do each thing.** What 0.3 deprecated is gone, not kept.
+
+### Removed — breaking
+
+- **Every flat function on `Document` that a handle covers** — the list 0.3.0
+  deprecated: `set_cell`, `set_format`, `set_text`, `insert_text`,
+  `apply_text_style`, `set_object_fill`, `add_shape`, `add_text_box`,
+  `new_chart`, `set_transition`, `set_text_style_property` and the rest —
+  and the ones 0.3 missed, `insert_row`, `delete_row`, `insert_column`,
+  `delete_column`, `set_block`, `add_build`, `add_table`. The
+  work is done by `table_mut`, `text_mut`, `slide_mut`, `element_mut`,
+  `chart_mut`, `text_style_mut` and `container.add(value)`.
+- `CellText` and `TableMut::text_look` — `table.look(range, &TextLook)` and
+  `table.align(range, Align)`.
+- The 0.2 names `SlideHandle`, `TableHandle`, `TextHandle`, and
+  `Document::add_chart` (it is `copy_chart`).
+
+### Changed — breaking
+
+- **`add` returns an `ElementId` and `add_text_style` a `StyleId`.** Both
+  convert from and to `u64`, compare with one, and print as one; what takes
+  an identifier says which kind it wants (`TextBox::style(impl Into<StyleId>)`).
+- **Snapshots**: `Drawable` is `ElementInfo`, read with `doc.elements()` and
+  `doc.element(id)`; `keynote::Slide` is `SlideInfo`; `table::Sheet` is
+  `SheetInfo`.
+- Asking for a layout as if it were a slide says so: "that is a slide layout,
+  not a slide in the show's deck".
+- Setting a colour on a style that keeps none of its own is a refusal, where
+  it used to answer `0`.
+
+### Added
+
+- `doc.canvas_mut("…")` — a slide, a sheet or a page named the way a tool
+  names one, to `add` to.
+- `slide.add_build_with(element, &BuildEdit)`.
 
 ## 0.3.0 — 2026-10-07
 

@@ -29,18 +29,18 @@ fn quarters(kind: ChartKind) -> Chart {
 }
 
 /// Where an element is and how big: `((x, y), (width, height))`.
-fn frame_of(doc: &Document, element: u64) -> ((f32, f32), (f32, f32)) {
-    let g = doc.drawable(element).unwrap().geometry;
+fn frame_of(doc: &Document, element: impl Into<iwork::ElementId>) -> ((f32, f32), (f32, f32)) {
+    let g = doc.element(element).unwrap().geometry;
     ((g.x, g.y), (g.width, g.height))
 }
 
-fn style_of(doc: &Document, element: u64) -> iwork::drawable::ObjectStyle {
-    let style = doc.drawable(element).and_then(|d| d.style).unwrap();
+fn style_of(doc: &Document, element: impl Into<iwork::ElementId>) -> iwork::drawable::ObjectStyle {
+    let style = doc.element(element).and_then(|d| d.style).unwrap();
     doc.object_style(style).unwrap()
 }
 
 /// A deck built with nothing but the 0.3 API, one of everything.
-fn deck() -> (Document, [u64; 5]) {
+fn deck() -> (Document, [iwork::ElementId; 5]) {
     let mut doc = Document::new(Kind::Keynote).unwrap();
     let title = doc
         .add_text_style(
@@ -117,7 +117,7 @@ fn values_become_what_they_describe() {
     assert_eq!(look.stroke.unwrap().width, 0.0);
     assert_eq!(frame_of(&doc, card), ((120.0, 320.0), (700.0, 500.0)));
 
-    let storage = doc.drawable(words).unwrap().text.unwrap();
+    let storage = doc.element(words).unwrap().text.unwrap();
     assert_eq!(doc.storage_text(storage).unwrap(), "Umsatz plus 18 %");
     let style = style_of(&doc, words);
     assert_eq!(
@@ -263,7 +263,7 @@ fn a_handle_edits_what_is_there() {
         .unwrap()
         .set("Neu")
         .unwrap();
-    let storage = doc.drawable(words).unwrap().text.unwrap();
+    let storage = doc.element(words).unwrap().text.unwrap();
     assert_eq!(doc.storage_text(storage).unwrap(), "Neu");
 
     let mut handle = doc.chart_mut(chart).unwrap();

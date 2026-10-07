@@ -1149,15 +1149,16 @@ fn add_build(
         }
     };
     let mut doc = Document::open(path)?;
-    let build = doc.add_build(
-        slide,
-        drawable,
-        &BuildEdit {
-            kind,
-            effect: effect.unwrap_or_default().to_string(),
-            ..Default::default()
-        },
-    )?;
+    let build = doc
+        .slide_mut(iwork::keynote::SlideRef::Identifier(slide))?
+        .add_build_with(
+            drawable,
+            &BuildEdit {
+                kind,
+                effect: effect.unwrap_or_default().to_string(),
+                ..Default::default()
+            },
+        )?;
     doc.save(out)?;
     println!(
         "added build {build}: drawable {drawable} animates {} with {}",
@@ -2147,12 +2148,12 @@ fn tables(path: &str) -> Result<(), Error> {
 
 fn drawables(path: &str) -> Result<(), Error> {
     let doc = Document::open(path)?;
-    let all = doc.drawables();
+    let all = doc.elements();
     if all.is_empty() {
         println!("no drawables");
         return Ok(());
     }
-    let by_id: BTreeMap<u64, &iwork::Drawable> = all.iter().map(|d| (d.identifier, d)).collect();
+    let by_id: BTreeMap<u64, &iwork::ElementInfo> = all.iter().map(|d| (d.identifier, d)).collect();
     let mut place = String::new();
 
     for drawable in &all {
@@ -2374,7 +2375,7 @@ fn media(path: &str) -> Result<(), Error> {
         println!("no media");
         return Ok(());
     }
-    let drawables = doc.drawables();
+    let drawables = doc.elements();
     for file in &files {
         let users: Vec<String> = drawables
             .iter()
@@ -2442,7 +2443,7 @@ fn set_geometry(
 
     let mut doc = Document::open(path)?;
     let before = doc
-        .drawable(identifier)
+        .element(identifier)
         .ok_or(Error::NoSuchObject(identifier))?;
     if before.locked {
         println!("note: drawable {identifier} is locked, so the app will not let a user move it");
@@ -3124,7 +3125,7 @@ fn set_cell(
 
 /// Write a CSV file into a table at a corner — the batch write, from a shell.
 ///
-/// The inverse of `iwork csv`, and the reason [`Document::set_block`] exists:
+/// The inverse of `iwork csv`, and the reason [`crate::document::TableMut::set_block`] exists:
 /// a table of data arrives as rows, not as one cell at a time. Values take the
 /// same `n:`/`b:`/`d:` prefixes `set-cell` does, so a column of numbers is
 /// `n:1,n:2,n:3`; an empty field leaves the cell alone rather than clearing it,
@@ -3150,7 +3151,7 @@ fn set_cells(
         );
     }
     let mut doc = Document::open(path)?;
-    let written = doc.set_block(table, at, &rows)?;
+    let written = doc.table_mut(table)?.set_block(at, &rows)?;
     println!(
         "table {table}: {written} cell(s) written from {csv} at {}; rewrote {}",
         reference_name(at.0, at.1),
@@ -3481,9 +3482,9 @@ fn delete_line(path: &str, table: &str, at: usize, row: bool, out: &str) -> Resu
     let mut doc = Document::open(path)?;
     let (rows, columns) = find_table_size(&doc, table)?;
     if row {
-        doc.delete_row(table, at)?;
+        doc.table_mut(table)?.delete_row(at)?;
     } else {
-        doc.delete_column(table, at)?;
+        doc.table_mut(table)?.delete_column(at)?;
     }
     println!(
         "table {table}: deleted {} {at} ({}×{} -> {}×{}); rewrote {}",
@@ -3536,7 +3537,7 @@ fn unmerge(path: &str, table: &str, row: usize, column: usize, out: &str) -> Res
 fn insert_row(path: &str, table: &str, at: usize, out: &str) -> Result<(), Error> {
     let mut doc = Document::open(path)?;
     let before = find_table_rows(&doc, table)?;
-    doc.insert_row(table, at)?;
+    doc.table_mut(table)?.insert_row(at)?;
     println!(
         "table {table}: inserted an empty row at index {at} ({} -> {} rows); rewrote {}",
         before,
@@ -3550,7 +3551,7 @@ fn insert_row(path: &str, table: &str, at: usize, out: &str) -> Result<(), Error
 fn insert_column(path: &str, table: &str, at: usize, out: &str) -> Result<(), Error> {
     let mut doc = Document::open(path)?;
     let before = find_table_size(&doc, table)?.1;
-    doc.insert_column(table, at)?;
+    doc.table_mut(table)?.insert_column(at)?;
     println!(
         "table {table}: inserted an empty column at index {at} ({} -> {} columns); rewrote {}",
         before,
@@ -4027,7 +4028,9 @@ fn set_style(path: &str, id: u64, assignment: &str, out: &str) -> Result<(), Err
 
 fn delete_style(path: &str, id: u64, replacement: Option<u64>, out: &str) -> Result<(), Error> {
     let mut doc = Document::open(path)?;
-    let deleted = doc.text_style_mut(id)?.delete(replacement)?;
+    let deleted = doc
+        .text_style_mut(id)?
+        .delete(replacement.map(Into::into))?;
     println!(
         "deleted style {id}: {} run(s) repointed, {} dropped, {} stylesheet entries removed",
         deleted.runs_repointed, deleted.runs_dropped, deleted.registrations_removed

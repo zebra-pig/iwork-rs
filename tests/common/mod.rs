@@ -97,7 +97,9 @@ pub trait Flat {
         style: u64,
         replace_with: Option<u64>,
     ) -> Result<StyleDeletion, Error> {
-        self.doc().text_style_mut(style)?.delete(replace_with)
+        self.doc()
+            .text_style_mut(style)?
+            .delete(replace_with.map(Into::into))
     }
 
     // -- cells --------------------------------------------------------------
@@ -188,6 +190,49 @@ pub trait Flat {
         self.doc().table_mut(table)?.unmerge((row, column))
     }
 
+    fn insert_row(&mut self, table: &str, at: usize) -> Result<(), Error> {
+        self.doc().table_mut(table)?.insert_row(at)
+    }
+    fn delete_row(&mut self, table: &str, at: usize) -> Result<(), Error> {
+        self.doc().table_mut(table)?.delete_row(at)
+    }
+    fn insert_column(&mut self, table: &str, at: usize) -> Result<(), Error> {
+        self.doc().table_mut(table)?.insert_column(at)
+    }
+    fn delete_column(&mut self, table: &str, at: usize) -> Result<(), Error> {
+        self.doc().table_mut(table)?.delete_column(at)
+    }
+    fn set_block(
+        &mut self,
+        table: &str,
+        at: (usize, usize),
+        rows: &[Vec<CellValue>],
+    ) -> Result<usize, Error> {
+        self.doc().table_mut(table)?.set_block(at, rows)
+    }
+    fn add_table(
+        &mut self,
+        container: &str,
+        name: &str,
+        rows: usize,
+        columns: usize,
+    ) -> Result<u64, Error> {
+        self.doc()
+            .canvas_mut(container)?
+            .add(Table::new(name, rows, columns))
+            .map(Into::into)
+    }
+    fn add_build(
+        &mut self,
+        identifier: u64,
+        element: u64,
+        edit: &iwork::keynote::BuildEdit,
+    ) -> Result<u64, Error> {
+        self.doc()
+            .slide_mut(slide(identifier))?
+            .add_build_with(element, edit)
+    }
+
     // -- things on a slide, a sheet or a page -------------------------------
     fn add_table_at(
         &mut self,
@@ -198,7 +243,7 @@ pub trait Flat {
         position: (f32, f32),
     ) -> Result<u64, Error> {
         let table = Table::new(name, rows, columns).at(position.0, position.1);
-        self.doc().canvas_mut(container)?.add(table)
+        self.doc().canvas_mut(container)?.add(table).map(Into::into)
     }
     fn add_text_box(
         &mut self,
@@ -210,7 +255,10 @@ pub trait Flat {
         let text_box = TextBox::new(text)
             .at(position.0, position.1)
             .size(size.0, size.1);
-        self.doc().canvas_mut(container)?.add(text_box)
+        self.doc()
+            .canvas_mut(container)?
+            .add(text_box)
+            .map(Into::into)
     }
     fn add_shape(
         &mut self,
@@ -224,7 +272,7 @@ pub trait Flat {
             .text(text)
             .at(position.0, position.1)
             .size(size.0, size.1);
-        self.doc().canvas_mut(container)?.add(shape)
+        self.doc().canvas_mut(container)?.add(shape).map(Into::into)
     }
     fn add_image(
         &mut self,
@@ -238,7 +286,7 @@ pub trait Flat {
         if let Some((width, height)) = size {
             image = image.size(width, height);
         }
-        self.doc().canvas_mut(container)?.add(image)
+        self.doc().canvas_mut(container)?.add(image).map(Into::into)
     }
     fn new_chart(
         &mut self,
@@ -259,7 +307,7 @@ pub trait Flat {
             });
             chart = chart.series(name.clone(), values);
         }
-        self.doc().canvas_mut(container)?.add(chart)
+        self.doc().canvas_mut(container)?.add(chart).map(Into::into)
     }
     fn add_chart(
         &mut self,
@@ -348,17 +396,22 @@ impl Flat for Document {
 
 /// The same for the slide handle's own shortcuts.
 pub trait FlatSlide {
+    fn add_table(&mut self, name: &str, rows: usize, columns: usize) -> Result<u64, Error>;
     fn add_text_box(&mut self, text: &str, frame: Frame) -> Result<u64, Error>;
     fn add_image(&mut self, bytes: &[u8], name: &str, frame: Frame) -> Result<u64, Error>;
     fn background_gradient(&mut self, gradient: &Gradient) -> Result<(), Error>;
 }
 
 impl FlatSlide for iwork::document::SlideMut<'_> {
+    fn add_table(&mut self, name: &str, rows: usize, columns: usize) -> Result<u64, Error> {
+        self.add(Table::new(name, rows, columns)).map(Into::into)
+    }
     fn add_text_box(&mut self, text: &str, frame: Frame) -> Result<u64, Error> {
-        self.add(TextBox::new(text).frame(frame))
+        self.add(TextBox::new(text).frame(frame)).map(Into::into)
     }
     fn add_image(&mut self, bytes: &[u8], name: &str, frame: Frame) -> Result<u64, Error> {
         self.add(Image::new(bytes).named(name).frame(frame))
+            .map(Into::into)
     }
     fn background_gradient(&mut self, gradient: &Gradient) -> Result<(), Error> {
         self.background(gradient.clone())

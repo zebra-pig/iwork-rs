@@ -44,6 +44,70 @@ mod sealed {
     pub trait Sealed {}
 }
 
+/// An identifier that says what it identifies.
+///
+/// Every object in a document has a number, and a number says nothing: a
+/// style's and a shape's are both `u64`, and handing one where the other was
+/// meant used to compile. `add` returns an [`ElementId`] and
+/// [`Document::add_text_style`] a [`StyleId`]; what takes one says which.
+///
+/// A plain `u64` — what the snapshots (`doc.elements()`, `doc.text_styles()`)
+/// and the low level speak — converts into either, and either converts back
+/// with `.get()` or `u64::from`.
+macro_rules! identifier {
+    ($(#[$doc:meta])* $name:ident) => {
+        $(#[$doc])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        pub struct $name(u64);
+
+        impl $name {
+            /// The object identifier itself.
+            pub const fn get(self) -> u64 {
+                self.0
+            }
+        }
+
+        impl From<u64> for $name {
+            fn from(identifier: u64) -> $name {
+                $name(identifier)
+            }
+        }
+
+        impl From<$name> for u64 {
+            fn from(identifier: $name) -> u64 {
+                identifier.0
+            }
+        }
+
+        impl PartialEq<u64> for $name {
+            fn eq(&self, other: &u64) -> bool {
+                self.0 == *other
+            }
+        }
+
+        impl PartialEq<$name> for u64 {
+            fn eq(&self, other: &$name) -> bool {
+                *self == other.0
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    };
+}
+
+identifier!(
+    /// A shape, a text box, an image, a table or a chart in a document.
+    ElementId
+);
+identifier!(
+    /// A named text style in a document.
+    StyleId
+);
+
 /// Something that can be put on a slide, a sheet or a page: [`Shape`],
 /// [`TextBox`], [`Image`], [`Chart`] — and a reference to any of them, so a
 /// value kept in a variable can be added more than once.
@@ -226,7 +290,7 @@ impl Element for Shape {
 pub struct TextBox {
     text: String,
     place: Place,
-    style: Option<u64>,
+    style: Option<StyleId>,
     looks: Vec<(Option<Range<u64>>, TextLook)>,
 }
 
@@ -244,8 +308,8 @@ impl TextBox {
 
     /// Set every paragraph in a named style — one
     /// [`Document::add_text_style`] returned, or any the document has.
-    pub fn style(mut self, style: u64) -> TextBox {
-        self.style = Some(style);
+    pub fn style(mut self, style: impl Into<StyleId>) -> TextBox {
+        self.style = Some(style.into());
         self
     }
 
@@ -279,7 +343,7 @@ impl Element for TextBox {
         }
         let mut text = document.element_mut(made)?.into_text()?;
         if let Some(style) = self.style {
-            text.style(0..length, style)?;
+            text.style(0..length, style.get())?;
         }
         for (range, look) in &self.looks {
             text.format(range.clone().unwrap_or(0..length), look)?;
@@ -580,8 +644,8 @@ impl<'a> ElementMut<'a> {
         ElementMut { document, element }
     }
 
-    pub fn identifier(&self) -> u64 {
-        self.element
+    pub fn identifier(&self) -> ElementId {
+        ElementId(self.element)
     }
 
     /// What it is filled with. The first paint gives it a style of its own,
@@ -640,7 +704,7 @@ impl<'a> ElementMut<'a> {
 
     fn storage(&self) -> Result<u64, Error> {
         self.document
-            .drawable(self.element)
+            .element(self.element)
             .and_then(|drawable| drawable.text)
             .ok_or_else(|| {
                 Error::refused(
@@ -662,8 +726,8 @@ impl<'a> ChartMut<'a> {
         ChartMut { document, chart }
     }
 
-    pub fn identifier(&self) -> u64 {
-        self.chart
+    pub fn identifier(&self) -> ElementId {
+        ElementId(self.chart)
     }
 
     /// Replace the numbers it draws, keeping its kind and its look. The
@@ -712,8 +776,10 @@ impl<'a> CanvasMut<'a> {
 
     /// Put a [`Shape`], a [`TextBox`], an [`Image`] or a [`Chart`] here, and
     /// get its identifier. A refused `add` leaves the document as it was.
-    pub fn add(&mut self, element: impl Element) -> Result<u64, Error> {
-        self.document.add_element(&self.container, &element)
+    pub fn add(&mut self, element: impl Element) -> Result<ElementId, Error> {
+        self.document
+            .add_element(&self.container, &element)
+            .map(ElementId)
     }
 }
 
@@ -729,8 +795,8 @@ impl<'a> TextStyleMut<'a> {
         TextStyleMut { document, style }
     }
 
-    pub fn identifier(&self) -> u64 {
-        self.style
+    pub fn identifier(&self) -> StyleId {
+        StyleId(self.style)
     }
 
     /// Change what the [`TextLook`] sets, and leave the rest of the style.
@@ -757,7 +823,11 @@ impl<'a> TextStyleMut<'a> {
 
     /// Delete the style, pointing the text that used it at `replace_with` or
     /// at nothing.
-    pub fn delete(self, replace_with: Option<u64>) -> Result<crate::style::StyleDeletion, Error> {
-        self.document.delete_text_style(self.style, replace_with)
+    pub fn delete(
+        self,
+        replace_with: Option<StyleId>,
+    ) -> Result<crate::style::StyleDeletion, Error> {
+        self.document
+            .delete_text_style(self.style, replace_with.map(StyleId::get))
     }
 }

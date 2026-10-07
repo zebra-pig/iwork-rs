@@ -62,11 +62,11 @@ public type is one or the other.
   (`doc.slide_mut(0)?`, `doc.chart_mut(id)?`).
 
 Reading is a third, older thing: `doc.slides()`, `doc.charts()`,
-`doc.drawables()` return plain snapshot structs. **A snapshot is named
+`doc.elements()` return plain snapshot structs. **A snapshot is named
 `…Info`**, so the bare noun is free for the value: `Chart` is what you build,
 `ChartInfo` is what `doc.charts()` tells you. `ChartInfo`, `TextStyleInfo` and
-`TableInfo` were renamed in 0.3.0; `Slide`, `Drawable` and the rest follow
-in 0.4.
+`TableInfo` were renamed in 0.3.0; `ElementInfo` (was `Drawable`), `SlideInfo` and
+`SheetInfo` in 0.4.0.
 
 ## The rules
 
@@ -76,7 +76,7 @@ in 0.4.
    A value with no size takes its natural one (an image its pixels, a table
    its rows) or a stated default; a value with no position goes to the
    container's origin.
-   `add` returns the new element's identifier.
+   `add` returns the new element's identifier, an `ElementId`.
 2. **Builders consume and return `Self`.** `Chart::new(kind).title("x")` is an
    expression, so it can sit inside `slide.add(…)`. `add` takes `impl Element`
    and `&T` is an `Element` wherever `T` is, so a value kept in a variable can
@@ -144,28 +144,28 @@ doc.text_mut(id)?      .set() .insert() .delete() .replace() .style() .format()
 doc.text_style_mut(id)? .look() .align() .rename() .property() .delete()
 ```
 
-## Getting there
+## How it got here
 
-0.3.0 is the breaking release. What 0.2 called something keeps working for
-one minor version behind `#[deprecated(note = "use …")]`, so 0.2 code compiles
-with warnings that name the replacement; 0.4 removes it.
+| release | what |
+|---|---|
+| 0.3.0 | values + `add`; one `Fill`; `TextLook` and typed `TextStyle`; handles for elements, charts, tables, text and text styles; snapshots `ChartInfo`, `TextStyleInfo`, `TableInfo`. Every flat function on `Document` that a handle covers deprecated, with the replacement named. |
+| 0.4.0 | The flat layer **removed** from the public API, with `CellText` and the 0.2 aliases: there is one way to do each thing. Snapshots `ElementInfo` (`doc.elements()`), `SlideInfo`, `SheetInfo`. Typed identifiers: `add` returns an `ElementId`, `add_text_style` a `StyleId`. The `iwork` binary goes through the handles like any other caller. |
 
-| phase | what | state |
-|---|---|---|
-| 1 | values + `add` for slides, sheets and pages: `Shape`, `TextBox`, `Image`, `Chart`; one `Fill`; `Color` helpers; typed `TextStyle`; `element_mut` and `chart_mut` | **0.3.0** |
-| 2 | `Table` with its rows, at the crate root (`table::Table` → `TableInfo`); table cells take `Fill` and `TextLook`; handles renamed `…Mut` | **0.3.0** |
-| 3 | `text_style_mut`; every flat function on `Document` that a handle covers is deprecated; the cookbook, the README and the examples speak only the new API | **0.3.0** |
-| 4 | typed identifiers (`ElementId`, `StyleId`) in place of `u64`; the remaining snapshots renamed `…Info` (`Slide`, `Drawable`, `Sheet`); `CellText` retired; the deprecated layer removed | 0.4.0 |
-
-Not migrated, on purpose: the `iwork` binary. It is part of this crate and
-sits on the flat layer the handles themselves sit on; it moves when that
-layer is made private in 0.4. And what has no handle yet stays undeprecated
-on `Document` — `set_cells`, `fill_formula`, `set_filter_enabled`,
+Still flat on `Document`, because no handle is yet the better home:
+`set_cells`, `fill_formula`, `set_filter_enabled`,
 `set_conditional_threshold`, `bind_chart`, `copy_chart`, `add_comment`,
-`replace_media`, the Pages structure — until a handle is the better home.
+`replace_media`, `set_geometry`, `create_text_style`,
+`copy_text_style_property`, `update_text_style`, `add_slide`, `add_sheet`
+and the Pages structure. Each moves when it gets a handle method, and by
+rule 1 of the checklist below nothing new is added there.
 
-Phase by phase the cookbook is rewritten first: if a recipe reads badly, the
-API is wrong, and that is cheaper to find before the code exists.
+Identifiers a snapshot reports are still `u64` — `ElementInfo::identifier`,
+`TextStyleInfo::identifier` — and convert into the typed ones. Typing them at
+the source is the next step, with a `StorageId` for text.
+
+**The tests written against the flat calls still run**, through
+`tests/common`, which spells each old call as the handle call it became. So
+every one of them now tests a handle.
 
 ## Checklist for a new capability
 

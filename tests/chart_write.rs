@@ -238,7 +238,7 @@ fn a_copied_chart_owns_what_was_private_and_shares_the_theme() {
     );
     // It is on the page it was put on, at the rectangle it was given, and a
     // Pages page owns nothing — so no parent.
-    let drawable = doc.drawable(chart).unwrap();
+    let drawable = doc.element(chart).unwrap();
     assert_eq!(drawable.parent, None);
     assert_eq!(
         drawable.placement,
@@ -267,7 +267,7 @@ fn a_slide_owns_a_chart_copied_onto_it() {
             (400.0, 300.0),
         )
         .unwrap();
-    assert_eq!(doc.drawable(chart).unwrap().parent, Some(slide));
+    assert_eq!(doc.element(chart).unwrap().parent, Some(slide));
     assert!(doc.problems().is_empty(), "{:?}", doc.problems());
 }
 

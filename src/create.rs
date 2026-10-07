@@ -2440,7 +2440,7 @@ const TYPE_KEYNOTE_THEME: u32 = 10;
 /// — the app holding a show slide where it wanted a master — and none of the
 /// obvious answers was the answer. Not the message type: 5 and 6 carry the same
 /// message and Keynote's own decks write masters at 5. Not `inDocument`, true
-/// on both. Not the component name, `TemplateSlide` against `Slide`, which this
+/// on both. Not the component name, `TemplateSlide` against `SlideInfo`, which this
 /// already wrote. Not the placeholders. What separates a master from a show
 /// slide in every deck in the corpus is that a master has `name` (field 10) and
 /// names no `template_slide`, and a show slide is the other way round — and

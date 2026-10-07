@@ -125,18 +125,17 @@ for storage in doc.text_storages() {
 // hyperlinks, list levels, anchored drawables, comment anchors. Indices are
 // UTF-16 code units, and an edit that would split a surrogate pair or delete
 // the character an object hangs off is refused by name.
-doc.insert_text(6083, 12, "eingeschoben ")?;
-doc.delete_text(6083, 40..55)?;
-doc.set_text(6083, "A new headline")?;                                 // a full-range replace
+let mut text = doc.text_mut(6083)?;
+text.insert(12, "eingeschoben ")?;
+text.delete(40..55)?;
+text.set("A new headline")?;                                           // a full-range replace
 
-// Text styles, by copy-and-adjust
+// Text styles: named, shared, made from typed values
 for style in doc.text_styles() {
     println!("{} {} {:?}", style.identifier, style.kind.as_str(), style.name);
 }
-let kicker = doc.create_text_style(3712, "Kicker")?;                    // copy one that works
-doc.set_text_style_property(kicker.identifier, style::property::FONT_SIZE,
-                            Some(Value::Fixed32(18f32.to_le_bytes())))?;
-doc.apply_text_style(6083, 0..8, kicker.identifier)?;                   // UTF-16 code units
+let kicker = doc.add_text_style(&TextStyle::new("Kicker").look(TextLook::new().size(18.0)))?;
+doc.text_mut(6083)?.style(0..8, kicker)?;                               // UTF-16 code units
 
 doc.save("Report-edited.pages")?;
 ```
@@ -147,13 +146,13 @@ apps:
 
 ```rust
 let mut doc = iwork::Document::new(iwork::Kind::Pages)?;
-doc.append_paragraph("Aus dem Nichts")?;
-doc.append_paragraph("A second paragraph, and the first one keeps its style")?;
+doc.body_mut()?.append("Aus dem Nichts")?;
+doc.body_mut()?.append("A second paragraph, and the first one keeps its style")?;
 doc.save("Made.pages")?;                       // Pages opens it, and resaves it
 
 // A spreadsheet, sized as you like, with every cell writable from the start.
 let mut sheet = iwork::Document::new_spreadsheet("Sales", "Q1", 4, 3)?;
-sheet.set_cell("Q1", 0, 0, iwork::table::CellValue::Text("Region".into()))?;
+sheet.table_mut("Q1")?.set("A1", "Region")?;
 sheet.save("Sales.numbers")?;
 
 let deck = iwork::Document::new(iwork::Kind::Keynote)?;   // one slide, one master
@@ -452,7 +451,7 @@ setting the companion means "explicitly nothing". Those are different documents.
 the fill drawn inside the glyphs, and the underline and strikethrough colours
 that follow the text — Pages writes all of them together, and **the fill is what
 gets drawn**. Setting only `red`/`green`/`blue` leaves the fill behind, and the
-text renders in its old colour. Use `set_text_style_color`, or `iwork set-color`,
+text renders in its old colour. Use `text_style_mut(id)?.look(&TextLook::new().colour(c))`, or `iwork set-color`,
 which writes every one the style keeps:
 
 ```
@@ -601,8 +600,8 @@ one table of names serves all three apps.
 
 ```rust
 let doc = iwork::Document::open("Talk.key")?;
-for drawable in doc.drawables() {
-    let mask = drawable.mask().and_then(|id| doc.drawable(id));
+for drawable in doc.elements() {
+    let mask = drawable.mask().and_then(|id| doc.element(id));
     let frame = drawable.frame(mask.as_ref());          // what the app reports
     println!("{} {} at {},{} {}×{} — {}", drawable.identifier,
              drawable.kind.as_str(), frame.x, frame.y, frame.width, frame.height,
@@ -1023,7 +1022,7 @@ ones the effect *has*, false values included, so they are read as optionals —
 `apple:scale` carries `custom_bounce` = false, which is not the same as having
 no bounce at all.
 
-**A transition can be given, changed and taken away.** `Document::set_transition`
+**A transition can be given, changed and taken away.** `slide.transition_with(…)`
 writes the effect, its duration, its delay and its automatic flag, and updates
 the node's `has_transition` beside it — a deck with one but not the other plays
 what its outline does not show. "No transition" is not the field's absence:
@@ -1272,10 +1271,10 @@ fuzzing story rather than half of it.
   where the style lives. Without the second, iWork never loads the style — and
   the failure is *quiet*: one such document opened in Pages with the paragraph
   simply unstyled, as though nothing had been done, and another crashed on open.
-  `apply_text_style` and `create_text_style` maintain the declarations;
+  `text.style(…)` and `create_text_style` maintain the declarations;
   `iwork check` reports any that are missing.
 - **A formula can be written from its text, and its answer cannot.**
-  `set_formula` parses `=SUM(B2:B4)` and writes the node stream the app writes —
+  `table.formula(…)` parses `=SUM(B2:B4)` and writes the node stream the app writes —
   every node copied from one Numbers wrote for the same formula, down to the
   list node a parenthesis needs and the `5: 1` on every colon tract — and
   registers the cell in the calculation engine so the app recalculates it. What
@@ -1312,7 +1311,7 @@ fuzzing story rather than half of it.
   level and produces text nobody will ever see: measured, by appending a
   paragraph to `pages-layout.pages`, opening it in Pages and asking for every
   word in the document — forty lines came back and the new paragraph was not
-  among them. So `append_paragraph` and `body_mut` refuse on such a document and
+  among them. So `body_mut` refuses on such a document and
   say why; `add_text_box` is how words get onto its pages, and the storage
   itself is still reachable by identifier for a caller who means exactly that.
 - **A row or column can be deleted, and the refusal list is longer than the
@@ -1333,14 +1332,14 @@ fuzzing story rather than half of it.
   under the *name and value of the cell the merge began in*, and that is the
   check — `A1 A1` across a row is a 1×2 merge at A1.
 - **A data format is written into the slot the value uses, and nowhere else.**
-  `set_format` gives a cell a number, percent, scientific, currency or date
+  `table.format(…)` gives a cell a number, percent, scientific, currency or date
   format — the archive being the one the app wrote for the same format, down to
   the `253` that means "as many decimals as it takes". What it will not do is
   put a format in another slot: a currency format on a plain number cell is
   ignored by Numbers, drawn as a plain number, so it is refused rather than
   written into a file where it would sit and never show. The slot follows the
   *value's type*, so making a number into a currency is a value write —
-  `set_currency` is that write, and the money it makes is drawn as money.
+  `table.currency(…)` is that write, and the money it makes is drawn as money.
   Column
   widths and row heights are one float each and the app reports them back
   exactly; the table's frame is deliberately untouched, because the app lays a
@@ -1368,7 +1367,7 @@ fuzzing story rather than half of it.
   Keynote create a group or a movie, so nothing here writes one; the archives
   are decoded and carried through. Live video sources, recorded presentations
   and pencil annotations are on the never-author list by design.
-- **Cells are written in place, one or many at a time.** `set_cell` changes one
+- **Cells are written in place, one or many at a time.** `table.set(…)` changes one
   value; `set_cells` and `set_block` write a batch, and the batch is not just
   sugar. A cell lives in its row's `TileRowInfo` and names strings and formats
   in table-wide lists, so writing a table one cell at a time decodes and

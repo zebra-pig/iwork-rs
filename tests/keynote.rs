@@ -1143,7 +1143,7 @@ fn a_copied_image_slide_shares_its_media() {
         .find(|s| {
             s.drawables
                 .iter()
-                .any(|d| doc.drawable(*d).is_some_and(|d| d.media.is_some()))
+                .any(|d| doc.element(*d).is_some_and(|d| d.media.is_some()))
         })
         .expect("keynote-deck has an image slide")
         .identifier;

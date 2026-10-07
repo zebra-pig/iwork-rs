@@ -12,8 +12,8 @@
 //! type is a handful of named paragraph styles, made once.
 
 use iwork::{
-    Chart, ChartKind, Color, Document, Gradient, Kind, Shadow, Shape, Table, TextBox, TextLook,
-    TextStyle,
+    Chart, ChartKind, Color, Document, Gradient, Kind, Shadow, Shape, StyleId, Table, TextBox,
+    TextLook, TextStyle,
 };
 
 struct Region {
@@ -58,10 +58,10 @@ const INK: Color = Color::rgb8(0x1E, 0x1E, 0x1E);
 
 /// The paragraph styles the deck is set in, by role.
 struct Type {
-    kicker: u64,
-    title: u64,
-    figure: u64,
-    label: u64,
+    kicker: StyleId,
+    title: StyleId,
+    figure: StyleId,
+    label: StyleId,
 }
 
 fn main() -> Result<(), iwork::Error> {

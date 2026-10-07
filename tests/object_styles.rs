@@ -56,7 +56,7 @@ const BLACK: Color = Color {
 };
 
 fn fill_of(doc: &Document, drawable: u64) -> Option<Fill> {
-    doc.drawables()
+    doc.elements()
         .into_iter()
         .find(|d| d.identifier == drawable)
         .and_then(|d| d.style)
@@ -90,13 +90,13 @@ fn painting_a_drawable_gives_it_a_style_of_its_own() {
         .unwrap();
 
     let shared = deck
-        .drawables()
+        .elements()
         .into_iter()
         .find(|d| d.identifier == a)
         .and_then(|d| d.style)
         .expect("a shape points at a style");
     assert_eq!(
-        deck.drawables()
+        deck.elements()
             .into_iter()
             .find(|d| d.identifier == b)
             .and_then(|d| d.style),
@@ -108,7 +108,7 @@ fn painting_a_drawable_gives_it_a_style_of_its_own() {
     deck.set_object_fill(b, Some(BLUE)).unwrap();
 
     let style_of = |doc: &Document, id: u64| {
-        doc.drawables()
+        doc.elements()
             .into_iter()
             .find(|d| d.identifier == id)
             .and_then(|d| d.style)
@@ -156,7 +156,7 @@ fn painting_twice_reuses_the_style_it_already_owns() {
 
     deck.set_object_fill(shape, Some(RED)).unwrap();
     let first = deck
-        .drawables()
+        .elements()
         .into_iter()
         .find(|d| d.identifier == shape)
         .and_then(|d| d.style)
@@ -167,7 +167,7 @@ fn painting_twice_reuses_the_style_it_already_owns() {
     deck.set_object_fill(shape, Some(BLUE)).unwrap();
 
     let second = deck
-        .drawables()
+        .elements()
         .into_iter()
         .find(|d| d.identifier == shape)
         .and_then(|d| d.style)
@@ -374,7 +374,7 @@ fn looks() -> (Document, [u64; 3]) {
 }
 
 fn style_of(doc: &Document, drawable: u64) -> iwork::drawable::ObjectStyle {
-    let style = doc.drawable(drawable).and_then(|d| d.style).unwrap();
+    let style = doc.element(drawable).and_then(|d| d.style).unwrap();
     doc.object_style(style).unwrap()
 }
 

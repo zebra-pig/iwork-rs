@@ -81,21 +81,19 @@
 //! // Editing text remaps everything anchored into the storage — style runs,
 //! // hyperlinks, list levels, anchored drawables ([`text`]). Indices are
 //! // UTF-16 code units.
-//! doc.insert_text(6083, 12, "eingeschoben ")?;
-//! doc.delete_text(6083, 40..55)?;
-//! doc.set_text(6083, "A new headline")?;
+//! let mut text = doc.text_mut(6083)?;
+//! text.insert(12, "eingeschoben ")?;
+//! text.delete(40..55)?;
+//! text.set("A new headline")?;
 //!
 //! // Text styles are shared objects a range of text points at ([`style`]).
 //! for style in doc.text_styles() {
 //!     println!("{} {} {:?}", style.identifier, style.kind.as_str(), style.name);
 //! }
-//! let kicker = doc.create_text_style(3712, "Kicker")?;
-//! doc.set_text_style_property(
-//!     kicker.identifier,
-//!     iwork::style::property::FONT_SIZE,
-//!     Some(iwork::pb::Value::Fixed32(18f32.to_le_bytes())),
+//! let kicker = doc.add_text_style(
+//!     &iwork::TextStyle::new("Kicker").look(iwork::TextLook::new().size(18.0)),
 //! )?;
-//! doc.apply_text_style(6083, 0..8, kicker.identifier)?;
+//! doc.text_mut(6083)?.style(0..8, kicker)?;
 //!
 //! doc.save("Report-edited.pages")?;
 //! # Ok(()) }
@@ -112,7 +110,7 @@
 //! | | |
 //! |---|---|
 //! | [`document`] | [`Document`] itself, and the handles: [`document::TableMut`], [`document::TextMut`], [`document::SlideMut`] |
-//! | [`table`] | cells, values, formats, ranges, sheets — [`table::CellValue`], [`table::CellRef`], [`table::CellRange`], [`table::Format`], [`table::Sheet`] |
+//! | [`table`] | cells, values, formats, ranges, sheets — [`table::CellValue`], [`table::CellRef`], [`table::CellRange`], [`table::Format`], [`table::SheetInfo`] |
 //! | [`text`] | what an edit to a storage has to remap, and the rules it obeys |
 //! | [`style`] | text styles, which are shared objects a range of text points at |
 //! | [`keynote`] | the show: slides, layouts, transitions, builds, playback |
@@ -185,13 +183,13 @@ pub use annotations::{Annotations, Author, Change, Comment};
 pub use chart::{ChartInfo, ChartKind, DataReferences, Grid, GridValue, Series};
 pub use document::{Component, DataFile, Document, Kind, TextEdit, TextStorage};
 pub use drawable::{Color, Fill, Frame, Gradient, ImageFit, Outline, Shadow};
-pub use drawable::{Drawable, Geometry, Placement};
+pub use drawable::{ElementInfo, Geometry, Placement};
 pub use element::{
-    CanvasMut, Chart, ChartMut, Element, ElementMut, Image, Shape, Table, TextBox, TextStyle,
-    TextStyleMut,
+    CanvasMut, Chart, ChartMut, Element, ElementId, ElementMut, Image, Shape, StyleId, Table,
+    TextBox, TextStyle, TextStyleMut,
 };
 pub use formula::{Ast, Formula, Node, Reference};
-pub use keynote::{Layout, Placeholder, Show, Slide, SlideCopy, Transition};
+pub use keynote::{Layout, Placeholder, Show, SlideCopy, SlideInfo, Transition};
 pub use media::MediaReplacement;
 pub use package::{Form, Package};
 pub use style::{CreatedStyle, Label, StyleDeletion, StyleKind, StyleUse, TextStyleInfo};

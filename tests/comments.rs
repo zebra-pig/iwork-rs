@@ -14,6 +14,10 @@
 //! 0**, whatever the comment does: a table whose first entry is anywhere else
 //! leaves the characters before it with no attribute at all.
 
+mod common;
+#[allow(unused_imports)]
+use common::{Flat, FlatSlide};
+
 use std::path::{Path, PathBuf};
 
 use iwork::annotations::CommentEdit;

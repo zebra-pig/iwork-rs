@@ -61,6 +61,10 @@
 //! With no fixtures in the tree the seeds are the synthetic ones below, so a
 //! fresh clone still fuzzes; with the corpus present every fixture is a seed.
 
+mod common;
+#[allow(unused_imports)]
+use common::{Flat, FlatSlide};
+
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -390,7 +394,7 @@ fn read_everything(doc: &mut Document) {
     let _ = doc.text_styles();
     let _ = doc.problems();
     let _ = doc.undeclared_references();
-    let _ = doc.drawables();
+    let _ = doc.elements();
     let _ = doc.charts();
     let _ = doc.structure();
     let _ = doc.sections();
@@ -469,7 +473,7 @@ fn read_everything(doc: &mut Document) {
         let _ = slide.title;
         let _ = slide.transition;
     }
-    for drawable in doc.drawables() {
+    for drawable in doc.elements() {
         let _ = doc.object_style(drawable.identifier);
     }
     // And the write path, on a document whose bytes are nonsense: re-encoding

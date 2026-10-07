@@ -1025,10 +1025,10 @@ pub enum CellValue {
 /// **Not a grid.** A sheet holds a *list of drawables* — any number of tables,
 /// and charts, shapes, images and text boxes beside them — which is the one
 /// place a Numbers document refuses to be modelled the way a spreadsheet
-/// usually is. [`Sheet::tables`] picks the tables out of that list; the list
+/// usually is. [`SheetInfo::tables`] picks the tables out of that list; the list
 /// itself is what the sheet actually holds, in the order it holds them.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Sheet {
+pub struct SheetInfo {
     /// The `TN.SheetArchive` object.
     pub identifier: u64,
     /// The name on the tab.
@@ -1037,7 +1037,7 @@ pub struct Sheet {
     pub drawables: Vec<u64>,
 }
 
-impl Sheet {
+impl SheetInfo {
     /// The tables on this sheet, in the order the sheet holds them.
     ///
     /// Reading a table decodes it, so this is a document-wide read filtered to
@@ -1061,7 +1061,7 @@ impl Sheet {
 }
 
 /// Every sheet of a Numbers document, in the order the document lists them.
-pub fn sheets(document: &crate::Document) -> Vec<Sheet> {
+pub fn sheets(document: &crate::Document) -> Vec<SheetInfo> {
     if document.kind() != crate::Kind::Numbers {
         return Vec::new();
     }
@@ -1082,7 +1082,7 @@ pub fn sheets(document: &crate::Document) -> Vec<Sheet> {
         let Some(archive) = archive(document, identifier) else {
             continue;
         };
-        out.push(Sheet {
+        out.push(SheetInfo {
             identifier,
             name: archive
                 .bytes(sheet_field::NAME)
@@ -1144,6 +1144,12 @@ impl<'a> From<(&'a str, &'a str)> for TableRef<'a> {
 impl From<u64> for TableRef<'_> {
     fn from(identifier: u64) -> TableRef<'static> {
         TableRef::Identifier(identifier)
+    }
+}
+
+impl From<crate::element::ElementId> for TableRef<'_> {
+    fn from(identifier: crate::element::ElementId) -> TableRef<'static> {
+        TableRef::Identifier(identifier.get())
     }
 }
 

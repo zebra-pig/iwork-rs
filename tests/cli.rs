@@ -5,6 +5,10 @@
 //! the ones a wrong argument is easiest to give — so these run the built
 //! binary on documents made from nothing and read the result back.
 
+mod common;
+#[allow(unused_imports)]
+use common::{Flat, FlatSlide};
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -112,7 +116,7 @@ fn a_shape_and_a_slide_are_painted_from_the_shell() {
     ]);
     let doc = Document::open(&c).unwrap();
     let shape = doc
-        .drawables()
+        .elements()
         .into_iter()
         .find(|d| d.text.is_some())
         .expect("the shape")
@@ -131,7 +135,7 @@ fn a_shape_and_a_slide_are_painted_from_the_shell() {
     let doc = Document::open(&d).unwrap();
     assert!(doc.problems().is_empty(), "{:?}", doc.problems());
     let drawable = doc
-        .drawables()
+        .elements()
         .into_iter()
         .find(|d| d.identifier.to_string() == shape)
         .unwrap();

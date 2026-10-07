@@ -290,9 +290,13 @@ impl TextMut<'_> {
     /// is for [`crate::document::TextMut::replace`]. Clamping it instead is how
     /// `500..600` came to restyle the only paragraph of a 54-unit body and
     /// report success.
-    pub fn style(&mut self, range: Range<u64>, style: u64) -> Result<(), Error> {
+    pub fn style(
+        &mut self,
+        range: Range<u64>,
+        style: impl Into<crate::element::StyleId>,
+    ) -> Result<(), Error> {
         self.document
-            .apply_text_style(self.storage, range, style)
+            .apply_text_style(self.storage, range, style.into().get())
             .map(|_| ())
     }
 
@@ -341,7 +345,7 @@ impl SlideMut<'_> {
     }
 
     /// The slide as it is now.
-    pub fn read(&self) -> crate::keynote::Slide {
+    pub fn read(&self) -> crate::keynote::SlideInfo {
         self.document
             .slides()
             .into_iter()
@@ -451,9 +455,14 @@ impl SlideMut<'_> {
     /// Put a [`Shape`](crate::Shape), a [`TextBox`](crate::TextBox), an
     /// [`Image`](crate::Image) or a [`Chart`](crate::Chart) on this slide,
     /// and get its identifier. A refused `add` leaves the document as it was.
-    pub fn add(&mut self, element: impl crate::element::Element) -> Result<u64, Error> {
+    pub fn add(
+        &mut self,
+        element: impl crate::element::Element,
+    ) -> Result<crate::element::ElementId, Error> {
         let slide = self.slide.to_string();
-        self.document.add_element(&slide, &element)
+        self.document
+            .add_element(&slide, &element)
+            .map(crate::element::ElementId::from)
     }
 
     /// Give the slide a transition — by the app's name for the effect or by the
@@ -493,12 +502,12 @@ impl SlideMut<'_> {
     /// the rest, and note that a *build* effect is not a transition effect.
     pub fn add_build(
         &mut self,
-        drawable: u64,
+        element: impl Into<crate::element::ElementId>,
         kind: crate::keynote::BuildKind,
     ) -> Result<u64, Error> {
         self.document.add_build(
             self.slide,
-            drawable,
+            element.into().get(),
             &crate::keynote::BuildEdit {
                 kind,
                 ..Default::default()
@@ -506,10 +515,15 @@ impl SlideMut<'_> {
         )
     }
 
-    /// Put a table on the slide.
-    pub fn add_table(&mut self, name: &str, rows: usize, columns: usize) -> Result<u64, Error> {
-        let slide = self.slide.to_string();
-        self.document.add_table(&slide, name, rows, columns)
+    /// The same as [`SlideMut::add_build`], saying everything a build has: its
+    /// effect, its duration, how it is delivered.
+    pub fn add_build_with(
+        &mut self,
+        element: impl Into<crate::element::ElementId>,
+        edit: &crate::keynote::BuildEdit,
+    ) -> Result<u64, Error> {
+        self.document
+            .add_build(self.slide, element.into().get(), edit)
     }
 }
 
@@ -560,7 +574,7 @@ impl TableMut<'_> {
     ///
     /// The batch write: one pass over each tile, each list and each header
     /// bucket however many cells are given, and all or nothing if one is
-    /// refused. See [`Document::set_block`].
+    /// refused.
     pub fn set_block<V: Into<CellValue> + Clone>(
         &mut self,
         at: impl Into<crate::table::CellRef>,
@@ -835,7 +849,7 @@ impl TableMut<'_> {
     /// **The rules are not the order of the rows.** Numbers keeps them as *what
     /// to sort by* and applies them when asked — through Sort Now, or
     /// continuously when the table is set to sort itself. Nothing here moves a
-    /// row: [`Document::insert_row`] and [`Document::delete_row`] are what do
+    /// row: [`crate::document::TableMut::insert_row`] and [`crate::document::TableMut::delete_row`] are what do
     /// that, and a table whose rows this crate reorders would disagree with its
     /// own rules the moment the app looked.
     ///
@@ -1595,7 +1609,7 @@ impl Document {
     /// ```no_run
     /// # fn main() -> Result<(), iwork::Error> {
     /// let mut doc = iwork::Document::new(iwork::Kind::Pages)?;
-    /// doc.append_paragraph("Hello")?;
+    /// doc.body_mut()?.append("Hello")?;
     /// doc.save("Hello.pages")?;
     ///
     /// let sheet = iwork::Document::new(iwork::Kind::Numbers)?;
@@ -1668,9 +1682,8 @@ impl Document {
     ///
     /// ```no_run
     /// # fn main() -> Result<(), iwork::Error> {
-    /// use iwork::table::CellValue;
     /// let mut doc = iwork::Document::new_spreadsheet("Sales", "Q1", 4, 3)?;
-    /// doc.set_cell("Q1", 0, 0, CellValue::Text("Region".into()))?;
+    /// doc.table_mut("Q1")?.set("A1", "Region")?;
     /// doc.save("Sales.numbers")?;
     /// # Ok(()) }
     /// ```
@@ -2401,7 +2414,7 @@ impl Document {
     /// charts, shapes, images and text boxes beside them. Two tables on one
     /// sheet is ordinary, and they may share nothing but the page they are
     /// drawn on. So this reports the sheet and what is on it, and
-    /// [`crate::table::Sheet::tables`] narrows that list to the tables rather than pretending
+    /// [`crate::table::SheetInfo::tables`] narrows that list to the tables rather than pretending
     /// the sheet is one.
     ///
     /// Pages and Keynote have no sheets — a table there hangs off a page or a
@@ -2418,12 +2431,12 @@ impl Document {
     /// }
     /// # Ok(()) }
     /// ```
-    pub fn sheets(&self) -> Vec<crate::table::Sheet> {
+    pub fn sheets(&self) -> Vec<crate::table::SheetInfo> {
         crate::table::sheets(self)
     }
 
     /// One sheet by name or by identifier.
-    pub fn sheet(&self, wanted: &str) -> Option<crate::table::Sheet> {
+    pub fn sheet(&self, wanted: &str) -> Option<crate::table::SheetInfo> {
         let by_id: Option<u64> = wanted.parse().ok();
         self.sheets()
             .into_iter()
@@ -2526,7 +2539,7 @@ impl Document {
     /// five-column table changes three cells — because a value nobody gave is
     /// not the same as a value someone cleared. Pass [`CellValue::Empty`] to
     /// clear.
-    pub fn set_block(
+    pub(crate) fn set_block(
         &mut self,
         wanted: &str,
         at: (usize, usize),
@@ -3825,7 +3838,15 @@ impl Document {
         let tables = self.tables();
         let matches: Vec<&crate::table::TableInfo> = match wanted {
             TableRef::Identifier(id) => tables.iter().filter(|t| t.identifier == *id).collect(),
-            TableRef::Name(name) => tables.iter().filter(|t| t.name == *name).collect(),
+            // By name — or, where no table has that name, by the identifier
+            // written out, which is how a command line names one.
+            TableRef::Name(name) => {
+                let named: Vec<_> = tables.iter().filter(|t| t.name == *name).collect();
+                match (named.is_empty(), name.parse::<u64>()) {
+                    (true, Ok(id)) => tables.iter().filter(|t| t.identifier == id).collect(),
+                    _ => named,
+                }
+            }
             TableRef::On(sheet, name) => tables
                 .iter()
                 .filter(|t| t.name == *name && t.sheet.as_deref() == Some(*sheet))
@@ -4776,7 +4797,7 @@ impl Document {
     /// **The rules are not the order of the rows.** Numbers keeps them as *what
     /// to sort by* and applies them when asked — through Sort Now, or
     /// continuously when the table is set to sort itself. Nothing here moves a
-    /// row: [`Document::insert_row`] and [`Document::delete_row`] are what do
+    /// row: [`crate::document::TableMut::insert_row`] and [`crate::document::TableMut::delete_row`] are what do
     /// that, and a table whose rows this crate reorders would disagree with its
     /// own rules the moment the app looked.
     ///
@@ -4862,7 +4883,7 @@ impl Document {
     ///
     /// So this writes what the Organise pane shows, and nothing else. Clearing
     /// the hidden state as well would mean rewriting the UUID-keyed extent that
-    /// [`Document::insert_row`] refuses to maintain for exactly the same
+    /// [`crate::document::TableMut::insert_row`] refuses to maintain for exactly the same
     /// reason.
     pub fn set_filter_enabled(
         &mut self,
@@ -5413,7 +5434,7 @@ impl Document {
     ///   point — inserting a row shifts what those references mean, and rewriting
     ///   a `TSCE` AST is a phase of its own;
     /// * an object the write would touch that carries version patches.
-    pub fn insert_row(&mut self, wanted: &str, at: usize) -> Result<(), Error> {
+    pub(crate) fn insert_row(&mut self, wanted: &str, at: usize) -> Result<(), Error> {
         let table = self.table_for_write(wanted)?;
         let where_ = format!("{}: insert row at {at}", table.name);
 
@@ -6114,7 +6135,7 @@ impl Document {
 
     /// Delete row `at`, with everything in it.
     ///
-    /// The mirror of [`Document::insert_row`] and then some: a deleted row
+    /// The mirror of [`crate::document::TableMut::insert_row`] and then some: a deleted row
     /// takes its cells with it, and a cell's **references have to be given
     /// back** — every string, format and control key it held — or the list's
     /// reference counts stop matching the cells that point at them, which is
@@ -6132,19 +6153,19 @@ impl Document {
     /// table with hidden or collapsed rows, a merge at or below the row, a row
     /// holding a formula, any formula anywhere that names the row or a range
     /// across it, and any object carrying version patches.
-    pub fn delete_row(&mut self, wanted: &str, at: usize) -> Result<(), Error> {
+    pub(crate) fn delete_row(&mut self, wanted: &str, at: usize) -> Result<(), Error> {
         self.delete_line(wanted, at, true)
     }
 
     /// Delete column `at`, with everything in it.
     ///
-    /// The column half of [`Document::delete_row`], and the same asymmetry an
+    /// The column half of [`crate::document::TableMut::delete_row`], and the same asymmetry an
     /// insert has: a row is an object and a column is one entry in every row's
     /// offset array, so this rewrites every row of every tile — slice at the
     /// offsets, drop the slot, lay the row back out. The array keeps the length
     /// it arrived with, a `-1` taking the place at the end, because the padding
     /// is what a reader steps through.
-    pub fn delete_column(&mut self, wanted: &str, at: usize) -> Result<(), Error> {
+    pub(crate) fn delete_column(&mut self, wanted: &str, at: usize) -> Result<(), Error> {
         self.delete_line(wanted, at, false)
     }
 
@@ -6450,7 +6471,7 @@ impl Document {
 
     /// Insert an empty column before index `at`; `at == columns` appends.
     ///
-    /// Transactional the same way [`Document::insert_row`] is: the whole write
+    /// Transactional the same way [`crate::document::TableMut::insert_row`] is: the whole write
     /// is planned, and every case this crate cannot maintain safely is refused
     /// by name, before a byte moves.
     ///
@@ -6474,7 +6495,7 @@ impl Document {
     /// hidden columns; a merge at or straddling the insertion; any formula
     /// whose reference to this table names a column at or after it; and any
     /// object the write would touch that carries version patches.
-    pub fn insert_column(&mut self, wanted: &str, at: usize) -> Result<(), Error> {
+    pub(crate) fn insert_column(&mut self, wanted: &str, at: usize) -> Result<(), Error> {
         let table = self.table_for_write(wanted)?;
         let where_ = format!("{}: insert column at {at}", table.name);
 
@@ -6985,7 +7006,7 @@ impl Document {
     /// Locate every object a row insert rewrites and build each one's new form.
     ///
     /// Pure: it reads the document and returns the archives to store, so
-    /// [`Document::insert_row`] can prove the whole write before applying any of
+    /// [`crate::document::TableMut::insert_row`] can prove the whole write before applying any of
     /// it. Every fallible step — tiles that do not run 0, 1, 2…, a table that
     /// fills them, a missing UUID map, a
     /// hidden-state extent that keys rows — refuses here.
@@ -7326,7 +7347,7 @@ impl Document {
     ///
     /// See [`crate::drawable`] for what a drawable is made of and why the
     /// enumeration does not assume how deep the geometry sits.
-    pub fn drawables(&self) -> Vec<crate::drawable::Drawable> {
+    pub fn elements(&self) -> Vec<crate::drawable::ElementInfo> {
         crate::drawable::drawables(self)
     }
 
@@ -7398,18 +7419,26 @@ impl Document {
 
     /// A shape, a text box, an image or a chart, to change: its fill, its
     /// outline, its shadow, where it is, its text.
-    pub fn element_mut(&mut self, element: u64) -> Result<crate::element::ElementMut<'_>, Error> {
-        if self.drawable(element).is_none() {
+    pub fn element_mut(
+        &mut self,
+        element: impl Into<crate::element::ElementId>,
+    ) -> Result<crate::element::ElementMut<'_>, Error> {
+        let element = element.into().get();
+        if self.element(element).is_none() {
             return Err(Error::refused(
                 Refusal::NotFound,
-                format!("no element {element} — `doc.drawables()` lists the ones there are"),
+                format!("no element {element} — `doc.elements()` lists the ones there are"),
             ));
         }
         Ok(crate::element::ElementMut::new(self, element))
     }
 
     /// A chart, to change: its numbers, its title, its legend.
-    pub fn chart_mut(&mut self, chart: u64) -> Result<crate::element::ChartMut<'_>, Error> {
+    pub fn chart_mut(
+        &mut self,
+        chart: impl Into<crate::element::ElementId>,
+    ) -> Result<crate::element::ChartMut<'_>, Error> {
+        let chart = chart.into().get();
         if !self.charts().iter().any(|found| found.identifier == chart) {
             return Err(Error::refused(
                 Refusal::NotFound,
@@ -7456,7 +7485,10 @@ impl Document {
     /// The style is the document's body style with what the
     /// [`crate::TextStyle`] says changed, and the app offers it in its style
     /// menu under its name.
-    pub fn add_text_style(&mut self, style: &crate::element::TextStyle) -> Result<u64, Error> {
+    pub fn add_text_style(
+        &mut self,
+        style: &crate::element::TextStyle,
+    ) -> Result<crate::element::StyleId, Error> {
         let paragraph_styles: Vec<_> = self
             .text_styles()
             .into_iter()
@@ -7485,7 +7517,7 @@ impl Document {
             self.streams = streams;
             self.package = package;
         }
-        made
+        made.map(crate::element::StyleId::from)
     }
 
     /// Write what a [`TextLook`](crate::TextLook) sets, and an alignment,
@@ -7544,8 +7576,9 @@ impl Document {
     /// A named text style, to change: its look, its alignment, its name.
     pub fn text_style_mut(
         &mut self,
-        style: u64,
+        style: impl Into<crate::element::StyleId>,
     ) -> Result<crate::element::TextStyleMut<'_>, Error> {
+        let style = style.into().get();
         if self.text_style(style).is_none() {
             return Err(Error::NoSuchStyle(style));
         }
@@ -7553,8 +7586,12 @@ impl Document {
     }
 
     /// One drawable by object identifier.
-    pub fn drawable(&self, identifier: u64) -> Option<crate::drawable::Drawable> {
-        self.drawables()
+    pub fn element(
+        &self,
+        identifier: impl Into<crate::element::ElementId>,
+    ) -> Option<crate::drawable::ElementInfo> {
+        let identifier = identifier.into().get();
+        self.elements()
             .into_iter()
             .find(|d| d.identifier == identifier)
     }
@@ -7620,7 +7657,7 @@ impl Document {
     /// the style chain.
     ///
     /// The identifier is the style, not the drawable — take it from
-    /// [`crate::drawable::Drawable::style`]. Its siblings that *write*
+    /// [`crate::drawable::ElementInfo::style`]. Its siblings that *write*
     /// ([`crate::element::ElementMut::fill`] and the rest) take a drawable instead,
     /// because painting one gives it a style of its own; this reads whatever
     /// the drawable currently points at.
@@ -7677,9 +7714,9 @@ impl Document {
         use crate::drawable::Frame;
 
         let drawable = self
-            .drawable(identifier)
+            .element(identifier)
             .ok_or(Error::NoSuchObject(identifier))?;
-        let mask = drawable.mask().and_then(|id| self.drawable(id));
+        let mask = drawable.mask().and_then(|id| self.element(id));
         let before = drawable.frame(mask.as_ref());
         for object in [Some(identifier), mask.as_ref().map(|m| m.identifier)]
             .into_iter()
@@ -7719,7 +7756,7 @@ impl Document {
         // The requested rectangle is the *reported* one, whose origin is the
         // rotated bounding box's corner. Turn it back into the unrotated
         // origin the archive stores, which is the inverse of what
-        // `Drawable::frame` does and is the identity at zero degrees.
+        // `ElementInfo::frame` does and is the identity at zero degrees.
         let (extent_x, extent_y) =
             crate::drawable::rotated_extent(after.width, after.height, drawable.geometry.angle);
         let base = Frame {
@@ -7852,7 +7889,7 @@ impl Document {
         use crate::drawable::image_field;
         use crate::media::{self, field as data_field};
 
-        let drawables = self.drawables();
+        let drawables = self.elements();
         let data = match drawables
             .iter()
             .find(|d| d.identifier == target)
@@ -7871,7 +7908,7 @@ impl Document {
         // The edit state first, and before anything else that could refuse:
         // it is the answer a caller most needs to hear, and a theme asset that
         // is *also* cropped should say so.
-        let users: Vec<&crate::drawable::Drawable> = drawables
+        let users: Vec<&crate::drawable::ElementInfo> = drawables
             .iter()
             .filter(|d| d.media.as_ref().and_then(|m| m.data) == Some(data))
             .collect();
@@ -8111,7 +8148,7 @@ impl Document {
     /// drawn in the frame's coordinates, which is the case for a line.
     fn scale_path_source(
         &mut self,
-        drawable: &crate::drawable::Drawable,
+        drawable: &crate::drawable::ElementInfo,
         width: f32,
         height: f32,
     ) -> Result<(), Error> {
@@ -8214,7 +8251,11 @@ impl Document {
         out
     }
 
-    pub fn text_style(&self, identifier: u64) -> Option<TextStyleInfo> {
+    pub fn text_style(
+        &self,
+        identifier: impl Into<crate::element::StyleId>,
+    ) -> Option<TextStyleInfo> {
+        let identifier = identifier.into().get();
         self.text_styles()
             .into_iter()
             .find(|s| s.identifier == identifier)
@@ -8480,7 +8521,7 @@ impl Document {
     /// # let mut doc = iwork::Document::open("Report.pages")?;
     /// use iwork::style::property;
     /// doc.copy_text_style_property(3712, 3801, property::FONT_COLOR)?;
-    /// doc.set_text_style_property(3801, property::RED,
+    /// doc.text_style_mut(3801)?.property(property::RED,
     ///     Some(iwork::pb::Value::Fixed32(0.85f32.to_le_bytes())))?;
     /// # Ok(()) }
     /// ```
@@ -9061,7 +9102,7 @@ impl Document {
     }
 
     /// The slides of a Keynote document, in deck order.
-    pub fn slides(&self) -> Vec<crate::keynote::Slide> {
+    pub fn slides(&self) -> Vec<crate::keynote::SlideInfo> {
         self.show().map(|s| s.slides).unwrap_or_default()
     }
 
@@ -9094,24 +9135,6 @@ impl Document {
         slide: u64,
     ) -> Result<crate::keynote::SlideCopy, Error> {
         crate::keynote::duplicate_slide(self, slide)
-    }
-
-    /// Add a table to a sheet a Numbers document already has.
-    ///
-    /// The sheet is named by its object identifier or by its name. The table
-    /// borrows the styles a table already in the document uses, so it looks
-    /// like its neighbours rather than like something invented here — and a
-    /// document with no table at all is refused for exactly that reason.
-    ///
-    /// Every cell of it can be written from the start.
-    pub fn add_table(
-        &mut self,
-        sheet: &str,
-        name: &str,
-        rows: usize,
-        columns: usize,
-    ) -> Result<u64, Error> {
-        self.add_table_at(sheet, name, rows, columns, (0.0, 0.0))
     }
 
     /// The same, anywhere a drawable can go — a Numbers sheet, a Keynote
@@ -9249,7 +9272,7 @@ impl Document {
     ///
     /// See [`crate::keynote::add_build`]: the effect is a *build* identifier,
     /// not a transition one, and the drawable has to be on the slide.
-    pub fn add_build(
+    pub(crate) fn add_build(
         &mut self,
         slide: u64,
         drawable: u64,
@@ -9304,7 +9327,7 @@ impl Document {
     /// deck.save("Deck-with-one-more.key")?;
     /// # Ok(()) }
     /// ```
-    pub fn add_slide(&mut self, layout: Option<u64>) -> Result<crate::keynote::Slide, Error> {
+    pub fn add_slide(&mut self, layout: Option<u64>) -> Result<crate::keynote::SlideInfo, Error> {
         crate::keynote::add_slide(self, layout)
     }
 
@@ -10290,7 +10313,7 @@ impl Document {
             }
         }
 
-        let drawables = self.drawables();
+        let drawables = self.elements();
         for drawable in &drawables {
             if let Some(parent) = drawable.parent {
                 if self.object(parent).is_none() {
@@ -10301,7 +10324,7 @@ impl Document {
                 }
             }
             if let Some(mask) = drawable.mask() {
-                match self.drawable(mask) {
+                match self.element(mask) {
                     Some(mask_drawable) if mask_drawable.parent == Some(drawable.identifier) => {}
                     Some(mask_drawable) => problems.push(format!(
                         "image {} is masked by {mask}, whose parent is {:?}",

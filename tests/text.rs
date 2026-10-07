@@ -255,7 +255,7 @@ fn text_that_anchors_an_object_is_not_replaced() {
 
     // The photo is anchored at character 12 of the body storage.
     let anchor = doc
-        .drawables()
+        .elements()
         .into_iter()
         .filter_map(|d| match d.placement {
             // The photo, at character 12. The report's table is anchored too,
@@ -991,7 +991,7 @@ fn the_app_opens_an_edited_document_and_reads_the_new_words_back() {
         .unwrap()
         .identifier;
     let places: Vec<(u64, f32, f32)> = before
-        .drawables()
+        .elements()
         .iter()
         .map(|d| (d.identifier, d.geometry.x, d.geometry.y))
         .collect();
@@ -1002,7 +1002,7 @@ fn the_app_opens_an_edited_document_and_reads_the_new_words_back() {
     let after = Document::open(&out).unwrap();
     assert_eq!(
         after
-            .drawables()
+            .elements()
             .iter()
             .map(|d| (d.identifier, d.geometry.x, d.geometry.y))
             .collect::<Vec<_>>(),
@@ -1022,7 +1022,7 @@ fn the_app_opens_an_edited_document_and_reads_the_new_words_back() {
     // edit to one would come back as "the app did not read it" when the app was
     // never going to.
     let shape = doc
-        .drawables()
+        .elements()
         .into_iter()
         .filter(|d| d.stream.contains("/Slide-"))
         .filter_map(|d| d.text)
@@ -1754,7 +1754,7 @@ fn a_formatted_run_is_a_variation_of_the_null_character_style() {
             },
         )
         .unwrap();
-    let storage = doc.drawable(made).and_then(|d| d.text).unwrap();
+    let storage = doc.element(made).and_then(|d| d.text).unwrap();
     let mut text = doc.text_mut(storage).unwrap();
     text.format(0..3, &TextLook::new().bold()).unwrap();
     text.format(8..13, &TextLook::new().bold()).unwrap();
@@ -1840,7 +1840,7 @@ fn the_apps_draw_a_word_with_a_look_of_its_own() {
             },
         )
         .unwrap();
-    let boxed = keynote.drawable(made).and_then(|d| d.text).unwrap();
+    let boxed = keynote.element(made).and_then(|d| d.text).unwrap();
 
     for (mut doc, storage, name) in [
         (pages, storage, "iwork-words.pages"),

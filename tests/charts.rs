@@ -23,6 +23,10 @@
 //! Without `tests/fixtures/generated` these pass having asserted nothing and
 //! say so — `scripts/make-fixtures.sh` builds it.
 
+mod common;
+#[allow(unused_imports)]
+use common::{Flat, FlatSlide};
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 

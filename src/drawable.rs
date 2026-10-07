@@ -23,7 +23,7 @@
 //! therefore `image.position + mask.position` and `mask.size` — verified
 //! against Pages, which reports 60 × 123, 475 × 383 for an image whose archive
 //! says 33.86 × 66.28, 511.86 × 466.13 and whose mask says 25.89 × 56.52,
-//! 475 × 383. [`Drawable::frame`] is that composition.
+//! 475 × 383. [`ElementInfo::frame`] is that composition.
 //!
 //! **A container holds its drawables, and one of the three does not.** A
 //! Keynote slide and a Numbers sheet each list what is on them and are named
@@ -905,7 +905,7 @@ impl Placement {
 
 /// One placed object.
 #[derive(Debug, Clone)]
-pub struct Drawable {
+pub struct ElementInfo {
     pub identifier: u64,
     pub stream: String,
     pub message_type: u32,
@@ -946,13 +946,13 @@ pub struct Drawable {
     pub pencil_annotations: Vec<u64>,
 }
 
-impl Drawable {
+impl ElementInfo {
     /// The object's rectangle before rotation, in its parent's space.
     ///
     /// For everything but a masked image that is the geometry. For a masked
     /// image it is the mask's window moved into the parent's space, because the
     /// mask hangs off the image and its position is relative to it.
-    pub fn base_rect(&self, mask: Option<&Drawable>) -> Frame {
+    pub fn base_rect(&self, mask: Option<&ElementInfo>) -> Frame {
         match mask {
             Some(mask) => Frame {
                 x: self.geometry.x + mask.geometry.x,
@@ -990,7 +990,7 @@ impl Drawable {
     /// whose real height only exists once the text has been laid out. Keynote
     /// reports such a text box 58 points above where the archive puts it and
     /// 115 points tall. [`Geometry::fits_its_text`] says when that is the case.
-    pub fn frame(&self, mask: Option<&Drawable>) -> Frame {
+    pub fn frame(&self, mask: Option<&ElementInfo>) -> Frame {
         let base = self.base_rect(mask);
         let (width, height) = rotated_extent(base.width, base.height, self.geometry.angle);
         Frame {
@@ -1157,7 +1157,7 @@ pub fn natural_rectangle(width: f32, height: f32) -> Message {
 }
 
 /// Read every drawable in a document.
-pub fn drawables(document: &crate::Document) -> Vec<Drawable> {
+pub fn drawables(document: &crate::Document) -> Vec<ElementInfo> {
     let containers = containers(document);
     let mut out = Vec::new();
 
@@ -1308,7 +1308,7 @@ pub fn drawables(document: &crate::Document) -> Vec<Drawable> {
             .map(|(_, z)| *z)
             .unwrap_or(0);
 
-        out.push(Drawable {
+        out.push(ElementInfo {
             identifier: object.identifier,
             stream: stream.to_string(),
             message_type,
@@ -2048,7 +2048,7 @@ fn text_box_style(document: &crate::Document) -> Option<u64> {
     if let Some((_, object)) = themed {
         return Some(object.identifier);
     }
-    for drawable in document.drawables() {
+    for drawable in document.elements() {
         if drawable.text.is_some() {
             if let Some(style) = drawable.style {
                 return Some(style);
@@ -2252,7 +2252,7 @@ pub(crate) fn hold(
 /// image preset. A `TSD.MediaStyleArchive` is not a shape style and the two
 /// number their properties differently, so a shape style will not do.
 fn image_style(document: &crate::Document) -> Option<u64> {
-    for drawable in document.drawables() {
+    for drawable in document.elements() {
         if drawable.kind == Kind::Image {
             if let Some(style) = drawable.style {
                 return Some(style);
@@ -2522,7 +2522,7 @@ fn style_field(kind: Kind) -> Option<u32> {
 /// How many drawables in the document point at this style.
 fn users_of(document: &crate::Document, style: u64) -> usize {
     document
-        .drawables()
+        .elements()
         .iter()
         .filter(|d| d.style == Some(style))
         .count()
@@ -2566,7 +2566,7 @@ fn is_variation(document: &crate::Document, style: u64) -> bool {
 ///
 /// That is what this makes, once, the first time a drawable is painted.
 fn own_style(document: &mut crate::Document, drawable: u64) -> Result<u64, crate::Error> {
-    let Some(found) = document.drawable(drawable) else {
+    let Some(found) = document.element(drawable) else {
         return Err(crate::Error::refused(
             crate::Refusal::NotFound,
             format!("no drawable {drawable} in this document"),

@@ -19,6 +19,10 @@
 //! not swapped, because the result would open, report the same geometry and
 //! draw the wrong thing.
 
+mod common;
+#[allow(unused_imports)]
+use common::{Flat, FlatSlide};
+
 use std::path::{Path, PathBuf};
 
 use iwork::drawable::{self, Kind};
@@ -82,7 +86,7 @@ fn every_drawable_has_a_geometry_at_a_depth_nobody_assumed() {
     let mut depths = std::collections::BTreeMap::new();
     for path in every_fixture() {
         let doc = Document::open(&path).unwrap();
-        for drawable in doc.drawables() {
+        for drawable in doc.elements() {
             seen += 1;
             *depths.entry(drawable.path.len()).or_insert(0usize) += 1;
             assert!(
@@ -121,7 +125,7 @@ fn every_geometry_re_encodes_to_the_bytes_it_came_from() {
     let mut seen = 0usize;
     for path in every_fixture() {
         let doc = Document::open(&path).unwrap();
-        for drawable in doc.drawables() {
+        for drawable in doc.elements() {
             let (_, object) = doc.object(drawable.identifier).unwrap();
             let archive = Message::decode(object.payload()).unwrap();
             let mut at: Vec<u32> = drawable.path.clone();
@@ -158,12 +162,12 @@ fn a_masked_image_is_framed_by_its_mask() {
     let path = fixture!("pages-report.pages");
     let doc = Document::open(&path).unwrap();
     let image = doc
-        .drawables()
+        .elements()
         .into_iter()
         .find(|d| d.kind == Kind::Image)
         .expect("the report has a photo");
     let mask = doc
-        .drawable(image.mask().expect("the photo is cropped"))
+        .element(image.mask().expect("the photo is cropped"))
         .unwrap();
 
     // What the archive says.
@@ -188,7 +192,7 @@ fn a_rotated_shape_is_framed_by_its_bounding_box() {
     let path = fixture!("keynote-shapes.key");
     let doc = Document::open(&path).unwrap();
     let turned = doc
-        .drawables()
+        .elements()
         .into_iter()
         .find(|d| d.geometry.angle != 0.0 && d.geometry.height == 180.0)
         .expect("the fixture has a shape turned 30 degrees");
@@ -203,7 +207,7 @@ fn a_rotated_shape_is_framed_by_its_bounding_box() {
     // A line is the same rule with a zero-height rectangle: stored at
     // 93.84 × 650, 412.31 wide at 346°, reported at 100 × 600.
     let line = doc
-        .drawables()
+        .elements()
         .into_iter()
         .find(|d| {
             d.path_source
@@ -224,7 +228,7 @@ fn a_variation_style_inherits_what_it_does_not_override() {
     let path = fixture!("keynote-shapes.key");
     let doc = Document::open(&path).unwrap();
     let faded = doc
-        .drawables()
+        .elements()
         .into_iter()
         .filter(|d| d.kind == Kind::Shape)
         .find_map(|d| {
@@ -252,7 +256,7 @@ fn a_shape_owns_its_text_storage() {
     let path = fixture!("keynote-shapes.key");
     let doc = Document::open(&path).unwrap();
     let said: Vec<String> = doc
-        .drawables()
+        .elements()
         .into_iter()
         .filter(|d| d.kind == Kind::Shape)
         .filter_map(|d| d.text)
@@ -277,7 +281,7 @@ fn live_video_sources_are_read_and_named() {
     let path = fixture!("keynote-deck.key");
     let doc = Document::open(&path).unwrap();
     let movies: Vec<_> = doc
-        .drawables()
+        .elements()
         .into_iter()
         .filter(|d| d.kind == Kind::Movie)
         .collect();
@@ -313,7 +317,7 @@ fn alt_text_is_read_wherever_the_corpus_has_it() {
     for path in every_fixture() {
         let doc = Document::open(&path).unwrap();
         let described: Vec<_> = doc
-            .drawables()
+            .elements()
             .into_iter()
             .filter(|d| d.description.is_some())
             .collect();
@@ -383,7 +387,7 @@ fn moving_a_drawable_rewrites_only_the_stream_it_lives_in() {
 
     let mut doc = Document::open(&path).unwrap();
     let shape = doc
-        .drawables()
+        .elements()
         .into_iter()
         .find(|d| d.kind == Kind::Shape && d.geometry.width == 300.0)
         .expect("the fixture has a 300-point shape");
@@ -420,7 +424,7 @@ fn resizing_a_masked_image_scales_the_whole_assembly() {
     let path = fixture!("pages-report.pages");
     let mut doc = Document::open(&path).unwrap();
     let image = doc
-        .drawables()
+        .elements()
         .into_iter()
         .find(|d| d.kind == Kind::Image)
         .unwrap();
@@ -435,8 +439,8 @@ fn resizing_a_masked_image_scales_the_whole_assembly() {
         .unwrap();
     assert_eq!(change.mask, Some(mask));
 
-    let after = doc.drawable(image.identifier).unwrap();
-    let after_mask = doc.drawable(mask).unwrap();
+    let after = doc.element(image.identifier).unwrap();
+    let after_mask = doc.element(mask).unwrap();
     let scale = 300.0 / 475.0;
 
     assert!(
@@ -470,7 +474,7 @@ fn resizing_a_masked_image_scales_the_whole_assembly() {
     // agree on what it does fill it with, so there is nothing to rewrite it to.
     let before = Document::open(&path).unwrap();
     let before_original = before
-        .drawable(image.identifier)
+        .element(image.identifier)
         .unwrap()
         .media
         .unwrap()
@@ -489,7 +493,7 @@ fn a_geometry_write_leaves_every_other_object_alone() {
     let before = Document::open(&path).unwrap();
     let mut after = Document::open(&path).unwrap();
     let shape = after
-        .drawables()
+        .elements()
         .into_iter()
         .find(|d| d.kind == Kind::Shape && d.geometry.width == 300.0)
         .unwrap();
@@ -521,7 +525,7 @@ fn replacing_media_brings_the_registry_and_the_drawables_into_step() {
     let path = fixture!("keynote-shapes.key");
     let mut doc = Document::open(&path).unwrap();
     let image = doc
-        .drawables()
+        .elements()
         .into_iter()
         .find(|d| d.kind == Kind::Image && d.mask().is_none())
         .expect("the fixture has an uncropped image");
@@ -559,7 +563,7 @@ fn replacing_media_brings_the_registry_and_the_drawables_into_step() {
 
     // The drawable's natural size follows the picture, and it is marked as
     // replaced — which is the flag Keynote sets when it does this itself.
-    let after = doc.drawable(image.identifier).unwrap();
+    let after = doc.element(image.identifier).unwrap();
     let media = after.media.as_ref().unwrap();
     assert_eq!(media.natural_size, Some((4.0, 4.0)));
     assert!(media.was_replaced());
@@ -575,7 +579,7 @@ fn replacing_media_refuses_an_image_that_is_cropped() {
     let path = fixture!("keynote-shapes.key");
     let mut doc = Document::open(&path).unwrap();
     let cropped = doc
-        .drawables()
+        .elements()
         .into_iter()
         .find(|d| d.kind == Kind::Image && d.edit_state.as_ref().is_some_and(|state| state.crops))
         .expect("the fixture has a cropped image");
@@ -612,7 +616,7 @@ fn a_crop_slid_to_the_origin_is_still_a_crop() {
     let path = fixture!("keynote-shapes.key");
     let mut doc = Document::open(&path).unwrap();
     let image = doc
-        .drawables()
+        .elements()
         .into_iter()
         .find(|d| d.kind == Kind::Image && d.mask().is_some())
         .expect("the fixture has a masked image");
@@ -621,7 +625,7 @@ fn a_crop_slid_to_the_origin_is_still_a_crop() {
     // The window is 160 × 120 on a 160 × 160 picture. Move it to the origin,
     // keeping its size — it still shows less than the whole picture.
     doc.set_geometry(mask, Some((0.0, 0.0)), None).unwrap();
-    let after = doc.drawable(image.identifier).unwrap();
+    let after = doc.element(image.identifier).unwrap();
     let state = after.edit_state.as_ref().unwrap();
     assert!(
         state.crops,
@@ -648,7 +652,7 @@ fn a_window_that_is_the_whole_picture_does_not_crop() {
     let path = fixture!("keynote-shapes.key");
     let mut doc = Document::open(&path).unwrap();
     let image = doc
-        .drawables()
+        .elements()
         .into_iter()
         .find(|d| d.kind == Kind::Image && d.mask().is_some())
         .expect("the fixture has a masked image");
@@ -656,7 +660,7 @@ fn a_window_that_is_the_whole_picture_does_not_crop() {
 
     doc.set_geometry(mask, Some((0.0, 0.0)), Some((160.0, 160.0)))
         .unwrap();
-    let after = doc.drawable(image.identifier).unwrap();
+    let after = doc.element(image.identifier).unwrap();
     assert!(
         !after.edit_state.as_ref().unwrap().crops,
         "a 160 × 160 window at the origin on a 160 × 160 picture is an identity"
@@ -672,7 +676,7 @@ fn replacing_media_refuses_an_image_with_a_thumbnail() {
     let path = fixture!("pages-layout.pages");
     let mut doc = Document::open(&path).unwrap();
     let image = doc
-        .drawables()
+        .elements()
         .into_iter()
         .find(|d| {
             d.kind == Kind::Image
@@ -711,7 +715,7 @@ fn a_table_drawable_reports_no_object_style() {
     let path = fixture!("numbers-values.numbers");
     let doc = Document::open(&path).unwrap();
     let tables: Vec<_> = doc
-        .drawables()
+        .elements()
         .into_iter()
         .filter(|d| d.kind == Kind::Table)
         .collect();
@@ -835,8 +839,8 @@ fn the_app_agrees_about_every_rectangle() {
         assert!(!said.is_empty(), "{name}: the oracle reported nothing");
 
         let doc = Document::open(&path).unwrap();
-        let all = doc.drawables();
-        let by_id: std::collections::BTreeMap<u64, &iwork::Drawable> =
+        let all = doc.elements();
+        let by_id: std::collections::BTreeMap<u64, &iwork::ElementInfo> =
             all.iter().map(|d| (d.identifier, d)).collect();
 
         let mut compared = 0usize;
@@ -901,12 +905,12 @@ fn keynote_reads_back_a_moved_drawable() {
     let path = fixture!("keynote-shapes.key");
     let mut doc = Document::open(&path).unwrap();
     let shape = doc
-        .drawables()
+        .elements()
         .into_iter()
         .find(|d| d.kind == Kind::Shape && d.geometry.width == 300.0)
         .unwrap();
     let image = doc
-        .drawables()
+        .elements()
         .into_iter()
         .find(|d| d.kind == Kind::Image && d.mask().is_none())
         .unwrap();
@@ -953,7 +957,7 @@ fn keynote_opens_a_document_whose_image_was_replaced() {
     let path = fixture!("keynote-shapes.key");
     let mut doc = Document::open(&path).unwrap();
     let image = doc
-        .drawables()
+        .elements()
         .into_iter()
         .find(|d| d.kind == Kind::Image && d.mask().is_none())
         .unwrap();

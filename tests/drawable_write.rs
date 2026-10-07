@@ -63,7 +63,7 @@ fn a_pages_document_from_nothing_can_hold_a_text_box() {
         .unwrap();
 
     let drawable = doc
-        .drawables()
+        .elements()
         .into_iter()
         .find(|d| d.identifier == shape)
         .expect("the box is a drawable");
@@ -90,7 +90,7 @@ fn a_shape_on_a_page_has_no_parent_and_the_page_group_names_it() {
         .unwrap();
 
     let drawable = doc
-        .drawables()
+        .elements()
         .into_iter()
         .find(|d| d.identifier == shape)
         .unwrap();
@@ -113,7 +113,7 @@ fn two_boxes_on_one_page_share_a_group() {
         .unwrap();
 
     let on_page_one = doc
-        .drawables()
+        .elements()
         .into_iter()
         .filter(|d| d.placement == iwork::drawable::Placement::Floating { page: 0 })
         .count();
@@ -143,7 +143,7 @@ fn each_outline_is_drawn_with_its_own_path() {
             .add_shape("page 1", outline, "", (0.0, 0.0), size)
             .unwrap();
         let drawable = doc
-            .drawables()
+            .elements()
             .into_iter()
             .find(|d| d.identifier == shape)
             .unwrap();
@@ -218,7 +218,7 @@ fn a_slide_owns_the_box_it_is_given() {
         .unwrap();
 
     let drawable = doc
-        .drawables()
+        .elements()
         .into_iter()
         .find(|d| d.identifier == shape)
         .unwrap();
@@ -241,7 +241,7 @@ fn a_sheet_holds_a_box_named_by_the_sheets_name() {
         .unwrap();
 
     let drawable = doc
-        .drawables()
+        .elements()
         .into_iter()
         .find(|d| d.identifier == shape)
         .unwrap();
@@ -260,7 +260,7 @@ fn a_box_borrows_a_style_the_document_already_has() {
         .add_text_box("page 2", "Randnotiz", (380.0, 120.0), (160.0, 90.0))
         .unwrap();
     let drawable = doc
-        .drawables()
+        .elements()
         .into_iter()
         .find(|d| d.identifier == shape)
         .unwrap();
@@ -316,7 +316,7 @@ fn an_image_placed_from_nothing_is_registered_and_declared() {
         .unwrap();
 
     let drawable = doc
-        .drawables()
+        .elements()
         .into_iter()
         .find(|d| d.identifier == image)
         .expect("the image is a drawable");
@@ -362,7 +362,7 @@ fn an_image_with_no_size_is_drawn_at_its_own() {
         .add_image("Blatt", &png(), "probe.png", (100.0, 400.0), None)
         .unwrap();
     let frame = doc
-        .drawables()
+        .elements()
         .into_iter()
         .find(|d| d.identifier == image)
         .unwrap()
@@ -414,7 +414,7 @@ fn a_table_can_float_on_a_pages_page() {
     .unwrap();
 
     let drawable = doc
-        .drawables()
+        .elements()
         .into_iter()
         .find(|d| d.identifier == table)
         .expect("a table is a drawable");
@@ -563,7 +563,7 @@ fn the_apps_resave_a_document_with_an_added_image() {
         let after = Document::open(path).unwrap();
         let files = after.data_files();
         let image = after
-            .drawables()
+            .elements()
             .into_iter()
             .find(|d| {
                 d.media
@@ -635,7 +635,7 @@ fn pages_and_keynote_resave_a_document_with_an_added_box() {
     let kept = |path: &Path, text: &str, size: (f32, f32)| {
         let after = Document::open(path).unwrap();
         let box_ = after
-            .drawables()
+            .elements()
             .into_iter()
             .find(|d| {
                 d.text
@@ -859,7 +859,7 @@ fn a_text_box_made_from_nothing_has_no_outline() {
         let made = doc
             .add_text_box(&container, "Kein Rahmen", (100.0, 100.0), (400.0, 80.0))
             .unwrap();
-        let style = doc.drawable(made).and_then(|d| d.style).expect("a style");
+        let style = doc.element(made).and_then(|d| d.style).expect("a style");
         let style = doc.object_style(style).expect("a text box has a style");
         assert_eq!(style.override_count, Some(2), "{kind:?}");
         assert_eq!(

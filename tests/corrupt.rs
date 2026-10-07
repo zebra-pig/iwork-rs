@@ -13,6 +13,10 @@
 //! the package around it, which is the only way to hand the object parser
 //! bytes it cannot make sense of.
 
+mod common;
+#[allow(unused_imports)]
+use common::{Flat, FlatSlide};
+
 use std::path::{Path, PathBuf};
 
 fn fixtures() -> PathBuf {

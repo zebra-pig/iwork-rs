@@ -4,7 +4,7 @@ Short recipes for writing Numbers, Keynote and Pages documents with this
 crate, each one **run** by `cargo test --doc`. The README says how the format
 works and what was measured; this says what to type.
 
-**This is the 0.3 API.** Earlier versions wrote documents with no way to give
+**This is the 0.4 API.** Earlier versions wrote documents with no way to give
 anything a look, and 0.2.0 wrote a deck Keynote aborts on if it used one
 picture twice.
 
