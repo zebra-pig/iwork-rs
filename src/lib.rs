@@ -185,8 +185,8 @@ pub use document::{Component, DataFile, Document, Kind, TextEdit, TextStorage};
 pub use drawable::{Color, Fill, Frame, Gradient, ImageFit, Outline, Shadow};
 pub use drawable::{ElementInfo, Geometry, Placement};
 pub use element::{
-    CanvasMut, Chart, ChartMut, Element, ElementId, ElementMut, Image, Shape, StyleId, Table,
-    TextBox, TextStyle, TextStyleMut,
+    CanvasMut, CellStyleMut, Chart, ChartMut, Element, ElementId, ElementMut, Image, Shape,
+    StyleId, Table, TextBox, TextStyle, TextStyleMut,
 };
 pub use formula::{Ast, Formula, Node, Reference};
 pub use keynote::{Layout, Placeholder, Show, SlideCopy, SlideInfo, Transition};

@@ -157,7 +157,7 @@ pub fn precedents_of(
 /// and a tile of its own — and raises the engine's formula count. Returns
 /// `Ok(false)` when the document has no engine to register in, which is a
 /// document with no formulas in it and no `TSCE` at all.
-pub fn register_formula(
+pub(crate) fn register_formula(
     document: &mut crate::Document,
     table: &TableInfo,
     dependency: &Dependency,
@@ -339,7 +339,7 @@ const OWNER_KIND_CELLS: u64 = 1;
 /// app registers one: an entry in its owner list (field 3) and a reference to
 /// the object (field 6). Nothing happens to a table that already has a cell
 /// owner, so this is safe to call after every write that makes a table.
-pub fn give_tables_their_owners(document: &mut crate::Document) -> Result<usize, Error> {
+pub(crate) fn give_tables_their_owners(document: &mut crate::Document) -> Result<usize, Error> {
     let Some(engine) = object_of_type(document, TYPE_ENGINE) else {
         // No calculation engine: a document that holds no formulas and cannot
         // be given one. Pages and Keynote documents without tables are here.
@@ -536,7 +536,7 @@ fn empty_owner(uid: crate::table::Uuid, id: u64, kind: u64) -> Message {
 
 /// Put a chart mediator in the engine, with the owner that makes it live.
 ///
-/// The mediator archive itself is [`crate::chart::bind_chart`]'s; this is the
+/// The mediator archive itself is [`crate::element::ChartMut::bind`]'s; this is the
 /// half that belongs to the calculation engine — where the object goes, the
 /// `owner_kind` **2** owner keyed by the mediator's entity id, and the two
 /// registrations in the dependency tracker that every owner has.
@@ -544,7 +544,7 @@ fn empty_owner(uid: crate::table::Uuid, id: u64, kind: u64) -> Message {
 /// One owner per mediator, which is what the corpus shows: twelve mediators,
 /// twelve kind-2 owners, and eleven owners apiece for the eight tables beside
 /// them.
-pub fn add_chart_mediator(
+pub(crate) fn add_chart_mediator(
     document: &mut crate::Document,
     chart: u64,
     archive: &Message,

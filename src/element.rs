@@ -401,7 +401,7 @@ impl Element for Image {
 ///
 /// Unsaid, it is 800 × 500, has no title and no legend. On a document made
 /// from one of Apple's themes it takes the theme's look; see
-/// [`crate::chart::new_chart`] for where the look comes from otherwise.
+/// [`crate::element::Chart`] for where the look comes from otherwise.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Chart {
     kind: ChartKind,
@@ -410,6 +410,10 @@ pub struct Chart {
     title: Option<String>,
     legend: bool,
     place: Place,
+    /// A chart of the document's to copy, in place of the crate's own.
+    source: Option<ElementId>,
+    /// The grid as given whole, in place of categories and series.
+    grid: Option<ChartData>,
 }
 
 placeable!(Chart);
@@ -423,6 +427,32 @@ impl Chart {
             title: None,
             legend: false,
             place: Place::default(),
+            source: None,
+            grid: None,
+        }
+    }
+
+    /// The whole grid at once, for data that is not plain numbers — a blank
+    /// cell, a date. It replaces whatever `categories` and `series` said.
+    pub fn with_data(mut self, data: ChartData) -> Chart {
+        self.grid = Some(data);
+        self
+    }
+
+    /// A copy of a chart the document already has — its kind, its look, its
+    /// own settings — drawing the data given here. Unsaid, it is the size of
+    /// the chart it copies.
+    ///
+    /// What is shared and what is copied follows the archive's own division:
+    /// the theme's styles are shared, as two charts made from one preset
+    /// share them in the app, and everything the chart keeps to itself is
+    /// copied, so editing one cannot change the other. A chart fed by a
+    /// table is refused: its copy would claim to follow that table while
+    /// holding numbers of its own.
+    pub fn copy_of(chart: impl Into<ElementId>) -> Chart {
+        Chart {
+            source: Some(chart.into()),
+            ..Chart::new(ChartKind::Column)
         }
     }
 
@@ -455,8 +485,12 @@ impl Chart {
         self
     }
 
-    /// The same data as the table [`crate::chart::set_chart_data`] takes.
-    fn data(&self) -> Result<ChartData, Error> {
+    /// The categories and series as the grid a chart draws — what
+    /// [`ChartMut::data`] takes.
+    pub fn data(&self) -> Result<ChartData, Error> {
+        if let Some(grid) = &self.grid {
+            return Ok(grid.clone());
+        }
         if self.categories.is_empty() || self.series.is_empty() {
             return Err(Error::refused(
                 Refusal::UnwritableValue,
@@ -499,14 +533,31 @@ impl sealed::Sealed for Chart {}
 impl Element for Chart {
     fn add_to(&self, document: &mut Document, container: &str) -> Result<u64, Error> {
         let data = self.data()?;
-        let made = crate::chart::new_chart(
-            document,
-            container,
-            self.kind,
-            &data,
-            self.place.position(),
-            self.place.size.unwrap_or((800.0, 500.0)),
-        )?;
+        let made = match self.source {
+            Some(source) => {
+                let size = self.place.size.or_else(|| {
+                    document
+                        .element(source)
+                        .map(|found| (found.geometry.width, found.geometry.height))
+                });
+                crate::chart::add_chart(
+                    document,
+                    container,
+                    source.get(),
+                    &data,
+                    self.place.position(),
+                    size.unwrap_or((800.0, 500.0)),
+                )?
+            }
+            None => crate::chart::new_chart(
+                document,
+                container,
+                self.kind,
+                &data,
+                self.place.position(),
+                self.place.size.unwrap_or((800.0, 500.0)),
+            )?,
+        };
         if let Some(title) = &self.title {
             crate::chart::set_title(document, made, Some(title))?;
         }
@@ -605,6 +656,7 @@ pub struct TextStyle {
     pub(crate) name: String,
     pub(crate) look: TextLook,
     pub(crate) align: Option<Align>,
+    pub(crate) based_on: Option<StyleId>,
 }
 
 impl TextStyle {
@@ -613,7 +665,15 @@ impl TextStyle {
             name: name.into(),
             look: TextLook::default(),
             align: None,
+            based_on: None,
         }
+    }
+
+    /// Start from this style of the document's, rather than from its body
+    /// style: everything it sets that this does not is kept.
+    pub fn based_on(mut self, style: impl Into<StyleId>) -> TextStyle {
+        self.based_on = Some(style.into());
+        self
     }
 
     /// Font, size, colour, weight — see [`TextLook`].
@@ -679,15 +739,57 @@ impl<'a> ElementMut<'a> {
 
     /// Move its top-left corner.
     pub fn move_to(&mut self, x: f32, y: f32) -> Result<(), Error> {
-        self.document
-            .set_geometry(self.element, Some((x, y)), None)
-            .map(|_| ())
+        self.set_geometry(Some((x, y)), None).map(|_| ())
     }
 
     pub fn resize(&mut self, width: f32, height: f32) -> Result<(), Error> {
-        self.document
-            .set_geometry(self.element, None, Some((width, height)))
-            .map(|_| ())
+        self.set_geometry(None, Some((width, height))).map(|_| ())
+    }
+
+    /// Move it, resize it, or both at once — and be told what changed with
+    /// it.
+    ///
+    /// Move or resize a drawable.
+    ///
+    /// The rectangle is the one the **app** reports, which for a masked image
+    /// is the mask's window and not the picture's own rectangle. Give `None`
+    /// for either half to leave it alone.
+    ///
+    /// What travels with it, because the app maintains it and a document that
+    /// does not is inconsistent with every other document:
+    ///
+    /// * an **unmasked** media drawable's `originalSize`, which Keynote and
+    ///   Pages both rewrote to the new size when a script resized an image. A
+    ///   masked image's `originalSize` is left alone: the app fills it with the
+    ///   mask window rather than the picture there, and not even consistently
+    ///   (see the body of this method), so there is no size to rewrite it to;
+    /// * a mask's geometry and its path source's natural size. Resizing a
+    ///   masked image scales the whole assembly by one factor: Pages, asked to
+    ///   make a 475-point-wide masked photo 300 wide, multiplied the picture's
+    ///   own size, the mask's offset, the mask's size and the mask path's
+    ///   natural size by 300/475 and moved the picture so that
+    ///   `image.position + mask.position` still landed on the frame's corner.
+    ///   That is what this reproduces, with the horizontal and vertical factors
+    ///   taken separately — which reduces to what was observed whenever the
+    ///   resize is proportional, and is **unverified** when it is not, because
+    ///   the app would not perform one: every image in the corpus has its
+    ///   aspect ratio locked.
+    ///
+    /// Rotation, the geometry flags and everything else in the archive are left
+    /// exactly as they were.
+    ///
+    /// Refused by name: an object carrying version patches (see
+    /// [`Document::patched_objects`]), and resizing something whose current
+    /// width or height is zero, where the scale factor is not a number. A
+    /// **locked** drawable is not refused — the lock is a rule the app's UI
+    /// keeps, not one the format keeps — but it is reported, because the app
+    /// will not let a user undo the move by hand.
+    pub fn set_geometry(
+        &mut self,
+        position: Option<(f32, f32)>,
+        size: Option<(f32, f32)>,
+    ) -> Result<crate::drawable::GeometryChange, Error> {
+        self.document.set_geometry(self.element, position, size)
     }
 
     /// Its text, to edit, style and format. Refused for an element with none.
@@ -732,9 +834,46 @@ impl<'a> ChartMut<'a> {
 
     /// Replace the numbers it draws, keeping its kind and its look. The
     /// chart's own title and legend are left as they are.
-    pub fn data(&mut self, chart: &Chart) -> Result<(), Error> {
-        let data = chart.data()?;
-        crate::chart::set_chart_data(self.document, self.chart, &data).map(|_| ())
+    ///
+    /// `Chart::new(kind).categories(…).series(…).data()?` builds one, and so
+    /// does [`ChartData::numbers`]. See [`crate::element::ChartMut::data`].
+    pub fn data(&mut self, data: &ChartData) -> Result<(), Error> {
+        crate::chart::set_chart_data(self.document, self.chart, data).map(|_| ())
+    }
+
+    /// Make the chart follow a table.
+    ///
+    /// Make a chart follow a table — the *mediator*, which is what turns a
+    /// picture of some numbers into a chart of a table.
+    ///
+    /// The grid the chart draws stays what it was: in Numbers it is a **cache**
+    /// of what the mediator's formulas last evaluated to. What this adds is the
+    /// formulas — one per series and per label, each a reference to the table
+    /// wrapped in function 175 — and the owner that makes the calculation
+    /// engine know about them. See [`crate::element::ChartMut::bind`].
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), iwork::Error> {
+    /// # let mut doc = iwork::Document::open("Budget.numbers")?;
+    /// use iwork::chart::ChartBinding;
+    /// doc.bind_chart(
+    ///     905245,
+    ///     "Umsatz",
+    ///     &ChartBinding {
+    ///         series: vec!["B2:B13".into(), "C2:C13".into()],
+    ///         row_labels: vec!["A2:A13".into()],
+    ///         column_labels: vec!["B1".into(), "C1".into()],
+    ///         series_by_row: false,
+    ///     },
+    /// )?;
+    /// # Ok(()) }
+    /// ```
+    pub fn bind(
+        &mut self,
+        table: &str,
+        binding: &crate::chart::ChartBinding,
+    ) -> Result<u64, Error> {
+        self.document.bind_chart(self.chart, table, binding)
     }
 
     pub fn title(&mut self, title: impl AsRef<str>) -> Result<(), Error> {
@@ -829,5 +968,114 @@ impl<'a> TextStyleMut<'a> {
     ) -> Result<crate::style::StyleDeletion, Error> {
         self.document
             .delete_text_style(self.style, replace_with.map(StyleId::get))
+    }
+}
+
+impl TextStyleMut<'_> {
+    /// Copy this style under a new name, and be told what was made. Any kind
+    /// of text style can be copied — paragraph, character, list.
+    ///
+    /// Copy a style, giving the copy a new name and a new object identifier.
+    ///
+    /// Styles are created by copying rather than by synthesis, for the reason
+    /// `FORMAT.md` gives for whole documents: the style graph is large, iWork is
+    /// unforgiving about dangling references, and a style that already works is
+    /// a far better starting point than a guess at the schema. The copy lands in
+    /// the template's stream, right after it, and is listed in every stylesheet
+    /// that listed the template by plain reference.
+    ///
+    /// The identifier comes from above `TSP.PackageMetadata` field 1, which is
+    /// then bumped, so iWork will not later hand the same number to something
+    /// else.
+    ///
+    /// **A copy of a variation style does not get the name.** Named styles and
+    /// variations are different things: a named style carries a name at
+    /// [`crate::style::NAME`] and an identifier at [`crate::style::STYLE_IDENTIFIER`], while a
+    /// variation carries neither, a parent, and a flag saying it is one. Naming
+    /// the copy of a variation produces an object that claims to be a variation,
+    /// has a name, has no identifier, and is listed among the named styles —
+    /// and Pages crashes on opening the document. It was doing exactly that
+    /// until a document that crashed showed up.
+    ///
+    /// The copy is still made, still listed, and still usable — it is simply
+    /// anonymous, which is what a variation is. `CreatedStyle::name` reports
+    /// whether the name was applied. Turning a variation into a named style
+    /// properly would mean synthesising a style identifier and clearing the
+    /// variation flag, which is more invention than this crate is willing to do
+    /// without a document to check it against.
+    pub fn copy(&mut self, name: &str) -> Result<crate::style::CreatedStyle, Error> {
+        self.document.create_text_style(self.style, name)
+    }
+
+    /// Edit the style's archive directly.
+    ///
+    /// Edit a style archive directly.
+    ///
+    /// The escape hatch for everything this crate does not model: the archive
+    /// arrives decoded into wire fields and is re-encoded in place afterwards.
+    pub fn update(&mut self, edit: impl FnOnce(&mut crate::pb::Message)) -> Result<(), Error> {
+        self.document.update_text_style(self.style, edit)
+    }
+
+    /// Take one property from another style.
+    ///
+    /// Copy one property subtree from another style.
+    ///
+    /// The way to give a style a property whose container it does not have.
+    /// [`crate::element::TextStyleMut::property`] will not invent a container,
+    /// because a container it invents holds only the fields it was asked for —
+    /// a colour written as `{r, g, b}`, with no model and no alpha, crashes
+    /// Pages on opening. Lifting a whole working subtree across avoids the
+    /// question: the copy is a colour that a real document already contains.
+    ///
+    /// Take the colour from a style that has one, then change the channels:
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), iwork::Error> {
+    /// # let mut doc = iwork::Document::open("Report.pages")?;
+    /// use iwork::style::property;
+    /// doc.copy_text_style_property(3712, 3801, property::FONT_COLOR)?;
+    /// doc.text_style_mut(3801)?.property(property::RED,
+    ///     Some(iwork::pb::Value::Fixed32(0.85f32.to_le_bytes())))?;
+    /// # Ok(()) }
+    /// ```
+    pub fn copy_property(&mut self, from: impl Into<StyleId>, path: &[u32]) -> Result<(), Error> {
+        self.document
+            .copy_text_style_property(from.into().get(), self.style, path)
+    }
+}
+
+/// A cell style that is in a document, to repaint. From
+/// [`Document::cell_style_mut`].
+pub struct CellStyleMut<'a> {
+    document: &'a mut Document,
+    style: u64,
+}
+
+impl<'a> CellStyleMut<'a> {
+    pub(crate) fn new(document: &'a mut Document, style: u64) -> CellStyleMut<'a> {
+        CellStyleMut { document, style }
+    }
+
+    /// A colour, or no fill.
+    ///
+    /// Paint a cell style, or with `None` stop it painting.
+    ///
+    /// See [`crate::element::CellStyleMut::fill`]: this repaints **every**
+    /// table whose style names the cell style, because that is what a shared
+    /// style is. The fill is the only property of a cell style this crate
+    /// writes; the rest of the archive is left exactly as it was.
+    pub fn fill(&mut self, fill: impl Into<Fill>) -> Result<(), Error> {
+        let colour = match fill.into() {
+            Fill::None => None,
+            Fill::Color(colour) => Some(colour),
+            Fill::Gradient(_) | Fill::Image(_) => {
+                return Err(Error::refused(
+                    Refusal::UnwritableValue,
+                    "a cell style takes a colour or no fill",
+                ))
+            }
+        };
+        self.document.set_cell_style_fill(self.style, colour)
     }
 }

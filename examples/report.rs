@@ -277,7 +277,7 @@ fn main() -> Result<(), iwork::Error> {
 
     let mut styles = std::collections::HashMap::new();
     for (name, colour, properties) in recipes.iter() {
-        let id = doc.create_text_style(body, name)?.identifier;
+        let id = doc.add_text_style(&iwork::TextStyle::new(*name).based_on(body))?;
         let mut style = doc.text_style_mut(id)?;
         // What `TextLook` does not cover — spacing, tracking — goes in by its
         // path in the archive.

@@ -1,4 +1,4 @@
-//! The 0.3 surface: values to create, handles to edit. `API.md` is the rule
+//! The public surface: values to create, handles to edit. `API.md` is the rule
 //! book; this is what holds the crate to it.
 
 use std::path::Path;
@@ -269,13 +269,10 @@ fn a_handle_edits_what_is_there() {
     let mut handle = doc.chart_mut(chart).unwrap();
     handle.title("Anders").unwrap();
     handle.no_legend().unwrap();
-    handle
-        .data(
-            &Chart::new(ChartKind::Column)
-                .categories(["H1", "H2"])
-                .series("2027", [1.0, 2.0]),
-        )
-        .unwrap();
+    let halves = Chart::new(ChartKind::Column)
+        .categories(["H1", "H2"])
+        .series("2027", [1.0, 2.0]);
+    handle.data(&halves.data().unwrap()).unwrap();
     handle.element().move_to(0.0, 0.0).unwrap();
     let made = doc
         .charts()

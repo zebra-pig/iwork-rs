@@ -29,7 +29,7 @@
 //! Keynote slide and a Numbers sheet each list what is on them and are named
 //! as each drawable's `parent`; a Pages page lists them in a page group of
 //! `TP.FloatingDrawablesArchive` and is named by nothing, so a drawable
-//! floating on a page has **no parent at all**. [`add_shape`], [`add_image`]
+//! floating on a page has **no parent at all**. [`crate::element::Shape`], [`crate::element::Image`]
 //! and the table writer all resolve the container once and let it decide, for
 //! exactly that reason.
 //!
@@ -1666,7 +1666,7 @@ fn containers(document: &crate::Document) -> BTreeMap<u64, (Placement, usize)> {
     out
 }
 
-/// What [`crate::Document::set_geometry`] did.
+/// What [`crate::element::ElementMut::set_geometry`] did.
 #[derive(Debug, Clone)]
 pub struct GeometryChange {
     pub drawable: u64,
@@ -2102,8 +2102,8 @@ pub enum Outline {
 /// the document it lands in.
 ///
 /// Returns the `TSWP.ShapeInfoArchive` — the object `iwork drawables` prints
-/// and [`crate::Document::set_geometry`] moves.
-pub fn add_text_box(
+/// and [`crate::element::ElementMut::set_geometry`] moves.
+pub(crate) fn add_text_box(
     document: &mut crate::Document,
     container: &str,
     text: &str,
@@ -2124,8 +2124,8 @@ pub fn add_text_box(
 ///
 /// A shape is a text box that is not a rectangle and need hold no text: the
 /// archive is the same one, and the only difference is the path. See
-/// [`add_text_box`] for what it borrows from the document.
-pub fn add_shape(
+/// [`crate::element::TextBox`] for what it borrows from the document.
+pub(crate) fn add_shape(
     document: &mut crate::Document,
     container: &str,
     outline: Outline,
@@ -2276,7 +2276,7 @@ fn image_style(document: &crate::Document) -> Option<u64> {
 /// Only PNG and JPEG, because the pixel size has to be known — the registry
 /// records it and the drawable's `naturalSize` must agree with it, and this
 /// crate reads headers rather than decoding pictures.
-pub fn add_image(
+pub(crate) fn add_image(
     document: &mut crate::Document,
     container: &str,
     bytes: &[u8],
@@ -2672,7 +2672,7 @@ fn own_style(document: &mut crate::Document, drawable: u64) -> Result<u64, crate
 /// gone. So the first paint gives the drawable a style of its own, naming the
 /// preset as its parent and carrying only what differs, and paints that —
 /// which is what the app does. A second paint reuses it.
-pub fn set_fill(
+pub(crate) fn set_fill(
     document: &mut crate::Document,
     drawable: u64,
     fill: &Fill,
@@ -2849,22 +2849,13 @@ impl ImageFit {
     }
 }
 
-/// Fill a drawable with a gradient — [`set_fill`] with a [`Fill::Gradient`].
-pub fn set_gradient(
-    document: &mut crate::Document,
-    drawable: u64,
-    gradient: &Gradient,
-) -> Result<(), crate::Error> {
-    set_fill(document, drawable, &Fill::Gradient(gradient.clone()))
-}
-
 /// Give a drawable a drop shadow, or with `None` take it away.
 ///
 /// `TSD.ShadowArchive` as a theme's shadow presets write it: colour, angle,
 /// offset, radius, opacity, enabled, type 0. `Shadow::default()` is a soft
 /// black one. "No shadow" is the same archive with `is_enabled` false, which
 /// is what Keynote's text-box style carries.
-pub fn set_shadow(
+pub(crate) fn set_shadow(
     document: &mut crate::Document,
     drawable: u64,
     shadow: Option<Shadow>,
@@ -2908,36 +2899,12 @@ pub fn set_shadow(
     )
 }
 
-/// Fill a drawable with a picture — [`set_fill`] with a [`Fill::Image`].
-///
-/// The bytes go into the package once per distinct content, as
-/// [`add_image`]'s do, and the style that names them declares them in its own
-/// `data_references` — a style is an object like any other, and one that
-/// names media without declaring it is one the app does not load the media
-/// for.
-pub fn set_image_fill(
-    document: &mut crate::Document,
-    drawable: u64,
-    bytes: &[u8],
-    preferred_name: &str,
-    fit: ImageFit,
-) -> Result<(), crate::Error> {
-    let fill = Fill::Image(ImageFill {
-        source: ImageSource::Bytes {
-            bytes: bytes.to_vec(),
-            name: preferred_name.to_string(),
-        },
-        fit,
-    });
-    set_fill(document, drawable, &fill)
-}
-
 /// Outline a drawable: colour and width in points, solid.
 ///
 /// A width of `0.0` is what iWork writes for "no outline"; the stroke archive
 /// stays, because removing it altogether is a shape without the field every
 /// other shape in the corpus carries.
-pub fn set_stroke(
+pub(crate) fn set_stroke(
     document: &mut crate::Document,
     drawable: u64,
     colour: Color,
@@ -2966,7 +2933,7 @@ pub fn set_stroke(
 }
 
 /// How opaque the drawable is, 0.0 to 1.0.
-pub fn set_opacity(
+pub(crate) fn set_opacity(
     document: &mut crate::Document,
     drawable: u64,
     opacity: f32,

@@ -317,7 +317,97 @@ pub trait Flat {
         position: (f32, f32),
         size: (f32, f32),
     ) -> Result<u64, Error> {
-        self.doc().copy_chart(container, from, data, position, size)
+        let chart = Chart::copy_of(from)
+            .with_data(data.clone())
+            .at(position.0, position.1)
+            .size(size.0, size.1);
+        self.doc().canvas_mut(container)?.add(chart).map(Into::into)
+    }
+    fn set_chart_data(&mut self, chart: u64, data: &ChartData) -> Result<(), Error> {
+        self.doc().chart_mut(chart)?.data(data)
+    }
+    fn bind_chart(
+        &mut self,
+        chart: u64,
+        table: &str,
+        binding: &iwork::chart::ChartBinding,
+    ) -> Result<u64, Error> {
+        self.doc().chart_mut(chart)?.bind(table, binding)
+    }
+    fn set_geometry(
+        &mut self,
+        element: u64,
+        position: Option<(f32, f32)>,
+        size: Option<(f32, f32)>,
+    ) -> Result<iwork::drawable::GeometryChange, Error> {
+        self.doc()
+            .element_mut(element)?
+            .set_geometry(position, size)
+    }
+    fn add_comment(
+        &mut self,
+        storage: u64,
+        start: u64,
+        end: u64,
+        edit: &iwork::annotations::CommentEdit,
+    ) -> Result<u64, Error> {
+        self.doc().text_mut(storage)?.comment(start..end, edit)
+    }
+    fn create_text_style(
+        &mut self,
+        template: u64,
+        name: &str,
+    ) -> Result<iwork::CreatedStyle, Error> {
+        self.doc().text_style_mut(template)?.copy(name)
+    }
+    fn update_text_style(
+        &mut self,
+        style: u64,
+        edit: impl FnOnce(&mut iwork::pb::Message),
+    ) -> Result<(), Error> {
+        self.doc().text_style_mut(style)?.update(edit)
+    }
+    fn copy_text_style_property(&mut self, from: u64, to: u64, path: &[u32]) -> Result<(), Error> {
+        self.doc().text_style_mut(to)?.copy_property(from, path)
+    }
+    fn set_cell_style_fill(&mut self, style: u64, colour: Option<Color>) -> Result<(), Error> {
+        self.doc().cell_style_mut(style)?.fill(colour)
+    }
+    fn set_cells(
+        &mut self,
+        table: &str,
+        cells: impl IntoIterator<Item = (usize, usize, CellValue)>,
+    ) -> Result<usize, Error> {
+        self.doc().table_mut(table)?.set_cells(cells)
+    }
+    fn fill_formula(
+        &mut self,
+        table: &str,
+        from: (usize, usize),
+        to: (usize, usize),
+        value: Option<CellValue>,
+    ) -> Result<(), Error> {
+        self.doc().table_mut(table)?.fill_formula(from, to, value)
+    }
+    /// The set says which table it belongs to; the handle is any table's.
+    fn set_conditional_threshold(
+        &mut self,
+        set: u64,
+        rule: usize,
+        value: iwork::table::Decimal,
+    ) -> Result<(), Error> {
+        let table = self.doc().tables()[0].identifier;
+        self.doc()
+            .table_mut(table)?
+            .conditional_threshold(set, rule, value)
+    }
+    fn set_filter_enabled(
+        &mut self,
+        table: &str,
+        enabled: bool,
+        match_any: Option<bool>,
+    ) -> Result<(), Error> {
+        self.doc().table_mut(table)?.filter(enabled, match_any)
     }
 
     // -- how an element looks -----------------------------------------------

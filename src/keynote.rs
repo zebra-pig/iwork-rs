@@ -39,7 +39,7 @@
 //! identifier is the `KN.SlideArchive`'s own; each layout is an
 //! `Index/TemplateSlide-*.iwa`. The slide's *node* lives in `Index/Document.iwa`
 //! with the show. That split is what makes duplicating a slide a package
-//! operation rather than an object one — see [`duplicate_slide`].
+//! operation rather than an object one — see [`crate::document::SlideMut::duplicate`].
 //!
 //! ## What "showing" means
 //!
@@ -1755,7 +1755,7 @@ fn slide_node_in_deck(document: &crate::Document, slide: u64) -> Result<(u64, Me
 /// mis-edit. See `slide_node_in_deck`.
 ///
 /// Returns whether the flag changed.
-pub fn set_slide_skipped(
+pub(crate) fn set_slide_skipped(
     document: &mut crate::Document,
     slide: u64,
     skipped: bool,
@@ -1787,7 +1787,11 @@ pub fn set_slide_skipped(
 /// `move … 99` on a six-slide deck, which is a lie about where the slide went.
 /// The permutation only ever re-emits entries `slide_tree_order` accepted as
 /// bare references, so it is byte-for-byte lossless or it is refused.
-pub fn move_slide(document: &mut crate::Document, slide: u64, to: usize) -> Result<usize, Error> {
+pub(crate) fn move_slide(
+    document: &mut crate::Document,
+    slide: u64,
+    to: usize,
+) -> Result<usize, Error> {
     let (node, _) = node_of(document, slide)?;
     let (show_id, show_archive, tree, mut order) = read_slide_tree(document)?;
     let from = order.iter().position(|id| *id == node).ok_or_else(|| {
@@ -1813,7 +1817,7 @@ pub fn move_slide(document: &mut crate::Document, slide: u64, to: usize) -> Resu
     Ok(to)
 }
 
-/// What [`duplicate_slide`] made.
+/// What [`crate::document::SlideMut::duplicate`] made.
 #[derive(Debug, Clone)]
 pub struct SlideCopy {
     /// The new `KN.SlideArchive`, which is also the new component's identifier.
@@ -1853,7 +1857,10 @@ pub struct SlideCopy {
 /// leaves behind), or copy the `Data/` bytes (a duplicated image slide shares
 /// the original's media — the app shares it too, and the registry is
 /// refcounted per component, not per package).
-pub fn duplicate_slide(document: &mut crate::Document, slide: u64) -> Result<SlideCopy, Error> {
+pub(crate) fn duplicate_slide(
+    document: &mut crate::Document,
+    slide: u64,
+) -> Result<SlideCopy, Error> {
     // -- find the slide, its node, its stream -------------------------------
     let (stream, source_id) = {
         let (stream, object) = document.object(slide).ok_or(Error::NoSuchObject(slide))?;
@@ -2162,7 +2169,7 @@ fn derived_uuid(entry: &Message, identifier: u64) -> (u64, u64) {
 ///
 /// So the slide is given a style of its own: a variation naming the layout's
 /// style as its parent and carrying the fill and nothing else, the way a
-/// drawable is ([`crate::drawable::set_fill`]) and a table cell is.
+/// drawable is ([`crate::element::ElementMut::fill`]) and a table cell is.
 ///
 /// **This shape is inferred, not observed.** No deck in the corpus has a slide
 /// whose background somebody changed, so the variation is built by the
@@ -2170,7 +2177,7 @@ fn derived_uuid(entry: &Message, identifier: u64) -> (u64, u64) {
 /// 5: stylesheet }`, `override_count`, the property bag — rather than copied
 /// from one Keynote wrote. It is tested against the app behind
 /// `IWORK_APP_CHECK=1`, and that test is the only thing that says it is right.
-pub fn set_slide_background(
+pub(crate) fn set_slide_background(
     document: &mut crate::Document,
     slide: u64,
     colour: Option<crate::drawable::Color>,
@@ -2475,7 +2482,7 @@ fn placeholders_from_layout(
 ///
 /// `layout` is the layout to draw it from — `None` takes the deck's first,
 /// which is what Keynote's own New Slide does.
-pub fn add_slide(
+pub(crate) fn add_slide(
     document: &mut crate::Document,
     layout: Option<u64>,
 ) -> Result<crate::keynote::SlideInfo, Error> {
@@ -2853,7 +2860,7 @@ const DEFAULT_TRANSITION_DURATION: f64 = 1.0;
 /// than carrying them across; keeping the same effect keeps them. The random
 /// seed is kept when there is one and minted when there is not — the app copies
 /// it verbatim through its own duplicate, so it is an identity, not a nonce.
-pub fn set_transition(
+pub(crate) fn set_transition(
     document: &mut crate::Document,
     slide: u64,
     edit: &TransitionEdit,
@@ -3079,7 +3086,7 @@ const BUILD_ON_CLICK: u64 = 1;
 /// transition one — `"apple:dissolve character"` rather than `"apple:dissolve"`
 /// — and only the two in [`BuildKind::default_effect`] have been seen written
 /// by the app, so anything else is passed through and taken on trust.
-pub fn add_build(
+pub(crate) fn add_build(
     document: &mut crate::Document,
     slide: u64,
     drawable: u64,
@@ -3223,7 +3230,7 @@ fn chunk_archive(build: u64, edit: &BuildEdit, seed: u64) -> Message {
 /// The storage is the one `create::text_box_storage` writes with its
 /// kind changed: the field set is identical — `[1, 2, 3, 5, 6, 7, 10, 14, 24]`
 /// — which was read off `keynote-deck.key`'s own note rather than assumed.
-pub fn add_note(document: &mut crate::Document, slide: u64) -> Result<u64, crate::Error> {
+pub(crate) fn add_note(document: &mut crate::Document, slide: u64) -> Result<u64, crate::Error> {
     use crate::{Error, Refusal};
 
     let show = document

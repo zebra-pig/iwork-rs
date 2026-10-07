@@ -510,7 +510,7 @@ pub struct StyleUse {
     pub range: Range<u64>,
 }
 
-/// What [`crate::Document::create_text_style`] did.
+/// What [`crate::element::TextStyleMut::copy`] did.
 #[derive(Debug, Clone)]
 pub struct CreatedStyle {
     pub identifier: u64,
@@ -522,7 +522,7 @@ pub struct CreatedStyle {
     pub registrations_cloned: usize,
     /// The name the copy was given, or `None` when the template was a variation
     /// style and the requested name was therefore not applied. See
-    /// [`crate::Document::create_text_style`].
+    /// [`crate::element::TextStyleMut::copy`].
     pub name: Option<String>,
 }
 
@@ -707,8 +707,8 @@ pub fn get_path(message: &Message, path: &[u32]) -> Option<Value> {
 ///
 /// To set a property whose container is missing, get the container from a style
 /// that has one: copy that style
-/// ([`crate::Document::create_text_style`]) and edit the copy, or lift the
-/// subtree across with [`crate::Document::copy_text_style_property`].
+/// ([`crate::element::TextStyleMut::copy`]) and edit the copy, or lift the
+/// subtree across with [`crate::element::TextStyleMut::copy_property`].
 pub fn set_path(message: &mut Message, path: &[u32], value: Option<Value>) -> Result<(), String> {
     let Some((head, rest)) = path.split_first() else {
         return Err("empty field path".into());
@@ -1102,7 +1102,7 @@ fn repoint_shaped(table: &mut Message, from: u64, to: Option<u64>, per_paragraph
 /// document stylesheet is type `401`, in the TSP/TSK range rather than the TSS
 /// range its name suggests. What identifies it is that the style points at it:
 /// every style archive carries [`STYLESHEET`], so the list to add to is named
-/// by the style being copied. [`crate::Document::create_text_style`] resolves
+/// by the style being copied. [`crate::element::TextStyleMut::copy`] resolves
 /// it that way.
 ///
 /// The alternative — cloning every top-level bare reference anywhere — looked

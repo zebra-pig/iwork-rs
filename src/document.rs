@@ -326,6 +326,22 @@ impl TextMut<'_> {
     pub fn paragraphs(&self) -> Result<Vec<Range<u64>>, Error> {
         self.document.paragraph_ranges(self.storage)
     }
+
+    /// Attach a comment to a range of this text.
+    ///
+    /// Attach a comment to a range of text.
+    ///
+    /// The range is in UTF-16 code units and half-open. See
+    /// [`crate::document::TextMut::comment`] for what it writes and what it
+    /// refuses.
+    pub fn comment(
+        &mut self,
+        range: Range<u64>,
+        edit: &crate::annotations::CommentEdit,
+    ) -> Result<u64, Error> {
+        self.document
+            .add_comment(self.storage, range.start, range.end, edit)
+    }
 }
 
 /// One slide, held for writing — see [`Document::slide_mut`].
@@ -430,7 +446,7 @@ impl SlideMut<'_> {
     /// Paint the background of one slide, or with `None` go back to its
     /// layout's.
     ///
-    /// See [`crate::keynote::set_slide_background`] — the slide is given a
+    /// See [`crate::document::SlideMut::background`] — the slide is given a
     /// slide style of its own, because the one it has is its layout's and
     /// painting that would repaint every slide built on it. The shape of that
     /// style is inferred from the convention the other style archives keep
@@ -477,7 +493,7 @@ impl SlideMut<'_> {
     ///
     /// Give a slide a transition, or take its transition away.
     ///
-    /// See [`crate::keynote::set_transition`]: the effect may be named the way
+    /// See [`crate::document::SlideMut::transition_with`]: the effect may be named the way
     /// `iwork slides` prints it or by its archive identifier, and `"none"`
     /// removes it.
     pub fn transition(&mut self, effect: &str) -> Result<crate::keynote::Transition, Error> {
@@ -601,7 +617,7 @@ impl TableMut<'_> {
     /// field, down to the list node a parenthesis writes and the `5: 1` on
     /// every colon tract.
     ///
-    /// **The value is the caller's**, as it is for [`Document::fill_formula`]
+    /// **The value is the caller's**, as it is for [`crate::document::TableMut::fill_formula`]
     /// and for the same reason: Numbers shows what is written in the cell until
     /// something the formula reads changes, and this crate evaluates nothing.
     /// Give the answer the formula would produce, or an answer the app will
@@ -910,6 +926,122 @@ impl TableMut<'_> {
     pub fn unmerge(&mut self, cell: impl Into<crate::table::CellRef>) -> Result<(), Error> {
         let (row, column) = cell.into().resolve()?;
         self.document.unmerge_cells(&self.table, row, column)
+    }
+
+    /// Write many cells at once.
+    ///
+    /// Write many cells of one table in a single pass.
+    ///
+    /// This is [`crate::document::TableMut::set`] for a block of values, and the two share
+    /// every rule and every refusal — `set_cell` is one cell handed to this.
+    /// What the batch adds is the two things a loop of single writes cannot
+    /// give:
+    ///
+    /// * **One pass over the row.** A cell is stored in its row's
+    ///   `TileRowInfo`, so writing a row one cell at a time decodes and
+    ///   re-encodes that row — and re-reads every table in the document to
+    ///   resolve the name — once per cell. The cost of filling a table that way
+    ///   is quadratic in its size, measured: 500 cells in 0.2s, 2000 in 3.0s,
+    ///   and a spreadsheet's worth of cells in minutes. Grouped by row it is
+    ///   one decode, one re-encode and one table resolution however wide the
+    ///   row.
+    /// * **All or nothing.** A refused cell leaves the document byte for byte
+    ///   as it was — including the cells of the same batch that had already
+    ///   been written. A loop of `set_cell` stops half-applied instead.
+    ///
+    /// Cells may be given in any order and may span any number of rows; naming
+    /// the same cell twice is refused rather than silently resolved, because
+    /// which of the two values was meant is not this crate's to guess.
+    pub fn set_cells(
+        &mut self,
+        cells: impl IntoIterator<Item = (usize, usize, CellValue)>,
+    ) -> Result<usize, Error> {
+        self.document.set_cells(&self.table, cells)
+    }
+
+    /// Fill a formula down or across.
+    ///
+    /// Give a cell the formula another cell in the same table holds.
+    ///
+    /// This is *fill*, and it is the only way to write a formula here. A
+    /// formula lives in the table's `FORMULA` list and a cell holds its key;
+    /// the entry names no host cell, which is why one entry serves a whole
+    /// filled column and why giving another cell the same key is a real fill
+    /// rather than a trick — a **relative** reference in the formula is
+    /// relative to whichever cell holds it, so `=B2+1` in C2 is `=B3+1` in C3,
+    /// exactly as the app's own fill does.
+    ///
+    /// **The value is the caller's**, and it has to be: Numbers shows what is
+    /// written in the cell until something the formula reads changes, and this
+    /// crate evaluates nothing. `None` says "the source's value", which is
+    /// refused unless every reference in the formula is absolute — the one case
+    /// where the source's answer is the target's too.
+    ///
+    /// The formula is *live*: the cell is registered in the calculation
+    /// engine's dependency graph ([`crate::calc`]), so the app recalculates it
+    /// whenever a cell it reads changes. Watched, with `=B1+B2` filled from
+    /// `=A1+A2`: 0 on opening, 12 after `B1=5, B2=7`, 8 after `B1=1`.
+    ///
+    /// Refused by name: a source with no formula, a target that already holds
+    /// one, a formula that reads another table or a whole row or column (whose
+    /// dependency edges this crate does not write), an out-of-range cell, a
+    /// merge-covered target, a table with no formula list, and any object
+    /// carrying version patches.
+    pub fn fill_formula(
+        &mut self,
+        from: impl Into<crate::table::CellRef>,
+        to: impl Into<crate::table::CellRef>,
+        value: Option<CellValue>,
+    ) -> Result<(), Error> {
+        let (from, to) = (from.into().resolve()?, to.into().resolve()?);
+        self.document.fill_formula(&self.table, from, to, value)
+    }
+
+    /// Switch the table's filter on or off.
+    ///
+    /// Turn a table's filters on or off, and say whether **all** its rules must
+    /// match or **any** of them.
+    ///
+    /// The two switches of the Organise pane, and the two varints at the head
+    /// of `TST.FilterSetArchive`: `{1: match_any, 2: enabled}`. The rules
+    /// themselves are not touched — writing one means writing the `TSCE`
+    /// formula Numbers compiles a filter into, and this corpus carries exactly
+    /// one of those to learn from, so a rule built here would be an
+    /// extrapolation from a single sample. Refused by name below.
+    ///
+    /// **The switch does not by itself change which rows are visible**, and that
+    /// was measured rather than assumed. With the filter written off, Numbers
+    /// opened the document, edited a cell and saved: the switch came back
+    /// *off*, and the ten rows the filter had hidden were still hidden. Which
+    /// rows are hidden is **stored**, in the per-row hiding state and the
+    /// row hidden-state extent, and the app recomputes it when the filter is
+    /// next touched in its own interface — not when the document opens. The
+    /// same shape as a formula's cached value and a chart's grid: a cache the
+    /// app maintains, not one it rebuilds on load.
+    ///
+    /// So this writes what the Organise pane shows, and nothing else. Clearing
+    /// the hidden state as well would mean rewriting the UUID-keyed extent that
+    /// [`crate::document::TableMut::insert_row`] refuses to maintain for exactly the same
+    /// reason.
+    pub fn filter(&mut self, enabled: bool, match_any: Option<bool>) -> Result<(), Error> {
+        self.document
+            .set_filter_enabled(&self.table, enabled, match_any)
+    }
+
+    /// Change the number a conditional-highlighting rule compares against.
+    ///
+    /// Change the number a conditional highlight compares against.
+    ///
+    /// See [`crate::document::TableMut::conditional_threshold`]: the threshold is kept
+    /// twice on each rule and the rules twice over in the set, and all of it is
+    /// rewritten together.
+    pub fn conditional_threshold(
+        &mut self,
+        set: u64,
+        rule: usize,
+        value: crate::table::Decimal,
+    ) -> Result<(), Error> {
+        self.document.set_conditional_threshold(set, rule, value)
     }
 }
 
@@ -2522,7 +2654,7 @@ impl Document {
     /// Cells may be given in any order and may span any number of rows; naming
     /// the same cell twice is refused rather than silently resolved, because
     /// which of the two values was meant is not this crate's to guess.
-    pub fn set_cells(
+    pub(crate) fn set_cells(
         &mut self,
         wanted: &str,
         cells: impl IntoIterator<Item = (usize, usize, CellValue)>,
@@ -3884,7 +4016,7 @@ impl Document {
     /// of what the mediator's formulas last evaluated to. What this adds is the
     /// formulas — one per series and per label, each a reference to the table
     /// wrapped in function 175 — and the owner that makes the calculation
-    /// engine know about them. See [`crate::chart::bind_chart`].
+    /// engine know about them. See [`crate::element::ChartMut::bind`].
     ///
     /// ```no_run
     /// # fn main() -> Result<(), iwork::Error> {
@@ -3902,7 +4034,7 @@ impl Document {
     /// )?;
     /// # Ok(()) }
     /// ```
-    pub fn bind_chart(
+    pub(crate) fn bind_chart(
         &mut self,
         chart: u64,
         table: &str,
@@ -4885,7 +5017,7 @@ impl Document {
     /// the hidden state as well would mean rewriting the UUID-keyed extent that
     /// [`crate::document::TableMut::insert_row`] refuses to maintain for exactly the same
     /// reason.
-    pub fn set_filter_enabled(
+    pub(crate) fn set_filter_enabled(
         &mut self,
         wanted: &str,
         enabled: bool,
@@ -4919,10 +5051,10 @@ impl Document {
 
     /// Change the number a conditional highlight compares against.
     ///
-    /// See [`crate::table::set_conditional_threshold`]: the threshold is kept
+    /// See [`crate::document::TableMut::conditional_threshold`]: the threshold is kept
     /// twice on each rule and the rules twice over in the set, and all of it is
     /// rewritten together.
-    pub fn set_conditional_threshold(
+    pub(crate) fn set_conditional_threshold(
         &mut self,
         set: u64,
         rule: usize,
@@ -4943,7 +5075,7 @@ impl Document {
     /// field, down to the list node a parenthesis writes and the `5: 1` on
     /// every colon tract.
     ///
-    /// **The value is the caller's**, as it is for [`Document::fill_formula`]
+    /// **The value is the caller's**, as it is for [`crate::document::TableMut::fill_formula`]
     /// and for the same reason: Numbers shows what is written in the cell until
     /// something the formula reads changes, and this crate evaluates nothing.
     /// Give the answer the formula would produce, or an answer the app will
@@ -5165,7 +5297,7 @@ impl Document {
     /// dependency edges this crate does not write), an out-of-range cell, a
     /// merge-covered target, a table with no formula list, and any object
     /// carrying version patches.
-    pub fn fill_formula(
+    pub(crate) fn fill_formula(
         &mut self,
         wanted: &str,
         from: (usize, usize),
@@ -7371,36 +7503,6 @@ impl Document {
         crate::chart::charts(self)
     }
 
-    /// Rewrite the private grid a chart draws.
-    ///
-    /// See [`crate::chart::set_chart_data`]: a Numbers chart fed by a table is
-    /// refused, because its grid is a cache of formulas this crate does not
-    /// evaluate.
-    pub fn set_chart_data(
-        &mut self,
-        chart: u64,
-        data: &crate::chart::ChartData,
-    ) -> Result<(), Error> {
-        crate::chart::set_chart_data(self, chart, data)
-    }
-
-    /// Put a copy of a chart the document already has somewhere else, drawing
-    /// the data given.
-    ///
-    /// See [`crate::chart::add_chart`]: a chart is copied rather than invented,
-    /// because a dozen theme styles stand behind it and none of them can be
-    /// made up honestly.
-    pub fn copy_chart(
-        &mut self,
-        container: &str,
-        from: u64,
-        data: &crate::chart::ChartData,
-        position: (f32, f32),
-        size: (f32, f32),
-    ) -> Result<u64, Error> {
-        crate::chart::add_chart(self, container, from, data, position, size)
-    }
-
     /// Put a value on a slide, a sheet or a page, or leave the document
     /// exactly as it was.
     pub(crate) fn add_element(
@@ -7494,11 +7596,16 @@ impl Document {
             .into_iter()
             .filter(|found| found.kind == StyleKind::Paragraph && found.name.is_some())
             .collect();
-        let base = paragraph_styles
-            .iter()
-            .find(|found| found.name.as_deref() == Some("Body"))
-            .or(paragraph_styles.first())
-            .map(|found| found.identifier)
+        let base = style
+            .based_on
+            .map(crate::element::StyleId::get)
+            .or_else(|| {
+                paragraph_styles
+                    .iter()
+                    .find(|found| found.name.as_deref() == Some("Body"))
+                    .or(paragraph_styles.first())
+                    .map(|found| found.identifier)
+            })
             .ok_or_else(|| {
                 Error::refused(
                     Refusal::Missing,
@@ -7573,6 +7680,25 @@ impl Document {
         Ok(())
     }
 
+    /// One of the cell styles a table's areas are drawn with (see
+    /// [`Document::cell_styles`]), to repaint — every cell that uses it.
+    pub fn cell_style_mut(
+        &mut self,
+        style: u64,
+    ) -> Result<crate::element::CellStyleMut<'_>, Error> {
+        if !self
+            .cell_styles()
+            .iter()
+            .any(|found| found.identifier == style)
+        {
+            return Err(Error::refused(
+                Refusal::NotFound,
+                format!("no cell style {style} — `doc.cell_styles()` lists the ones there are"),
+            ));
+        }
+        Ok(crate::element::CellStyleMut::new(self, style))
+    }
+
     /// A named text style, to change: its look, its alignment, its name.
     pub fn text_style_mut(
         &mut self,
@@ -7608,11 +7734,11 @@ impl Document {
 
     /// Paint a cell style, or with `None` stop it painting.
     ///
-    /// See [`crate::table::set_cell_style_fill`]: this repaints **every**
+    /// See [`crate::element::CellStyleMut::fill`]: this repaints **every**
     /// table whose style names the cell style, because that is what a shared
     /// style is. The fill is the only property of a cell style this crate
     /// writes; the rest of the archive is left exactly as it was.
-    pub fn set_cell_style_fill(
+    pub(crate) fn set_cell_style_fill(
         &mut self,
         style: u64,
         colour: Option<crate::drawable::Color>,
@@ -7705,7 +7831,7 @@ impl Document {
     /// **locked** drawable is not refused — the lock is a rule the app's UI
     /// keeps, not one the format keeps — but it is reported, because the app
     /// will not let a user undo the move by hand.
-    pub fn set_geometry(
+    pub(crate) fn set_geometry(
         &mut self,
         identifier: u64,
         position: Option<(f32, f32)>,
@@ -8316,7 +8442,7 @@ impl Document {
     ///
     /// **A copy of a variation style does not get the name.** Named styles and
     /// variations are different things: a named style carries a name at
-    /// [`style::NAME`] and an identifier at [`style::STYLE_IDENTIFIER`], while a
+    /// [`crate::style::NAME`] and an identifier at [`crate::style::STYLE_IDENTIFIER`], while a
     /// variation carries neither, a parent, and a flag saying it is one. Naming
     /// the copy of a variation produces an object that claims to be a variation,
     /// has a name, has no identifier, and is listed among the named styles —
@@ -8329,7 +8455,11 @@ impl Document {
     /// properly would mean synthesising a style identifier and clearing the
     /// variation flag, which is more invention than this crate is willing to do
     /// without a document to check it against.
-    pub fn create_text_style(&mut self, template: u64, name: &str) -> Result<CreatedStyle, Error> {
+    pub(crate) fn create_text_style(
+        &mut self,
+        template: u64,
+        name: &str,
+    ) -> Result<CreatedStyle, Error> {
         let source = self
             .text_style(template)
             .ok_or(Error::NoSuchStyle(template))?;
@@ -8418,7 +8548,7 @@ impl Document {
     ///
     /// The escape hatch for everything this crate does not model: the archive
     /// arrives decoded into wire fields and is re-encoded in place afterwards.
-    pub fn update_text_style(
+    pub(crate) fn update_text_style(
         &mut self,
         identifier: u64,
         edit: impl FnOnce(&mut Message),
@@ -8468,7 +8598,7 @@ impl Document {
     /// Returns how many were set. **Zero means the style keeps no colour at
     /// all** — nothing was written, because a colour this crate invents is
     /// missing fields that make Pages refuse the document. Copy the colour from
-    /// a style that has one, with [`Document::copy_text_style_property`].
+    /// a style that has one, with [`crate::element::TextStyleMut::copy_property`].
     ///
     /// Channels are `0.0..=1.0`, as the format stores them.
     pub(crate) fn set_text_style_color(
@@ -8525,7 +8655,7 @@ impl Document {
     ///     Some(iwork::pb::Value::Fixed32(0.85f32.to_le_bytes())))?;
     /// # Ok(()) }
     /// ```
-    pub fn copy_text_style_property(
+    pub(crate) fn copy_text_style_property(
         &mut self,
         from: u64,
         to: u64,
@@ -9128,7 +9258,7 @@ impl Document {
 
     /// Copy a slide, and put the copy straight after it.
     ///
-    /// See [`crate::keynote::duplicate_slide`] for what a copy has to touch and
+    /// See [`crate::document::SlideMut::duplicate`] for what a copy has to touch and
     /// how that was measured.
     pub(crate) fn duplicate_slide(
         &mut self,
@@ -9256,9 +9386,9 @@ impl Document {
     /// Attach a comment to a range of text.
     ///
     /// The range is in UTF-16 code units and half-open. See
-    /// [`crate::annotations::add_comment`] for what it writes and what it
+    /// [`crate::document::TextMut::comment`] for what it writes and what it
     /// refuses.
-    pub fn add_comment(
+    pub(crate) fn add_comment(
         &mut self,
         storage: u64,
         start: u64,
@@ -9270,7 +9400,7 @@ impl Document {
 
     /// Animate a drawable on or off a slide.
     ///
-    /// See [`crate::keynote::add_build`]: the effect is a *build* identifier,
+    /// See [`crate::document::SlideMut::add_build`]: the effect is a *build* identifier,
     /// not a transition one, and the drawable has to be on the slide.
     pub(crate) fn add_build(
         &mut self,
@@ -9283,7 +9413,7 @@ impl Document {
 
     /// Give a slide a transition, or take its transition away.
     ///
-    /// See [`crate::keynote::set_transition`]: the effect may be named the way
+    /// See [`crate::document::SlideMut::transition_with`]: the effect may be named the way
     /// `iwork slides` prints it or by its archive identifier, and `"none"`
     /// removes it.
     pub(crate) fn set_transition(
@@ -9297,7 +9427,7 @@ impl Document {
     /// Paint the background of one slide, or with `None` go back to its
     /// layout's.
     ///
-    /// See [`crate::keynote::set_slide_background`] — the slide is given a
+    /// See [`crate::document::SlideMut::background`] — the slide is given a
     /// slide style of its own, because the one it has is its layout's and
     /// painting that would repaint every slide built on it. The shape of that
     /// style is inferred from the convention the other style archives keep

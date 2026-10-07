@@ -62,7 +62,7 @@
 //!
 //! ## What writes here
 //!
-//! [`add_comment`] attaches a comment to a range of text: the comment, its
+//! [`crate::document::TextMut::comment`] attaches a comment to a range of text: the comment, its
 //! `TSWP.HighlightArchive`, an author in the document's one author storage if
 //! that name is not there yet, and two entries in the run-anchored
 //! `table_highlight` — the anchor at the start, and a *bare index* at the end,
@@ -893,7 +893,7 @@ pub struct CommentEdit {
 /// comment already there — `table_overlapping_highlight` (25) is what the app
 /// uses for two comments over one stretch of text, and no document in this
 /// corpus has one to write from.
-pub fn add_comment(
+pub(crate) fn add_comment(
     document: &mut crate::Document,
     storage: u64,
     start: u64,

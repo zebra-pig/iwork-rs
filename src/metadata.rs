@@ -340,7 +340,7 @@ pub fn root_archive(document: &crate::Document) -> Option<(u64, Message)> {
 /// no `template_identifier` at all, so a document stamped out of one without
 /// this would be the only document in the corpus that does not know where it
 /// came from.
-pub fn set_template_identifier(
+pub(crate) fn set_template_identifier(
     document: &mut crate::Document,
     identifier: &str,
 ) -> Result<(), Error> {

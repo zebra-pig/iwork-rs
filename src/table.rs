@@ -4402,7 +4402,7 @@ fn table_styles_by_name(document: &crate::Document) -> Option<crate::create::Tab
 /// slide own theirs and are named as its parent, a Pages page owns nothing and
 /// names it in a page group. Every cell of the new table can be written from
 /// the start, which is the whole reason it carries a `TileRowInfo` per row.
-pub fn add_table(
+pub(crate) fn add_table(
     document: &mut crate::Document,
     container: &str,
     name: &str,
@@ -4496,7 +4496,7 @@ pub fn add_table(
 }
 
 /// Add a sheet, with one table on it, to a Numbers document.
-pub fn add_sheet(
+pub(crate) fn add_sheet(
     document: &mut crate::Document,
     name: &str,
     table: &str,
@@ -4620,7 +4620,7 @@ const NUMERIC_PREDICATES: [i64; 2] = [7, 9];
 /// What this does **not** do is make a rule, or a style for one to apply. Both
 /// are copies of things a document already has, and a document with no
 /// highlighting has neither.
-pub fn set_conditional_threshold(
+pub(crate) fn set_conditional_threshold(
     document: &mut crate::Document,
     set: u64,
     rule: usize,
@@ -4952,7 +4952,7 @@ fn properties_of(archive: &Message) -> Option<Message> {
 /// Until that archive is understood, a table built from nothing draws
 /// unstyled whatever its cell styles say — which is stated here rather than
 /// left for a caller to discover.
-pub fn set_cell_style_fill(
+pub(crate) fn set_cell_style_fill(
     document: &mut crate::Document,
     style: u64,
     colour: Option<crate::drawable::Color>,

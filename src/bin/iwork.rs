@@ -903,7 +903,7 @@ fn fill_formula(
         Some(text) => Some(parse_cell_value(text)?),
         None => None,
     };
-    doc.fill_formula(table, from, to, value)?;
+    doc.table_mut(table)?.fill_formula(from, to, value)?;
     let shown = doc
         .table(table)
         .map(|t| t.value(to.0, to.1).to_text())
@@ -1114,10 +1114,8 @@ fn add_comment(
     out: &str,
 ) -> Result<(), Error> {
     let mut doc = Document::open(path)?;
-    let comment = doc.add_comment(
-        storage,
-        start,
-        end,
+    let comment = doc.text_mut(storage)?.comment(
+        start..end,
         &iwork::annotations::CommentEdit {
             author: author.to_string(),
             text: text.to_string(),
@@ -2448,7 +2446,7 @@ fn set_geometry(
     if before.locked {
         println!("note: drawable {identifier} is locked, so the app will not let a user move it");
     }
-    let change = doc.set_geometry(identifier, position, size)?;
+    let change = doc.element_mut(identifier)?.set_geometry(position, size)?;
     println!(
         "{} {}: {:.1},{:.1} {:.1} × {:.1} -> {:.1},{:.1} {:.1} × {:.1}",
         before.kind.as_str(),
@@ -3695,7 +3693,7 @@ fn split_csv(line: &str) -> Vec<String> {
 fn set_chart_data(path: &str, chart: u64, csv: &str, out: &str) -> Result<(), Error> {
     let data = chart_data(csv)?;
     let mut doc = Document::open(path)?;
-    doc.set_chart_data(chart, &data)?;
+    doc.chart_mut(chart)?.data(&data)?;
     doc.save(out)?;
     println!(
         "chart {chart} now draws {} series over {} categories",
@@ -3727,7 +3725,12 @@ fn add_chart(
     let size = (number("a size", w)?, number("a size", h)?);
     let data = chart_data(csv)?;
     let mut doc = Document::open(path)?;
-    let chart = doc.copy_chart(where_, from, &data, position, size)?;
+    let chart = doc.canvas_mut(where_)?.add(
+        iwork::Chart::copy_of(from)
+            .with_data(data.clone())
+            .at(position.0, position.1)
+            .size(size.0, size.1),
+    )?;
     doc.save(out)?;
     println!(
         "added chart {chart}, copied from {from}, at {},{} — {} × {}",
@@ -3972,7 +3975,7 @@ fn dump(message: &Message, prefix: &str) {
 
 fn new_style(path: &str, template: u64, name: &str, out: &str) -> Result<(), Error> {
     let mut doc = Document::open(path)?;
-    let created = doc.create_text_style(template, name)?;
+    let created = doc.text_style_mut(template)?.copy(name)?;
     println!(
         "created style {} from {} in {} ({} stylesheet entries cloned)",
         created.identifier, created.template, created.stream, created.registrations_cloned

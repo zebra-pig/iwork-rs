@@ -40,8 +40,8 @@
 //! node is dropped, its operands are printed, and the wrapper is reported as a
 //! count.
 //!
-//! **What writes here, and what does not.** [`set_chart_data`] rewrites the
-//! private grid and [`add_chart`] puts a copy of an existing chart somewhere
+//! **What writes here, and what does not.** [`crate::element::ChartMut::data`] rewrites the
+//! private grid and [`crate::element::Chart::copy_of`] puts a copy of an existing chart somewhere
 //! else with new numbers in it. Neither touches a chart that has a mediator:
 //! that grid is a cache of a calculation this crate does not perform, and
 //! numbers written into it disagree with the table the chart claims to follow
@@ -1138,7 +1138,7 @@ mod tests {
 /// What a chart is to be made to draw: the same three lists [`Grid`] reads.
 ///
 /// The row and column *ids* are not here. They are stable identities the app
-/// keeps across an edit, so [`set_chart_data`] carries over the ones the chart
+/// keeps across an edit, so [`crate::element::ChartMut::data`] carries over the ones the chart
 /// already has and mints a fresh UUID only for a row or column that did not
 /// exist before — which is what makes a rewritten chart the same chart rather
 /// than a new one that happens to sit in the same place.
@@ -1179,7 +1179,7 @@ impl ChartData {
 /// styles, its legend and its rectangle. A row beyond the ones the chart had
 /// takes its colour from the theme's series palette, which is a fixed six and
 /// cycles — the same thing the app does when a chart is given a seventh series.
-pub fn set_chart_data(
+pub(crate) fn set_chart_data(
     document: &mut crate::Document,
     chart: u64,
     data: &ChartData,
@@ -1369,7 +1369,7 @@ const NON_STYLES: [u32; 6] = [
 /// component** — its non-styles, which carry per-chart state like an axis
 /// title — is copied and renumbered, so editing one chart cannot change the
 /// other.
-pub fn add_chart(
+pub(crate) fn add_chart(
     document: &mut crate::Document,
     container: &str,
     from: u64,
@@ -1499,7 +1499,7 @@ pub fn add_chart(
     Ok(chart)
 }
 
-/// The kinds of chart [`new_chart`] makes: the 2D ones whose data is a plain
+/// The kinds of chart [`crate::element::Chart`] makes: the 2D ones whose data is a plain
 /// rectangle of numbers, each of which Keynote was watched making from the
 /// same preset with nothing but this number different.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1563,7 +1563,7 @@ fn references_by_path(message: &Message, path: &mut Vec<u32>, out: &mut Vec<(Vec
 /// theme the way the apps register theirs.
 ///
 /// `data` is rows of numbers; each row is a series, each column a category.
-pub fn new_chart(
+pub(crate) fn new_chart(
     document: &mut crate::Document,
     container: &str,
     kind: ChartKind,
@@ -1818,7 +1818,7 @@ fn edit_settings(
 ///
 /// `showtitle` (21) and `title` (23) of the chart's own settings. Keynote
 /// draws the title above the plot, in the preset's title style.
-pub fn set_title(
+pub(crate) fn set_title(
     document: &mut crate::Document,
     chart: u64,
     title: Option<&str>,
@@ -1835,7 +1835,7 @@ pub fn set_title(
 }
 
 /// Show or hide a chart's legend — `showlegend` (20) of its own settings.
-pub fn set_legend(
+pub(crate) fn set_legend(
     document: &mut crate::Document,
     chart: u64,
     shown: bool,
@@ -1920,7 +1920,7 @@ fn place(archive: &mut Message, parent: Option<u64>, position: (f32, f32), size:
 // -- binding a chart to a table ----------------------------------------------
 
 /// Which cells of which table feed a chart — see
-/// [`crate::Document::bind_chart`].
+/// [`crate::element::ChartMut::bind`].
 ///
 /// One range per series, and the label ranges beside them. Named rather than
 /// positional, because a chart binding is four lists and an order nobody
@@ -1976,7 +1976,7 @@ pub const MEDIATOR_FUNCTION: u64 = 175;
 /// Refused by name: a chart that already has a mediator, a range outside the
 /// table, a binding with no series, and a table whose identity the engine does
 /// not know.
-pub fn bind_chart(
+pub(crate) fn bind_chart(
     document: &mut crate::Document,
     chart: u64,
     table: &crate::table::TableInfo,
