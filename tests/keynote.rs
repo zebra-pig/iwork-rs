@@ -22,6 +22,10 @@
 //! deck and read the copy's title and notes back, then asked to *save* it, so
 //! that what is on disk afterwards was written by Keynote from its own model.
 
+// These exercise the 0.2 calls, which 0.3 keeps behind `#[deprecated]`;
+// `tests/elements.rs` is the same ground through the 0.3 API.
+#![allow(deprecated)]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 

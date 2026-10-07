@@ -2026,27 +2026,50 @@ pub struct TextLook {
 }
 
 impl TextLook {
-    /// Bold, and nothing else changed.
-    pub fn bold() -> TextLook {
-        TextLook {
-            bold: Some(true),
-            ..TextLook::default()
-        }
+    /// A look that changes nothing yet.
+    pub fn new() -> TextLook {
+        TextLook::default()
     }
 
-    /// Italic, and nothing else changed.
-    pub fn italic() -> TextLook {
-        TextLook {
-            italic: Some(true),
-            ..TextLook::default()
-        }
+    /// Bold.
+    pub fn bold(mut self) -> TextLook {
+        self.bold = Some(true);
+        self
     }
 
-    /// A colour, and nothing else changed.
-    pub fn coloured(colour: crate::drawable::Color) -> TextLook {
-        TextLook {
-            colour: Some(colour),
-            ..TextLook::default()
-        }
+    /// Italic.
+    pub fn italic(mut self) -> TextLook {
+        self.italic = Some(true);
+        self
+    }
+
+    /// Underlined, with a single line.
+    pub fn underline(mut self) -> TextLook {
+        self.underline = Some(true);
+        self
+    }
+
+    /// Struck through, with a single line.
+    pub fn strikethrough(mut self) -> TextLook {
+        self.strikethrough = Some(true);
+        self
+    }
+
+    /// Font size, in points.
+    pub fn size(mut self, points: f32) -> TextLook {
+        self.size = Some(points);
+        self
+    }
+
+    /// A PostScript font name, e.g. `"AvenirNext-DemiBold"`.
+    pub fn font(mut self, name: impl Into<String>) -> TextLook {
+        self.font = Some(name.into());
+        self
+    }
+
+    /// Text colour.
+    pub fn colour(mut self, colour: crate::drawable::Color) -> TextLook {
+        self.colour = Some(colour);
+        self
     }
 }

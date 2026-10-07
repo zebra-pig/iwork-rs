@@ -4,7 +4,52 @@ What changed, and — because this is a reverse-engineered format — **how it w
 established**. An entry that cannot say what the app did is an entry about
 bytes nobody has watched being read.
 
-## 0.2.5 — unreleased
+## 0.3.0 — unreleased
+
+**The API is rebuilt around one idea: values to create, handles to edit.**
+`API.md` is the rule book and the plan; this is its first phase. 0.2 calls
+keep compiling, with a warning that names the replacement.
+
+### Added
+
+- **`slide.add(value)`** — and `doc.sheet_mut(name)?.add(…)`,
+  `doc.page_mut(1)?.add(…)`. The values are `Shape`, `TextBox`, `Image`,
+  `Chart` and `element::Table`; each says what it is, where it goes
+  (`.at(x, y)`, `.size(w, h)`) and how it looks, cannot fail to build, and
+  can be kept and added again. A refused `add` leaves the document as it was.
+- **`Chart::new(kind).categories([…]).series(name, […]).title("…").legend()`**
+  — a title and a legend, which are the chart's own settings (`showtitle`,
+  `title`, `showlegend`); Keynote draws both and keeps them through its save.
+- **`doc.add_text_style(&TextStyle::new("Title").look(…).align(…))`** — a
+  named paragraph style from typed values, no protobuf in sight.
+- **Handles for what is there**: `doc.element_mut(id)?` (`fill`, `stroke`,
+  `no_stroke`, `shadow`, `no_shadow`, `opacity`, `move_to`, `resize`, `text`)
+  and `doc.chart_mut(id)?` (`data`, `title`, `legend`, …).
+- `Color::rgb`, `Color::rgb8`, `Color::hex("#122B4A")?`, `Color::WHITE`;
+  `TextLook::new().font(…).size(…).colour(…).bold()`.
+
+### Changed — breaking
+
+- **`Fill` is one type, read and written**: `None`, `Color`, `Gradient(…)`,
+  `Image(…)`. It was a read-only summary (`Gradient { stops: usize, .. }`).
+  `slide.background(…)` takes anything that converts into one.
+- **`chart::Chart` is `ChartInfo` and `style::TextStyle` is `TextStyleInfo`**:
+  a snapshot of what a document holds is named `…Info`, and the bare noun is
+  the value you build.
+- `TextLook::bold()`, `::italic()` and `::coloured(c)` were constructors and
+  are builder methods: `TextLook::new().bold()`.
+- `Document::add_chart` (copy a chart the document has) is `copy_chart`.
+
+### Deprecated
+
+`add_shape`, `add_text_box`, `add_image`, `add_image_at`, `new_chart`,
+`set_object_fill` / `_gradient` / `_image_fill` / `_stroke` / `_opacity` /
+`_shadow`, `background_gradient`. Each warning names what to write instead.
+
+### Fixed
+
+- A new chart carried the legend position of the chart it was copied from.
+
 
 ## 0.2.4 — 2026-10-07
 

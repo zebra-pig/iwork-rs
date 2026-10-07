@@ -30,8 +30,10 @@ which ground rule 1a calls a defect:
 
 | Pages, chart from `new_chart` | 1 | `TSCHReferenceLineStyle … invalid value axis label paragraph style` | seen before the Pages blueprint had a theme; not re-measured since |
 
-A chart from `new_chart` has no legend (the kit's chart was made by
-AppleScript's `add chart`, which leaves it off) and nothing here turns one on.
+A chart's legend goes where Keynote puts it when the archive names no frame
+for it: top left, where with three series it runs into the first axis label.
+`ChartArchive.legend_frame` (3) is in a coordinate space nobody has worked
+out — the kit's chart at 689,324 had one at −825,−380.
 `add_chart` shares the source chart's two caption stand-ins (3097) with the
 copy rather than copying them; `new_chart` copies them.
 

@@ -164,6 +164,7 @@ pub mod chart;
 pub mod create;
 pub mod document;
 pub mod drawable;
+pub mod element;
 pub mod formula;
 pub mod formula_parse;
 pub mod iwa;
@@ -181,15 +182,21 @@ pub mod table;
 pub mod text;
 
 pub use annotations::{Annotations, Author, Change, Comment};
-pub use chart::{Chart, DataReferences, Grid, GridValue, Series};
+pub use chart::{ChartInfo, ChartKind, DataReferences, Grid, GridValue, Series};
 pub use document::{Component, DataFile, Document, Kind, TextEdit, TextStorage};
+pub use drawable::{Color, Fill, Frame, Gradient, ImageFit, Outline, Shadow};
 pub use drawable::{Drawable, Geometry, Placement};
+pub use element::{
+    CanvasMut, Chart, ChartMut, Element, ElementMut, Image, Shape, TextBox, TextStyle,
+};
 pub use formula::{Ast, Formula, Node, Reference};
 pub use keynote::{Layout, Placeholder, Show, Slide, SlideCopy, Transition};
 pub use media::MediaReplacement;
 pub use package::{Form, Package};
-pub use style::{CreatedStyle, Label, StyleDeletion, StyleKind, StyleUse, TextStyle};
+pub use style::{CreatedStyle, Label, StyleDeletion, StyleKind, StyleUse, TextStyleInfo};
+pub use table::Align;
 pub use table::{Cell, CellControl, CellFormat, CellValue, Merge, Table};
+pub use text::TextLook;
 
 /// `TSWP.StorageArchive` — a run of styled text. Same in all three apps.
 pub const TYPE_STORAGE: u32 = 2001;

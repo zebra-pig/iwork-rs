@@ -395,6 +395,50 @@ pub struct Color {
 }
 
 impl Color {
+    pub const WHITE: Color = Color::rgb(1.0, 1.0, 1.0);
+    pub const BLACK: Color = Color::rgb(0.0, 0.0, 0.0);
+
+    /// An opaque colour from channels `0.0..=1.0`.
+    pub const fn rgb(red: f32, green: f32, blue: f32) -> Color {
+        Color {
+            red,
+            green,
+            blue,
+            alpha: 1.0,
+        }
+    }
+
+    /// An opaque colour from channels `0..=255`.
+    pub const fn rgb8(red: u8, green: u8, blue: u8) -> Color {
+        Color::rgb(
+            red as f32 / 255.0,
+            green as f32 / 255.0,
+            blue as f32 / 255.0,
+        )
+    }
+
+    /// `#RRGGBB` or `RRGGBB`.
+    pub fn hex(text: &str) -> Result<Color, crate::Error> {
+        let digits = text.trim().trim_start_matches('#');
+        let channel = |at: usize| {
+            digits
+                .get(at..at + 2)
+                .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+        };
+        match (digits.len(), channel(0), channel(2), channel(4)) {
+            (6, Some(red), Some(green), Some(blue)) => Ok(Color::rgb8(red, green, blue)),
+            _ => Err(crate::Error::refused(
+                crate::Refusal::UnwritableValue,
+                format!("{text:?} is not a colour like #122B4A"),
+            )),
+        }
+    }
+
+    /// The same colour, this opaque: `0.0..=1.0`.
+    pub const fn with_alpha(self, alpha: f32) -> Color {
+        Color { alpha, ..self }
+    }
+
     /// Read the channels of a `TSP.Color`, if that is what this message is.
     pub fn decode(message: &Message) -> Option<Color> {
         if !crate::style::is_color(message) {
@@ -429,17 +473,57 @@ impl std::fmt::Display for Color {
     }
 }
 
-/// `TSD.FillArchive` — a tagged union with exactly one arm set. An empty
-/// message is a fill that is there and paints nothing.
-#[derive(Debug, Clone)]
+/// What something is filled with: nothing, a colour, a gradient or a
+/// picture — `TSD.FillArchive`, a tagged union with exactly one arm set.
+///
+/// One type for a shape, a slide's background and anything else that has a
+/// fill, read and written alike. A [`Color`] and a [`Gradient`] convert into
+/// one, so `shape.fill(RED)` and `shape.fill(Gradient::linear(…))` both read
+/// as what they are.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Fill {
+    /// A fill that is there and paints nothing.
     None,
     Color(Color),
-    Gradient { stops: usize, angle: Option<f32> },
-    Image { data: Option<u64>, technique: u32 },
+    Gradient(Gradient),
+    Image(ImageFill),
+}
+
+/// A picture as a fill.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImageFill {
+    pub source: ImageSource,
+    pub fit: ImageFit,
+}
+
+/// Where a picture fill's picture is.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ImageSource {
+    /// PNG or JPEG bytes to store in the document, and the name to store
+    /// them under. What a caller writes.
+    Bytes { bytes: Vec<u8>, name: String },
+    /// A picture already in the document, by its data identifier. What a
+    /// document reads back as.
+    Stored(u64),
 }
 
 impl Fill {
+    /// A picture, scaled to cover what it fills.
+    pub fn image(bytes: impl Into<Vec<u8>>, name: impl Into<String>) -> Fill {
+        Fill::Image(ImageFill {
+            source: ImageSource::Bytes {
+                bytes: bytes.into(),
+                name: name.into(),
+            },
+            fit: ImageFit::ScaleToFill,
+        })
+    }
+
+    /// A two-colour linear gradient. See [`Gradient::linear`].
+    pub fn gradient(from: Color, to: Color, angle: f32) -> Fill {
+        Fill::Gradient(Gradient::linear(from, to, angle))
+    }
+
     pub(crate) fn decode(message: &Message) -> Fill {
         if let Some(colour) = message.bytes(1).and_then(decode_nested) {
             if let Some(colour) = Color::decode(&colour) {
@@ -447,20 +531,29 @@ impl Fill {
             }
         }
         if let Some(gradient) = message.bytes(2).and_then(decode_nested) {
+            let stops = gradient
+                .all(2)
+                .filter_map(|value| match value {
+                    Value::Bytes(raw) => decode_nested(raw),
+                    _ => None,
+                })
+                .filter_map(|stop| {
+                    let colour = stop.bytes(1).and_then(decode_nested)?;
+                    Some((Color::decode(&colour)?, float(&stop, 2)))
+                })
+                .collect();
             let angle = gradient
                 .bytes(5)
                 .and_then(decode_nested)
-                .map(|a| float(&a, 2));
-            return Fill::Gradient {
-                stops: gradient.all(2).count(),
-                angle,
-            };
+                .map(|a| float(&a, 2).to_degrees())
+                .unwrap_or(0.0);
+            return Fill::Gradient(Gradient { stops, angle });
         }
         if let Some(image) = message.bytes(3).and_then(decode_nested) {
-            return Fill::Image {
-                data: image.bytes(6).and_then(reference),
-                technique: image.varint(2).unwrap_or(0) as u32,
-            };
+            return Fill::Image(ImageFill {
+                source: ImageSource::Stored(image.bytes(6).and_then(reference).unwrap_or(0)),
+                fit: ImageFit::from_wire(image.varint(2).unwrap_or(0)),
+            });
         }
         Fill::None
     }
@@ -469,9 +562,29 @@ impl Fill {
         match self {
             Fill::None => "none",
             Fill::Color(_) => "colour",
-            Fill::Gradient { .. } => "gradient",
-            Fill::Image { .. } => "image",
+            Fill::Gradient(_) => "gradient",
+            Fill::Image(_) => "image",
         }
+    }
+}
+
+impl From<Color> for Fill {
+    fn from(colour: Color) -> Fill {
+        Fill::Color(colour)
+    }
+}
+
+impl From<Gradient> for Fill {
+    fn from(gradient: Gradient) -> Fill {
+        Fill::Gradient(gradient)
+    }
+}
+
+/// `Some(colour)` is that colour and `None` is no fill — what the 0.2 calls
+/// took, so they still read.
+impl From<Option<Color>> for Fill {
+    fn from(colour: Option<Color>) -> Fill {
+        colour.map_or(Fill::None, Fill::Color)
     }
 }
 
@@ -536,7 +649,7 @@ impl Stroke {
 
 /// `TSD.ShadowArchive`. Every field has a non-zero default, so a shadow read
 /// as a zeroed struct renders differently from the one iWork drew.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Shadow {
     pub color: Option<Color>,
     pub angle: f32,
@@ -2562,23 +2675,79 @@ fn own_style(document: &mut crate::Document, drawable: u64) -> Result<u64, crate
 pub fn set_fill(
     document: &mut crate::Document,
     drawable: u64,
-    colour: Option<Color>,
+    fill: &Fill,
 ) -> Result<(), crate::Error> {
-    let style = own_style(document, drawable)?;
-    let fill = match colour {
-        None => Message::default(),
-        Some(colour) => {
-            let mut fill = Message::default();
-            fill.set_in_order(1, Value::Bytes(colour_message(colour).encode()));
-            fill
+    // Checked before the drawable is given a style of its own, so a fill that
+    // is refused leaves the document as it was.
+    let (archive, picture) = match fill {
+        Fill::None => (Message::default(), None),
+        Fill::Color(colour) => {
+            let mut archive = Message::default();
+            archive.set_in_order(1, Value::Bytes(colour_message(*colour).encode()));
+            (archive, None)
+        }
+        Fill::Gradient(gradient) => (gradient.fill()?, None),
+        Fill::Image(image) => {
+            let (data, natural) = match &image.source {
+                ImageSource::Bytes { bytes, name } => {
+                    let natural = crate::media::pixel_size(bytes).ok_or_else(|| {
+                        crate::Error::Format(
+                            "the picture is not a PNG or a JPEG this crate can measure".into(),
+                        )
+                    })?;
+                    let digest = crate::media::sha1(bytes);
+                    let stored = document
+                        .data_files()
+                        .into_iter()
+                        .find(|file| file.digest == digest)
+                        .map(|file| file.identifier);
+                    let data = match stored {
+                        Some(data) => data,
+                        None => {
+                            let data = document.next_object_identifier();
+                            document.set_last_object_identifier(data)?;
+                            document.register_media(data, bytes, name, natural)?;
+                            data
+                        }
+                    };
+                    (data, Some(natural))
+                }
+                ImageSource::Stored(data) => {
+                    if !document.data_files().iter().any(|f| f.identifier == *data) {
+                        return Err(crate::Error::refused(
+                            crate::Refusal::NotFound,
+                            format!("the document stores no picture {data}"),
+                        ));
+                    }
+                    (*data, None)
+                }
+            };
+            let mut picture = Message::default();
+            picture.set_in_order(2, Value::Varint(image.fit as u64));
+            if let Some((width, height)) = natural {
+                let mut size = Message::default();
+                size.set_in_order(1, Value::Fixed32(width.to_le_bytes()));
+                size.set_in_order(2, Value::Fixed32(height.to_le_bytes()));
+                picture.set_in_order(4, Value::Bytes(size.encode()));
+            }
+            picture.set_in_order(6, Value::Bytes(crate::style::reference(data).encode()));
+            picture.set_in_order(8, Value::Varint(1));
+            let mut archive = Message::default();
+            archive.set_in_order(3, Value::Bytes(picture.encode()));
+            (archive, Some(data))
         }
     };
+    let style = own_style(document, drawable)?;
     set_property(
         document,
         style,
         Property::Fill,
-        Some(Value::Bytes(fill.encode())),
-    )
+        Some(Value::Bytes(archive.encode())),
+    )?;
+    // A style that names a picture declares it; one that no longer does, does
+    // not.
+    let pictures: Vec<u64> = picture.into_iter().collect();
+    document.set_data_references(style, &pictures)
 }
 
 /// A linear gradient: colours along a line at an angle.
@@ -2668,21 +2837,25 @@ pub enum ImageFit {
     ScaleToFit = 4,
 }
 
-/// Fill a drawable with a gradient. See [`set_fill`] for why the argument is
-/// the drawable and what the first paint does.
+impl ImageFit {
+    fn from_wire(technique: u64) -> ImageFit {
+        match technique {
+            1 => ImageFit::Stretch,
+            2 => ImageFit::Tile,
+            3 => ImageFit::ScaleToFill,
+            4 => ImageFit::ScaleToFit,
+            _ => ImageFit::Original,
+        }
+    }
+}
+
+/// Fill a drawable with a gradient — [`set_fill`] with a [`Fill::Gradient`].
 pub fn set_gradient(
     document: &mut crate::Document,
     drawable: u64,
     gradient: &Gradient,
 ) -> Result<(), crate::Error> {
-    let fill = gradient.fill()?;
-    let style = own_style(document, drawable)?;
-    set_property(
-        document,
-        style,
-        Property::Fill,
-        Some(Value::Bytes(fill.encode())),
-    )
+    set_fill(document, drawable, &Fill::Gradient(gradient.clone()))
 }
 
 /// Give a drawable a drop shadow, or with `None` take it away.
@@ -2735,7 +2908,7 @@ pub fn set_shadow(
     )
 }
 
-/// Fill a drawable with a picture.
+/// Fill a drawable with a picture — [`set_fill`] with a [`Fill::Image`].
 ///
 /// The bytes go into the package once per distinct content, as
 /// [`add_image`]'s do, and the style that names them declares them in its own
@@ -2749,41 +2922,14 @@ pub fn set_image_fill(
     preferred_name: &str,
     fit: ImageFit,
 ) -> Result<(), crate::Error> {
-    let natural = crate::media::pixel_size(bytes).ok_or_else(|| {
-        crate::Error::Format("the picture is not a PNG or a JPEG this crate can measure".into())
-    })?;
-    let style = own_style(document, drawable)?;
-    let digest = crate::media::sha1(bytes);
-    let data = match document
-        .data_files()
-        .into_iter()
-        .find(|file| file.digest == digest)
-    {
-        Some(file) => file.identifier,
-        None => {
-            let data = document.next_object_identifier();
-            document.set_last_object_identifier(data)?;
-            document.register_media(data, bytes, preferred_name, natural)?;
-            data
-        }
-    };
-    let mut size = Message::default();
-    size.set_in_order(1, Value::Fixed32(natural.0.to_le_bytes()));
-    size.set_in_order(2, Value::Fixed32(natural.1.to_le_bytes()));
-    let mut image = Message::default();
-    image.set_in_order(2, Value::Varint(fit as u64));
-    image.set_in_order(4, Value::Bytes(size.encode()));
-    image.set_in_order(6, Value::Bytes(crate::style::reference(data).encode()));
-    image.set_in_order(8, Value::Varint(1));
-    let mut fill = Message::default();
-    fill.set_in_order(3, Value::Bytes(image.encode()));
-    set_property(
-        document,
-        style,
-        Property::Fill,
-        Some(Value::Bytes(fill.encode())),
-    )?;
-    document.set_data_references(style, &[data])
+    let fill = Fill::Image(ImageFill {
+        source: ImageSource::Bytes {
+            bytes: bytes.to_vec(),
+            name: preferred_name.to_string(),
+        },
+        fit,
+    });
+    set_fill(document, drawable, &fill)
 }
 
 /// Outline a drawable: colour and width in points, solid.

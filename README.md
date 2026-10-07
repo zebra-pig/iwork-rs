@@ -11,6 +11,10 @@ documents and checked by the tests in this repository.
 cargo add iwork
 ```
 
+**The API in one line:** values to create, handles to edit —
+`slide.add(Chart::new(ChartKind::Column).categories([…]).series("2026", […]))?`.
+[`API.md`](API.md) is the rule book behind it.
+
 **In a hurry?** [`COOKBOOK.md`](COOKBOOK.md) is three short recipes — a
 spreadsheet, a deck and a report that look designed — each one run by this
 repository's tests. This README is the longer account: what the format is, and
@@ -64,15 +68,15 @@ something somebody changed by hand.
 use iwork::drawable::Color;
 use iwork::table::CellText;
 
-let navy = Color { red: 0.11, green: 0.22, blue: 0.38, alpha: 1.0 };
-let white = Color { red: 1.0, green: 1.0, blue: 1.0, alpha: 1.0 };
+let navy = Color::rgb(0.11, 0.22, 0.38);
+let white = Color::WHITE;
 
 q1.fill("A1:B1", Some(navy))?;                                  // cells, empty ones too
 q1.text_look("A1:B1", &CellText { colour: Some(white), ..CellText::bold() })?;
 
-let badge = doc.add_shape("Sales", Outline::Ellipse, "Q1", (420.0, 40.0), (90.0, 90.0))?;
-doc.set_object_fill(badge, Some(navy))?;                        // a shape, an image's frame
-doc.set_object_stroke(badge, white, 2.0)?;
+doc.sheet_mut("Sales")?.add(                                    // a shape, on the sheet
+    Shape::ellipse().text("Q1").at(420.0, 40.0).size(90.0, 90.0).fill(navy).stroke(white, 2.0),
+)?;
 ```
 
 A table made from nothing is drawn as Numbers draws a new one — gridlines, a
@@ -101,7 +105,7 @@ let mut slide = deck.slide_mut(0)?;                // by position; ids are spell
 slide.title("Quarterly review")?;                  // the layout's title placeholder
 slide.notes("The numbers are provisional")?;
 slide.transition("dissolve")?;
-slide.add_text_box("Aside", Frame { x: 100.0, y: 120.0, width: 600.0, height: 120.0 })?;
+slide.add(TextBox::new("Aside").at(100.0, 120.0).size(600.0, 120.0))?;
 ```
 
 **A slide is not a page with a title slot.** What a slide can hold is decided by
@@ -232,7 +236,8 @@ stays a blank rather than shifting its row. Told to draw three series over four
 categories where it had two over three, Keynote read the chart back and wrote
 it out unchanged, and so did Pages.
 
-`Document::add_chart` puts a **copy** of a chart the document already has on a
+A chart from data is a value — `slide.add(Chart::new(ChartKind::Line)…)`, see
+the cookbook. `Document::copy_chart` puts a **copy** of a chart the document already has on a
 slide, a sheet or a page — a copy rather than an invention, because a dozen
 objects of theme properties stand behind a chart and this crate decodes none of
 them. What is copied and what is shared follows the archive's own distinction:
@@ -630,8 +635,8 @@ test` compares every one of them with what Keynote and Pages report.
 nothing points every shape at a theme preset, and so does a document the app
 wrote until somebody changes one. Painting the shared style is the obvious
 edit and does not survive: Keynote regenerates its presets on save, and the
-colour is gone from the file it writes back. `set_object_fill`,
-`set_object_stroke` and `set_object_opacity` take the *drawable*, and the
+colour is gone from the file it writes back. `doc.element_mut(id)?.fill(…)`,
+`.stroke(…)` and `.opacity(…)` act on the *drawable*, and the
 first of them to touch it makes the variation the app would have made — a red
 rectangle and a blue ellipse written here read back, channel for channel, out
 of the file Keynote itself saved.
@@ -681,14 +686,15 @@ An honest limit, worth stating plainly: an app round trip proves the document
 opens and that the picture is still where it was. It cannot prove the pixels
 drawn are the new ones — nothing on a locked screen can see what is rendered.
 
-**A drawable can be added where there was none.** `Document::add_text_box` and
-`add_shape` put a box, an ellipse or a line on a Keynote slide, a Numbers sheet
+**A drawable can be added where there was none.** `TextBox` and `Shape` put a
+box, an ellipse or a line on a Keynote slide, a Numbers sheet
 or a Pages page:
 
 ```rust
 let mut doc = iwork::Document::new(iwork::Kind::Pages)?;
-doc.add_text_box("page 1", "Aus dem Nichts", (72.0, 300.0), (400.0, 100.0))?;
-doc.add_shape("page 1", Outline::Line, "", (72.0, 700.0), (400.0, 0.0))?;
+let mut page = doc.page_mut(1)?;
+page.add(TextBox::new("Aus dem Nichts").at(72.0, 300.0).size(400.0, 100.0))?;
+page.add(Shape::line().at(72.0, 700.0).size(400.0, 0.0))?;
 doc.save("Drawn.pages")?;
 ```
 

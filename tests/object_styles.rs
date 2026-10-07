@@ -20,6 +20,10 @@
 //! written here read back out of the file Keynote itself wrote, channels
 //! unchanged, and the same in Pages.
 
+// These exercise the 0.2 calls, which 0.3 keeps behind `#[deprecated]`;
+// `tests/elements.rs` is the same ground through the 0.3 API.
+#![allow(deprecated)]
+
 use std::path::{Path, PathBuf};
 
 use iwork::drawable::{Color, Fill, Outline};
@@ -376,11 +380,12 @@ fn style_of(doc: &Document, drawable: u64) -> iwork::drawable::ObjectStyle {
 
 fn assert_looks(doc: &Document, [graded, shaded, pictured]: [u64; 3], who: &str) {
     match style_of(doc, graded).fill {
-        Some(Fill::Gradient { stops: 3, angle }) => {
-            let angle = angle.expect("an angle");
+        Some(Fill::Gradient(gradient)) => {
+            assert_eq!(gradient.stops.len(), 3, "{who}");
             assert!(
-                (angle - std::f32::consts::FRAC_PI_2).abs() < 1e-4,
-                "{who}: {angle}"
+                (gradient.angle - 90.0).abs() < 1e-3,
+                "{who}: {}",
+                gradient.angle
             );
         }
         other => panic!("{who}: the gradient is {other:?}"),
@@ -390,10 +395,11 @@ fn assert_looks(doc: &Document, [graded, shaded, pictured]: [u64; 3], who: &str)
     assert_eq!((shadow.offset, shadow.radius), (20.0, 9), "{who}");
     assert!((shadow.opacity - 0.5).abs() < 1e-4, "{who}");
     match style_of(doc, pictured).fill {
-        Some(Fill::Image {
-            data: Some(data),
-            technique: 3,
-        }) => {
+        Some(Fill::Image(image)) => {
+            assert_eq!(image.fit, iwork::drawable::ImageFit::ScaleToFill, "{who}");
+            let iwork::drawable::ImageSource::Stored(data) = image.source else {
+                panic!("{who}: a document reads a picture back as stored");
+            };
             assert!(
                 doc.data_files().iter().any(|file| file.identifier == data),
                 "{who}"

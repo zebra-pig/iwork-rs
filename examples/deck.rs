@@ -6,29 +6,16 @@
 //! open Quarter.key
 //! ```
 //!
-//! Three things do the looking, and each is the same idea: *one* slide, shape
-//! or paragraph is given a variation of the style it had — the parent's
-//! reference and only what differs — which is how Keynote stores something
-//! somebody changed by hand.
-//!
-//! * a slide's **background** is its slide style's fill, so a painted slide
-//!   gets a slide style of its own rather than repainting its layout;
-//! * a shape's **fill, outline and opacity** are its object style's, so a
-//!   painted shape gets one of its own rather than repainting a theme preset;
-//! * a paragraph's **face, size and colour** are a paragraph style's, made
-//!   here by copying the deck's one style, `Body`, and changing what differs.
-//!
-//! **A slide is not a page with a title slot.** What a slide can hold is
-//! decided by the *layout* it is built on. A deck made from nothing has one
-//! layout, so the words here go in text boxes placed on the slide; start from
-//! one of Apple's themes with `Document::from_template` and `slide.title(…)`
-//! and `slide.body(…)` write the theme's own placeholders.
+//! **Values to create, handles to edit.** Everything on a slide here is a
+//! value — a [`Shape`], a [`TextBox`], a [`Chart`] — that says what it is,
+//! where it goes and how it looks, and is handed to `slide.add(…)`. The
+//! type is a handful of named paragraph styles, made once.
 
-use iwork::drawable::{Color, Frame, Outline};
-use iwork::pb::Value;
-use iwork::style::property;
+use iwork::element::Table;
 use iwork::table::CellText;
-use iwork::{Document, Kind};
+use iwork::{
+    Chart, ChartKind, Color, Document, Gradient, Kind, Shadow, Shape, TextBox, TextLook, TextStyle,
+};
 
 struct Region {
     name: &'static str,
@@ -36,6 +23,8 @@ struct Region {
     revenue: f64,
     /// Share of the quarter's revenue, as a fraction.
     share: f32,
+    /// Units, quarter by quarter.
+    history: [f64; 4],
 }
 
 const SALES: &[Region] = &[
@@ -44,35 +33,29 @@ const SALES: &[Region] = &[
         units: 1_240,
         revenue: 184_300.0,
         share: 0.46,
+        history: [980.0, 1_050.0, 1_170.0, 1_240.0],
     },
     Region {
         name: "Genève",
         units: 980,
         revenue: 151_900.0,
         share: 0.38,
+        history: [900.0, 870.0, 940.0, 980.0],
     },
     Region {
         name: "Lugano",
         units: 415,
         revenue: 62_250.0,
         share: 0.16,
+        history: [310.0, 350.0, 390.0, 415.0],
     },
 ];
 
-const NAVY: Color = rgb(0x12, 0x2B, 0x4A);
-const SAND: Color = rgb(0xF6, 0xEC, 0xD9);
-const RUST: Color = rgb(0xB4, 0x4A, 0x2B);
-const INK: Color = rgb(0x1E, 0x1E, 0x1E);
-const WHITE: Color = rgb(0xFF, 0xFF, 0xFF);
-
-const fn rgb(red: u8, green: u8, blue: u8) -> Color {
-    Color {
-        red: red as f32 / 255.0,
-        green: green as f32 / 255.0,
-        blue: blue as f32 / 255.0,
-        alpha: 1.0,
-    }
-}
+const NAVY: Color = Color::rgb8(0x12, 0x2B, 0x4A);
+const DEEP: Color = Color::rgb8(0x0A, 0x16, 0x2B);
+const SAND: Color = Color::rgb8(0xF6, 0xEC, 0xD9);
+const RUST: Color = Color::rgb8(0xB4, 0x4A, 0x2B);
+const INK: Color = Color::rgb8(0x1E, 0x1E, 0x1E);
 
 /// The paragraph styles the deck is set in, by role.
 struct Type {
@@ -87,254 +70,159 @@ fn main() -> Result<(), iwork::Error> {
         .nth(1)
         .unwrap_or_else(|| "Quarter.key".to_string());
 
-    // A new deck comes with one slide; one more per region, and a summary.
+    // A new deck comes with one slide; one more per region, and two to close.
     let mut doc = Document::new(Kind::Keynote)?;
-    for _ in 0..SALES.len() + 1 {
+    for _ in 0..SALES.len() + 2 {
         doc.add_slide(None)?;
     }
-    let styles = type_styles(&mut doc)?;
+    let style = |name: &str, font: &str, size: f32, colour: Color| {
+        TextStyle::new(name).look(TextLook::new().font(font).size(size).colour(colour))
+    };
+    let styles = Type {
+        kicker: doc.add_text_style(&style("Kicker", "AvenirNext-DemiBold", 28.0, RUST))?,
+        title: doc.add_text_style(&style("Deck Title", "AvenirNext-Bold", 96.0, Color::WHITE))?,
+        figure: doc.add_text_style(&style("Figure", "AvenirNext-Bold", 150.0, NAVY))?,
+        label: doc.add_text_style(&style("Label", "AvenirNext-Regular", 34.0, INK))?,
+    };
 
     cover(&mut doc, &styles)?;
     for (index, region) in SALES.iter().enumerate() {
         region_slide(&mut doc, index + 1, region, &styles)?;
     }
-    summary(&mut doc, SALES.len() + 1, &styles)?;
+    trend(&mut doc, SALES.len() + 1, &styles)?;
+    summary(&mut doc, SALES.len() + 2, &styles)?;
 
     doc.save(&out)?;
     println!("wrote {out} — {} slides", doc.slides().len());
     Ok(())
 }
 
-/// A deck made from nothing has one paragraph style to its name. Everything
-/// else is a copy of it with the fields that must differ changed.
-fn type_styles(doc: &mut Document) -> Result<Type, iwork::Error> {
-    let body = doc
-        .text_styles()
-        .into_iter()
-        .find(|style| style.name.as_deref() == Some("Body"))
-        .map(|style| style.identifier)
-        .ok_or_else(|| iwork::Error::Format("a new deck has a Body style".into()))?;
-
-    let mut make =
-        |name: &str, font: &str, size: f32, colour: Color| -> Result<u64, iwork::Error> {
-            let style = doc.create_text_style(body, name)?.identifier;
-            doc.set_text_style_property(
-                style,
-                property::FONT_NAME,
-                Some(Value::Bytes(font.as_bytes().to_vec())),
-            )?;
-            doc.set_text_style_property(
-                style,
-                property::FONT_SIZE,
-                Some(Value::Fixed32(size.to_le_bytes())),
-            )?;
-            // Every place the style keeps its text colour — the app paints with
-            // the fill inside the glyphs, not with the font colour.
-            doc.set_text_style_color(style, colour.red, colour.green, colour.blue, 1.0)?;
-            Ok(style)
-        };
-    Ok(Type {
-        kicker: make("Kicker", "AvenirNext-DemiBold", 22.0, RUST)?,
-        title: make("Deck Title", "AvenirNext-Bold", 96.0, WHITE)?,
-        figure: make("Figure", "AvenirNext-Bold", 150.0, NAVY)?,
-        label: make("Label", "AvenirNext-Regular", 34.0, INK)?,
-    })
-}
-
-/// Put a line of text on a slide and set it in one of the deck's styles.
-fn line(
-    doc: &mut Document,
-    slide: usize,
-    text: &str,
-    frame: Frame,
-    style: u64,
-) -> Result<u64, iwork::Error> {
-    let drawable = doc.slide_mut(slide)?.add_text_box(text, frame)?;
-    let storage = doc
-        .drawable(drawable)
-        .and_then(|found| found.text)
-        .ok_or_else(|| iwork::Error::Format("a text box has a storage".into()))?;
-    let length = text.encode_utf16().count() as u64;
-    doc.text_mut(storage)?.style(0..length, style)?;
-    Ok(drawable)
-}
-
 /// A filled rectangle with no outline — a bar, a rule, a block of colour.
-fn block(
-    doc: &mut Document,
-    slide: usize,
-    frame: Frame,
-    colour: Color,
-) -> Result<u64, iwork::Error> {
-    let container = doc.slides()[slide].identifier.to_string();
-    let shape = doc.add_shape(
-        &container,
-        Outline::Rectangle,
-        "",
-        (frame.x, frame.y),
-        (frame.width, frame.height),
-    )?;
-    // The first paint gives the shape a style of its own; the next two edit it.
-    doc.set_object_fill(shape, Some(colour))?;
-    doc.set_object_stroke(shape, colour, 0.0)?;
-    Ok(shape)
+fn block(colour: Color) -> Shape {
+    Shape::rectangle().fill(colour).no_stroke()
 }
 
 fn cover(doc: &mut Document, styles: &Type) -> Result<(), iwork::Error> {
-    doc.slide_mut(0)?.background(Some(NAVY))?;
-    block(
-        doc,
-        0,
-        Frame {
-            x: 120.0,
-            y: 420.0,
-            width: 180.0,
-            height: 10.0,
-        },
-        RUST,
-    )?;
-    line(
-        doc,
-        0,
-        "Q3 2026",
-        Frame {
-            x: 120.0,
-            y: 330.0,
-            width: 1200.0,
-            height: 60.0,
-        },
-        styles.kicker,
-    )?;
-    line(
-        doc,
-        0,
-        "Sales by region",
-        Frame {
-            x: 120.0,
-            y: 460.0,
-            width: 1680.0,
-            height: 260.0,
-        },
-        styles.title,
-    )?;
     let mut slide = doc.slide_mut(0)?;
-    slide.notes("Three regions, one slide each, then the table.")?;
+    slide.background(Gradient::linear(NAVY, DEEP, 270.0))?;
+    slide.add(block(RUST).at(120.0, 420.0).size(180.0, 10.0))?;
+    slide.add(
+        TextBox::new("Q3 2026")
+            .at(120.0, 340.0)
+            .size(1200.0, 60.0)
+            .style(styles.kicker),
+    )?;
+    slide.add(
+        TextBox::new("Sales by region")
+            .at(120.0, 460.0)
+            .size(1680.0, 260.0)
+            .style(styles.title),
+    )?;
+    slide.notes("Three regions, one slide each, then the trend and the table.")?;
     slide.transition("dissolve")?;
     Ok(())
 }
 
 fn region_slide(
     doc: &mut Document,
-    slide: usize,
+    index: usize,
     region: &Region,
     styles: &Type,
 ) -> Result<(), iwork::Error> {
-    doc.slide_mut(slide)?.background(Some(SAND))?;
+    let mut slide = doc.slide_mut(index)?;
+    slide.background(SAND)?;
     // A navy band down the left edge, and a bar as long as the region's share.
-    block(
-        doc,
-        slide,
-        Frame {
-            x: 0.0,
-            y: 0.0,
-            width: 60.0,
-            height: 1080.0,
-        },
-        NAVY,
+    slide.add(block(NAVY).at(0.0, 0.0).size(60.0, 1080.0))?;
+    slide.add(block(Color::WHITE).at(160.0, 880.0).size(1600.0, 26.0))?;
+    let bar = slide.add(
+        block(RUST)
+            .at(160.0, 880.0)
+            .size(1600.0 * region.share, 26.0),
     )?;
-    block(
-        doc,
-        slide,
-        Frame {
-            x: 160.0,
-            y: 880.0,
-            width: 1600.0,
-            height: 26.0,
-        },
-        WHITE,
+    slide.add(
+        TextBox::new(region.name)
+            .at(160.0, 140.0)
+            .size(1200.0, 60.0)
+            .style(styles.kicker),
     )?;
-    let bar = block(
-        doc,
-        slide,
-        Frame {
-            x: 160.0,
-            y: 880.0,
-            width: 1600.0 * region.share,
-            height: 26.0,
-        },
-        RUST,
+    let figure = slide.add(
+        TextBox::new(region.units.to_string())
+            .at(160.0, 250.0)
+            .size(1600.0, 300.0)
+            .style(styles.figure),
     )?;
-    line(
-        doc,
-        slide,
-        region.name,
-        Frame {
-            x: 160.0,
-            y: 140.0,
-            width: 1200.0,
-            height: 60.0,
-        },
-        styles.kicker,
-    )?;
-    let figure = line(
-        doc,
-        slide,
-        &format!("{}", region.units),
-        Frame {
-            x: 160.0,
-            y: 250.0,
-            width: 1600.0,
-            height: 300.0,
-        },
-        styles.figure,
-    )?;
-    line(
-        doc,
-        slide,
-        &format!(
-            "units  ·  CHF {:.0}  ·  {:.0} % of the quarter",
-            region.revenue,
-            region.share * 100.0
-        ),
-        Frame {
-            x: 160.0,
-            y: 620.0,
-            width: 1600.0,
-            height: 80.0,
-        },
-        styles.label,
+    // One line, and the share in it set apart: a run with a look of its own.
+    let share = format!("{:.0} %", region.share * 100.0);
+    let line = format!(
+        "units  ·  CHF {:.0}  ·  {share} of the quarter",
+        region.revenue
+    );
+    let from = line
+        .find(&share)
+        .map_or(0, |at| line[..at].encode_utf16().count()) as u64;
+    let to = from + share.encode_utf16().count() as u64;
+    slide.add(
+        TextBox::new(line)
+            .at(160.0, 620.0)
+            .size(1600.0, 80.0)
+            .style(styles.label)
+            .format(from..to, TextLook::new().bold().colour(RUST)),
     )?;
 
-    let mut handle = doc.slide_mut(slide)?;
-    handle.notes(&format!(
+    slide.notes(&format!(
         "{}: {} units, CHF {:.0}.",
         region.name, region.units, region.revenue
     ))?;
-    handle.transition("dissolve")?;
+    slide.transition("dissolve")?;
     // The figure comes in, then the bar.
-    handle.add_build(figure, iwork::keynote::BuildKind::In)?;
-    handle.add_build(bar, iwork::keynote::BuildKind::In)?;
+    slide.add_build(figure, iwork::keynote::BuildKind::In)?;
+    slide.add_build(bar, iwork::keynote::BuildKind::In)?;
     Ok(())
 }
 
-fn summary(doc: &mut Document, slide: usize, styles: &Type) -> Result<(), iwork::Error> {
-    line(
-        doc,
-        slide,
-        "The quarter",
-        Frame {
-            x: 160.0,
-            y: 120.0,
-            width: 1200.0,
-            height: 60.0,
-        },
-        styles.kicker,
+fn trend(doc: &mut Document, index: usize, styles: &Type) -> Result<(), iwork::Error> {
+    let mut slide = doc.slide_mut(index)?;
+    slide.add(
+        TextBox::new("Four quarters")
+            .at(160.0, 100.0)
+            .size(1200.0, 60.0)
+            .style(styles.kicker),
+    )?;
+    // A card with a shadow under it, and a chart on the card.
+    slide.add(
+        block(Color::WHITE)
+            .at(160.0, 200.0)
+            .size(1600.0, 760.0)
+            .shadow(Shadow::default()),
+    )?;
+    let mut chart = Chart::new(ChartKind::Line)
+        .at(260.0, 330.0)
+        .size(1400.0, 560.0)
+        .categories(["Q4", "Q1", "Q2", "Q3"])
+        .title("Units sold")
+        .legend();
+    for region in SALES {
+        chart = chart.series(region.name, region.history);
+    }
+    slide.add(chart)?;
+    slide.transition("dissolve")?;
+    Ok(())
+}
+
+fn summary(doc: &mut Document, index: usize, styles: &Type) -> Result<(), iwork::Error> {
+    let mut slide = doc.slide_mut(index)?;
+    slide.add(
+        TextBox::new("The quarter")
+            .at(160.0, 100.0)
+            .size(1200.0, 60.0)
+            .style(styles.kicker),
     )?;
     // A table is a table wherever it is: the same cells, formats and looks as
     // on a Numbers sheet.
-    let table = doc
-        .slide_mut(slide)?
-        .add_table("Summary", SALES.len() + 2, 3)?;
+    let table = slide.add(Table::new("Summary", SALES.len() + 2, 3).at(160.0, 220.0))?;
+    slide.transition("dissolve")?;
+
+    let total = SALES.len() + 2;
     let mut cells = doc.table_mut(table)?;
     cells.set_block("A1", &[vec!["Region", "Units", "Revenue"]])?;
     for (index, region) in SALES.iter().enumerate() {
@@ -343,7 +231,6 @@ fn summary(doc: &mut Document, slide: usize, styles: &Type) -> Result<(), iwork:
         cells.set(format!("B{row}"), region.units)?;
         cells.currency(format!("C{row}"), region.revenue, "CHF")?;
     }
-    let total = SALES.len() + 2;
     cells.set(format!("A{total}"), "Total")?;
     cells.set(
         format!("B{total}"),
@@ -354,11 +241,24 @@ fn summary(doc: &mut Document, slide: usize, styles: &Type) -> Result<(), iwork:
         SALES.iter().map(|region| region.revenue).sum::<f64>(),
         "CHF",
     )?;
+    // Big enough to read from the back of the room.
+    let everything = format!("A1:C{total}");
+    cells.text_look(
+        everything,
+        &CellText {
+            size: Some(30.0),
+            ..CellText::default()
+        },
+    )?;
+    for column in 0..3 {
+        cells.column_width(column, Some(520.0))?;
+    }
+    for row in 0..total {
+        cells.row_height(row, Some(80.0))?;
+    }
     cells.fill("A1:C1", Some(NAVY))?;
-    cells.text_look("A1:C1", &CellText::coloured(WHITE))?;
+    cells.text_look("A1:C1", &CellText::coloured(Color::WHITE))?;
     cells.fill(format!("A{total}:C{total}"), Some(SAND))?;
     cells.text_look(format!("A{total}:C{total}"), &CellText::bold())?;
-
-    doc.slide_mut(slide)?.transition("dissolve")?;
     Ok(())
 }

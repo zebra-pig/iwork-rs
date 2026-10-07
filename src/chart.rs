@@ -26,7 +26,7 @@
 //!   evaluated to, and the mediator is what makes the chart follow the table
 //!   when a cell changes.
 //!
-//! [`Chart::grid`] is the first; [`Chart::references`] is the second, and
+//! [`ChartInfo::grid`] is the first; [`ChartInfo::references`] is the second, and
 //! [`DataReferences`] says which tables and ranges feed the chart.
 //!
 //! **Every reference in a mediator goes through function 175.** Each formula
@@ -539,7 +539,7 @@ impl DataReferences {
 
 /// A chart, as read.
 #[derive(Debug, Clone)]
-pub struct Chart {
+pub struct ChartInfo {
     pub identifier: u64,
     pub stream: String,
     /// 5021 for a modern chart, 5000 for the pre-UFF one.
@@ -589,7 +589,7 @@ pub struct Chart {
     pub references: Option<DataReferences>,
 }
 
-impl Chart {
+impl ChartInfo {
     /// How many series the chart plots, from the grid and the direction.
     pub fn series_count(&self) -> usize {
         match self.series_direction {
@@ -677,7 +677,7 @@ const CHART_EXTENSIONS: &[(u32, &str)] = &[
 /// chain and are worth having beside its data. A Numbers chart's references are
 /// then resolved against the document's tables, which is what turns a reference
 /// node into `Portfolio::Ticker`.
-pub fn charts(document: &crate::Document) -> Vec<Chart> {
+pub fn charts(document: &crate::Document) -> Vec<ChartInfo> {
     let tables = document.tables();
     let names = crate::table::names(&tables);
     let mut objects: BTreeMap<u64, (u32, Message)> = BTreeMap::new();
@@ -708,7 +708,7 @@ fn decode(
     archive: &Message,
     objects: &BTreeMap<u64, (u32, Message)>,
     names: &Names,
-) -> Chart {
+) -> ChartInfo {
     let reference = |number: u32| -> Option<u64> {
         archive
             .bytes(number)
@@ -755,7 +755,7 @@ fn decode(
     };
 
     let mediator = reference(field::MEDIATOR);
-    Chart {
+    ChartInfo {
         identifier: drawable.identifier,
         stream: drawable.stream.clone(),
         message_type: drawable.message_type,
@@ -1076,7 +1076,7 @@ mod tests {
             ],
             ..Grid::default()
         };
-        let chart = |direction: u32| Chart {
+        let chart = |direction: u32| ChartInfo {
             identifier: 0,
             stream: String::new(),
             message_type: TYPE_CHART_DRAWABLE,
@@ -1750,6 +1750,9 @@ pub fn new_chart(
             // caller expects of "rows of numbers", and the other of the two
             // the kit's chart was made with.
             model.set_in_order(field::SERIES_DIRECTION, Value::Varint(1));
+            // Where the legend sat on the kit's chart is not where it belongs
+            // on this one; without a frame the app places it.
+            model.clear(field::LEGEND_FRAME);
             model.set_in_order(
                 field::GRID,
                 Value::Bytes(
@@ -1771,6 +1774,75 @@ pub fn new_chart(
     crate::drawable::hold(document, &container, chart)?;
     document.declare_external_references();
     Ok(chart)
+}
+
+/// `TSCH.Generated.ChartNonStyleArchive`, the chart's own settings: extension
+/// 10000 of its `TSCH.ChartNonStyleArchive`.
+mod setting {
+    pub const SHOW_LEGEND: u32 = 20;
+    pub const SHOW_TITLE: u32 = 21;
+    pub const TITLE: u32 = 23;
+}
+
+/// Change the chart's own settings — the ones that are this chart's and not
+/// its preset's.
+fn edit_settings(
+    document: &mut crate::Document,
+    chart: u64,
+    edit: impl FnOnce(&mut Message),
+) -> Result<(), crate::Error> {
+    let settings = charts(document)
+        .into_iter()
+        .find(|found| found.identifier == chart)
+        .ok_or_else(|| {
+            crate::Error::refused(crate::Refusal::NotFound, format!("no chart {chart}"))
+        })?
+        .chart_non_style
+        .ok_or_else(|| {
+            crate::Error::refused(
+                crate::Refusal::Missing,
+                format!("chart {chart} has no settings of its own to write to"),
+            )
+        })?;
+    let mut archive = document.archive(settings)?;
+    let mut generated = archive
+        .bytes(EXTENSION)
+        .and_then(decode_nested)
+        .unwrap_or_default();
+    edit(&mut generated);
+    archive.set_in_order(EXTENSION, Value::Bytes(generated.encode()));
+    document.set_archive_for(settings, &archive)
+}
+
+/// Give a chart a title, or with `None` take it away.
+///
+/// `showtitle` (21) and `title` (23) of the chart's own settings. Keynote
+/// draws the title above the plot, in the preset's title style.
+pub fn set_title(
+    document: &mut crate::Document,
+    chart: u64,
+    title: Option<&str>,
+) -> Result<(), crate::Error> {
+    edit_settings(document, chart, |settings| {
+        settings.set_in_order(
+            setting::SHOW_TITLE,
+            Value::Varint(u64::from(title.is_some())),
+        );
+        if let Some(title) = title {
+            settings.set_in_order(setting::TITLE, Value::Bytes(title.as_bytes().to_vec()));
+        }
+    })
+}
+
+/// Show or hide a chart's legend — `showlegend` (20) of its own settings.
+pub fn set_legend(
+    document: &mut crate::Document,
+    chart: u64,
+    shown: bool,
+) -> Result<(), crate::Error> {
+    edit_settings(document, chart, |settings| {
+        settings.set_in_order(setting::SHOW_LEGEND, Value::Varint(u64::from(shown)));
+    })
 }
 
 /// Put a copied drawable where it was asked for: its rectangle, and the parent

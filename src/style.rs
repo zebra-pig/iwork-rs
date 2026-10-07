@@ -140,7 +140,7 @@ pub struct Label {
 
 /// One text style in a document.
 #[derive(Debug, Clone)]
-pub struct TextStyle {
+pub struct TextStyleInfo {
     /// Object identifier — the handle every style method on
     /// [`crate::Document`] takes.
     pub identifier: u64,
@@ -165,7 +165,7 @@ pub struct TextStyle {
     pub archive: Message,
 }
 
-impl TextStyle {
+impl TextStyleInfo {
     /// Name if it has one, else the internal identifier, else the first string
     /// in the archive — for display only, never for editing.
     pub fn label(&self) -> Option<&str> {

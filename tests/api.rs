@@ -8,6 +8,10 @@
 //! and an API that assumes one grid per sheet is wrong about the format rather
 //! than merely inconvenient.
 
+// These exercise the 0.2 calls, which 0.3 keeps behind `#[deprecated]`;
+// `tests/elements.rs` is the same ground through the 0.3 API.
+#![allow(deprecated)]
+
 use std::path::{Path, PathBuf};
 
 use iwork::table::{CellRef, CellValue, Decimal, Format, TableRef};

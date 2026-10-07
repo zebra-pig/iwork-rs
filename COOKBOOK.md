@@ -4,7 +4,7 @@ Short recipes for writing Numbers, Keynote and Pages documents with this
 crate, each one **run** by `cargo test --doc`. The README says how the format
 works and what was measured; this says what to type.
 
-**Use 0.2.4 or later.** Earlier versions wrote documents with no way to give
+**This is the 0.3 API.** Earlier versions wrote documents with no way to give
 anything a look, and 0.2.0 wrote a deck Keynote aborts on if it used one
 picture twice.
 
@@ -67,177 +67,131 @@ A sheet is a canvas, not a grid: `doc.add_table_at("Sales", "Notes", 3, 2,
 (520.0, 0.0))` puts a second table beside the first, and `doc.add_sheet(…)`
 adds another sheet.
 
-## Keynote: a slide with a background, a title, a shape
+## Keynote: a deck
+
+Everything on a slide is a **value** — a `Shape`, a `TextBox`, an `Image`, a
+`Chart` — that says what it is, where it goes and how it looks, and is handed
+to `slide.add(…)`. Building one cannot fail; `add` can, and a refused `add`
+leaves the document as it was.
 
 ```
 # std::env::set_current_dir(std::env::temp_dir()).unwrap();
-use iwork::drawable::{Color, Frame, Outline};
-use iwork::pb::Value;
-use iwork::style::property;
-use iwork::{Document, Kind};
+use iwork::{
+    Align, Chart, ChartKind, Color, Document, Fill, Gradient, Kind, Shadow, Shape, TextBox,
+    TextLook, TextStyle,
+};
 
-const NAVY: Color = Color { red: 0.07, green: 0.17, blue: 0.29, alpha: 1.0 };
-const RUST: Color = Color { red: 0.71, green: 0.29, blue: 0.17, alpha: 1.0 };
+const NAVY: Color = Color::rgb8(0x12, 0x2B, 0x4A);
+const TEAL: Color = Color::rgb8(0x1F, 0x8A, 0x7E);
+const RUST: Color = Color::rgb8(0xB4, 0x4A, 0x2B);
 
 let mut doc = Document::new(Kind::Keynote)?;     // one slide, 1920 × 1080
 doc.add_slide(None)?;                            // a second
 
-// A paragraph style, made once by copying the deck's only one.
-let body = doc
-    .text_styles()
-    .into_iter()
-    .find(|s| s.name.as_deref() == Some("Body"))
-    .expect("a new deck has Body")
-    .identifier;
-let title = doc.create_text_style(body, "Big Title")?.identifier;
-doc.set_text_style_property(
-    title,
-    property::FONT_NAME,
-    Some(Value::Bytes(b"AvenirNext-Bold".to_vec())),
+// Named paragraph styles, made once. They show up in Keynote's style menu.
+let title = doc.add_text_style(
+    &TextStyle::new("Big Title")
+        .look(TextLook::new().font("AvenirNext-Bold").size(72.0).colour(Color::WHITE)),
 )?;
-doc.set_text_style_property(title, property::FONT_SIZE, Some(Value::Fixed32(96.0f32.to_le_bytes())))?;
-doc.set_text_style_color(title, 1.0, 1.0, 1.0, 1.0)?;   // white, everywhere the style keeps it
-
-// Slide 0: a background, a text box set in that style.
-doc.slide_mut(0)?.background(Some(NAVY))?;
-let text = "Sales by region";
-let text_box = doc.slide_mut(0)?.add_text_box(
-    text,
-    Frame { x: 120.0, y: 440.0, width: 1680.0, height: 240.0 },
+let caption = doc.add_text_style(
+    &TextStyle::new("Caption")
+        .look(TextLook::new().size(28.0).colour(Color::WHITE))
+        .align(Align::Right),
 )?;
-let storage = doc.drawable(text_box).and_then(|d| d.text).expect("a text box has text");
-doc.text_mut(storage)?.style(0..text.encode_utf16().count() as u64, title)?;
 
-// A shape, painted. The identifier is the drawable's, not a style's.
-let slide = doc.slides()[0].identifier.to_string();
-let bar = doc.add_shape(&slide, Outline::Rectangle, "", (120.0, 400.0), (180.0, 10.0))?;
-doc.set_object_fill(bar, Some(RUST))?;
-doc.set_object_stroke(bar, RUST, 0.0)?;
-doc.set_object_opacity(bar, 0.9)?;
+let mut slide = doc.slide_mut(0)?;
+slide.background(Gradient::linear(NAVY, TEAL, 270.0))?;     // or a plain Color
 
-doc.slide_mut(0)?.notes("Presenter notes go here.")?;
-doc.slide_mut(0)?.transition("dissolve")?;
+// Text in a named style, with one run set apart. Ranges are UTF-16 units.
+slide.add(
+    TextBox::new("Revenue grew 18 % on last year")
+        .at(120.0, 120.0)
+        .size(1680.0, 110.0)
+        .style(title)
+        .format(13..17, TextLook::new().colour(RUST)),
+)?;
+slide.add(TextBox::new("Q3 2026").at(120.0, 940.0).size(1680.0, 50.0).style(caption))?;
+
+// A card: white, no outline, a soft shadow under it.
+slide.add(
+    Shape::rectangle()
+        .at(120.0, 320.0)
+        .size(760.0, 520.0)
+        .fill(Color::WHITE)
+        .no_stroke()
+        .shadow(Shadow::default()),
+)?;
+
+// A value is a value: keep it, change a copy, add both.
+let dot = Shape::ellipse().size(240.0, 240.0).no_stroke();
+slide.add(dot.clone().at(1000.0, 320.0).fill(Gradient::linear(RUST, Color::WHITE, 45.0)))?;
+# let picture: Vec<u8> = {
+#     let hex = "89504e470d0a1a0a0000000d4948445200000001000000010802000000907753de0000000c4944415408d763f8cfc000000301010018dd8db00000000049454e44ae426082";
+#     (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect()
+# };
+// A picture as a fill — PNG or JPEG bytes — cropped by the shape it fills.
+let photo = slide.add(dot.at(1300.0, 320.0).fill(Fill::image(picture, "portrait.png")))?;
+
+slide.notes("Presenter notes go here.")?;
+slide.transition("dissolve")?;
+
+// A chart from data: one series per thing compared, a value per category.
+let chart = doc.slide_mut(1)?.add(
+    Chart::new(ChartKind::Column)
+        .at(260.0, 200.0)
+        .size(1400.0, 700.0)
+        .categories(["Q1", "Q2", "Q3", "Q4"])
+        .series("2025", [31.0, 35.5, 40.8, 42.0])
+        .series("2026", [40.1, 44.5, 48.2, 51.0])
+        .title("Revenue by quarter")
+        .legend(),
+)?;
+
+// Handles edit what is there: `add` returned the identifiers.
+doc.element_mut(photo)?.stroke(Color::WHITE, 6.0)?;
+doc.chart_mut(chart)?.title("Revenue, CHF m")?;
+
 doc.save("Talk.key")?;
 # Ok::<(), iwork::Error>(())
 ```
 
 Things worth knowing:
 
-- **Text ranges are UTF-16 code units**, and a paragraph style applies to
-  whole paragraphs — the range grows to the paragraphs it touches.
+- **`.at(x, y)` and `.size(w, h)` are properties of the value.** Left out,
+  the position is the slide's origin and the size is the thing's own: an
+  image its pixels, a chart 800 × 500, a shape 200 × 200.
+- **`Fill` is one type**: a `Color`, a `Gradient`, `Fill::image(bytes, name)`
+  or `Fill::None`, for a shape and for a slide's background alike.
+  Gradients are linear; the angle is the one Keynote's inspector shows.
+- **A chart is a real chart**, editable in the app: column, bar, line, area,
+  pie and the stacked three. On a deck made from one of Apple's themes it
+  takes the theme's look. The legend goes where Keynote puts it.
 - **`slide.title(…)` and `slide.body(…)` write a layout's placeholders.** A
   deck from nothing has one plain layout, a title over a body; start from one
   of Apple's themes with `Document::from_template("…/Wide.kth")` to get
   layouts worth the name.
-- **A table on a slide** is `slide.add_table("Name", rows, columns)?`, which
-  returns an identifier `doc.table_mut(id)?` takes — and then everything in the
-  Numbers recipe applies to it.
-- **The same picture on many slides** is fine: `add_image` stores it once.
-
-## Keynote: emphasis, gradients, shadows, pictures, a chart
-
-```
-# std::env::set_current_dir(std::env::temp_dir()).unwrap();
-use iwork::chart::{ChartData, ChartKind};
-use iwork::drawable::{Color, Frame, Gradient, ImageFit, Outline, Shadow};
-use iwork::text::TextLook;
-use iwork::{Document, Kind};
-
-const NAVY: Color = Color { red: 0.07, green: 0.17, blue: 0.29, alpha: 1.0 };
-const TEAL: Color = Color { red: 0.12, green: 0.54, blue: 0.49, alpha: 1.0 };
-const RUST: Color = Color { red: 0.71, green: 0.29, blue: 0.17, alpha: 1.0 };
-const WHITE: Color = Color { red: 1.0, green: 1.0, blue: 1.0, alpha: 1.0 };
-
-let mut doc = Document::new(Kind::Keynote)?;
-doc.add_slide(None)?;
-let first = doc.slides()[0].identifier.to_string();
-let second = doc.slides()[1].identifier.to_string();
-
-// A background that runs from navy at the top to teal at the bottom. The
-// angle is the one Keynote's inspector shows.
-doc.slide_mut(0)?.background_gradient(&Gradient::linear(NAVY, TEAL, 270.0))?;
-
-// One sentence, three looks: ranges are UTF-16 code units, and each run gets
-// only what its `TextLook` sets.
-let words = "Revenue grew 18 % on last year";
-let text_box = doc.slide_mut(0)?.add_text_box(
-    words,
-    Frame { x: 120.0, y: 120.0, width: 1500.0, height: 120.0 },
-)?;
-let storage = doc.drawable(text_box).and_then(|d| d.text).expect("a text box has text");
-let mut text = doc.text_mut(storage)?;
-text.format(0..30, &TextLook { size: Some(64.0), colour: Some(WHITE), ..TextLook::default() })?;
-text.format(13..17, &TextLook { bold: Some(true), colour: Some(RUST), ..TextLook::default() })?;
-
-// A card: white, no outline, a soft shadow under it.
-let card = doc.add_shape(&first, Outline::Rectangle, "", (120.0, 320.0), (760.0, 520.0))?;
-doc.set_object_fill(card, Some(WHITE))?;
-doc.set_object_stroke(card, WHITE, 0.0)?;
-doc.set_object_shadow(card, Some(Shadow { offset: 14.0, radius: 30, ..Shadow::default() }))?;
-
-// A shape filled with a gradient of its own, three stops.
-let band = doc.add_shape(&first, Outline::Ellipse, "", (1000.0, 320.0), (520.0, 520.0))?;
-doc.set_object_gradient(
-    band,
-    &Gradient { stops: vec![(RUST, 0.0), (WHITE, 0.5), (TEAL, 1.0)], angle: 45.0 },
-)?;
-
-// A picture as a fill: PNG or JPEG bytes, cropped by the shape it fills.
-# let picture: Vec<u8> = {
-#     // A 1 × 1 PNG.
-#     let hex = "89504e470d0a1a0a0000000d4948445200000001000000010802000000907753de0000000c4944415408d763f8cfc000000301010018dd8db00000000049454e44ae426082";
-#     (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect()
-# };
-let photo = doc.add_shape(&first, Outline::Ellipse, "", (1560.0, 120.0), (240.0, 240.0))?;
-doc.set_object_image_fill(photo, &picture, "portrait.png", ImageFit::ScaleToFill)?;
-
-// A chart from data: each row a series, each column a category.
-let data = ChartData::numbers(
-    &["2025", "2026"],
-    &["Q1", "Q2", "Q3", "Q4"],
-    &[&[31.0, 35.5, 40.8, 42.0], &[40.1, 44.5, 48.2, 51.0]],
-);
-doc.new_chart(&second, ChartKind::Column, &data, (260.0, 140.0), (1400.0, 800.0))?;
-
-doc.save("Looks.key")?;
-# Ok::<(), iwork::Error>(())
-```
-
-- **A chart is a real chart**, editable in the app: column, bar, line, area,
-  pie and the stacked three. On a deck made from one of Apple's themes it
-  takes the theme's look; on one made from nothing it brings the look of
-  Keynote's white theme with it. It has no legend until somebody turns one on
-  in the app.
-- **`format` works in Pages too** — `doc.body_mut()?.format(range, &look)` —
-  and on any text storage of a document the apps made.
-- **Gradients are linear.** Shadows are drop shadows; `set_object_shadow(id,
-  None)` switches one off.
+- **A table** is `slide.add(iwork::element::Table::new("Name", rows,
+  columns).at(x, y))?`, which returns an identifier `doc.table_mut(id)?`
+  takes — and then everything in the Numbers recipe applies to it.
+- **The same values go on a Numbers sheet and a Pages page**:
+  `doc.sheet_mut("Sheet 1")?.add(…)`, `doc.page_mut(1)?.add(…)`.
+- **The same picture on many slides** is fine: it is stored once.
 
 ## Pages: a title, a heading and body text
 
 ```
 # std::env::set_current_dir(std::env::temp_dir()).unwrap();
-use iwork::pb::Value;
-use iwork::style::property;
-use iwork::{Document, Kind};
+use iwork::{Document, Kind, TextLook, TextStyle};
 
 let mut doc = Document::new(Kind::Pages)?;
-let body = doc
-    .text_styles()
-    .into_iter()
-    .find(|s| s.name.as_deref() == Some("Body"))
-    .expect("a blank document has Body")
-    .identifier;
 
-// A style per role, each a copy of Body with what differs changed.
-let mut make = |name: &str, font: &str, size: f32| -> Result<u64, iwork::Error> {
-    let style = doc.create_text_style(body, name)?.identifier;
-    doc.set_text_style_property(style, property::FONT_NAME, Some(Value::Bytes(font.as_bytes().to_vec())))?;
-    doc.set_text_style_property(style, property::FONT_SIZE, Some(Value::Fixed32(size.to_le_bytes())))?;
-    Ok(style)
-};
-let title = make("Report Title", "AvenirNext-Bold", 28.0)?;
-let heading = make("Section", "AvenirNext-DemiBold", 14.0)?;
+// A style per role.
+let title = doc.add_text_style(
+    &TextStyle::new("Report Title").look(TextLook::new().font("AvenirNext-Bold").size(28.0)),
+)?;
+let heading = doc.add_text_style(
+    &TextStyle::new("Section").look(TextLook::new().font("AvenirNext-DemiBold").size(14.0)),
+)?;
 
 // The text first — one paragraph per line — then a style per paragraph.
 let lines = [
@@ -256,14 +210,15 @@ for (line, style) in lines {
     }
     at += length + 1;                            // the newline
 }
+// One word in the last line, bold.
+doc.body_mut()?.format(at - 9..at - 1, &TextLook::new().bold())?;
 doc.save("Report.pages")?;
 # Ok::<(), iwork::Error>(())
 ```
 
 A blank Pages document has exactly one paragraph style to copy, `Body`, and
 no list styles — so real bullet lists are not available on a document made
-from nothing. Bold *words* are: `doc.body_mut()?.format(range,
-&TextLook::bold())`. Open a document Pages made (`Document::open`) and its
+from nothing. Bold *words* are, as above. Open a document Pages made (`Document::open`) and its
 Title, Heading and list styles are all there to apply.
 
 ## From the shell

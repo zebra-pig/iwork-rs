@@ -1,5 +1,8 @@
 //! `iwork` — inspect and edit Pages, Numbers and Keynote documents.
 
+// The CLI still speaks the 0.2 calls; API.md phase 3 moves it.
+#![allow(deprecated)]
+
 use std::collections::BTreeMap;
 use std::process::ExitCode;
 

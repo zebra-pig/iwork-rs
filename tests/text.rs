@@ -8,6 +8,10 @@
 //! `IWORK_APP_CHECK=1` — that the app opens the result and reads the new words
 //! back.
 
+// These exercise the 0.2 calls, which 0.3 keeps behind `#[deprecated]`;
+// `tests/elements.rs` is the same ground through the 0.3 API.
+#![allow(deprecated)]
+
 use std::path::{Path, PathBuf};
 
 use iwork::text::Anchoring;
@@ -1716,7 +1720,7 @@ fn a_formatted_run_ends_where_it_was_asked_to() {
     let storage = doc.body_mut().unwrap().identifier();
     doc.body_mut()
         .unwrap()
-        .format(6..10, &iwork::text::TextLook::bold())
+        .format(6..10, &iwork::text::TextLook::new().bold())
         .unwrap();
     let runs = character_runs(&doc, storage);
     assert_eq!(runs.len(), 3, "{runs:?}");
@@ -1750,9 +1754,9 @@ fn a_formatted_run_is_a_variation_of_the_null_character_style() {
         .unwrap();
     let storage = doc.drawable(made).and_then(|d| d.text).unwrap();
     let mut text = doc.text_mut(storage).unwrap();
-    text.format(0..3, &TextLook::bold()).unwrap();
-    text.format(8..13, &TextLook::bold()).unwrap();
-    text.format(10..18, &TextLook::italic()).unwrap();
+    text.format(0..3, &TextLook::new().bold()).unwrap();
+    text.format(8..13, &TextLook::new().bold()).unwrap();
+    text.format(10..18, &TextLook::new().italic()).unwrap();
 
     let runs = character_runs(&doc, storage);
     let starts: Vec<u64> = runs.iter().map(|run| run.0).collect();
@@ -1791,7 +1795,7 @@ fn a_formatted_run_is_a_variation_of_the_null_character_style() {
     assert!(doc
         .text_mut(storage)
         .unwrap()
-        .format(10..99, &TextLook::bold())
+        .format(10..99, &TextLook::new().bold())
         .is_err());
 }
 
@@ -1841,8 +1845,8 @@ fn the_apps_draw_a_word_with_a_look_of_its_own() {
         (keynote, boxed, "iwork-words.key"),
     ] {
         let mut text = doc.text_mut(storage).unwrap();
-        text.format(6..10, &TextLook::bold()).unwrap();
-        text.format(11..14, &TextLook::coloured(red)).unwrap();
+        text.format(6..10, &TextLook::new().bold()).unwrap();
+        text.format(11..14, &TextLook::new().colour(red)).unwrap();
         text.format(15..18, &big).unwrap();
         let out = std::env::temp_dir().join(name);
         let _ = std::fs::remove_file(&out);

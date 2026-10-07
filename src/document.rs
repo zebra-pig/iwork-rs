@@ -7,7 +7,7 @@ use crate::create::OFFSET_SLOTS;
 use crate::iwa::{self, ArchiveObject};
 use crate::package::Package;
 use crate::pb::{Message, Value};
-use crate::style::{self, CreatedStyle, StyleDeletion, StyleKind, StyleUse, TextStyle};
+use crate::style::{self, CreatedStyle, StyleDeletion, StyleKind, StyleUse, TextStyleInfo};
 use crate::table::{cell_type, CellValue};
 use crate::text;
 use crate::{Error, Refusal};
@@ -379,11 +379,37 @@ impl SlideHandle<'_> {
 
     /// Paint this slide's background, or with `None` go back to its layout's.
     /// See [`Document::set_slide_background`].
-    pub fn background(&mut self, colour: Option<crate::drawable::Color>) -> Result<(), Error> {
-        self.document.set_slide_background(self.slide, colour)
+    ///
+    /// A [`Color`](crate::Color), a [`Gradient`](crate::Gradient) or a
+    /// [`Fill`](crate::Fill); `Fill::None` (or `None`) gives the layout's
+    /// background back. A picture is refused: no app was watched drawing one
+    /// written here.
+    pub fn background(&mut self, fill: impl Into<crate::drawable::Fill>) -> Result<(), Error> {
+        use crate::drawable::Fill;
+        match fill.into() {
+            Fill::None => self.document.set_slide_background(self.slide, None),
+            Fill::Color(colour) => self.document.set_slide_background(self.slide, Some(colour)),
+            Fill::Gradient(gradient) => {
+                let fill = gradient.fill()?;
+                crate::keynote::set_slide_fill(self.document, self.slide, Some(fill))
+            }
+            Fill::Image(_) => Err(Error::refused(
+                Refusal::UnwritableValue,
+                "a picture as a slide's background is not something this crate writes yet",
+            )),
+        }
+    }
+
+    /// Put a [`Shape`](crate::Shape), a [`TextBox`](crate::TextBox), an
+    /// [`Image`](crate::Image) or a [`Chart`](crate::Chart) on this slide,
+    /// and get its identifier. A refused `add` leaves the document as it was.
+    pub fn add(&mut self, element: impl crate::element::Element) -> Result<u64, Error> {
+        let slide = self.slide.to_string();
+        self.document.add_element(&slide, &element)
     }
 
     /// Paint this slide's background with a linear gradient.
+    #[deprecated(since = "0.3.0", note = "use `slide.background(gradient)`")]
     pub fn background_gradient(
         &mut self,
         gradient: &crate::drawable::Gradient,
@@ -442,13 +468,15 @@ impl SlideHandle<'_> {
     /// The frame is named rather than positional: `(100.0, 120.0), (600.0,
     /// 120.0)` is two tuples of the same type whose order is the whole meaning,
     /// and `Frame { x, y, width, height }` cannot be given in the wrong order.
+    #[deprecated(since = "0.3.0", note = "use `slide.add(TextBox::new(text)…)`")]
     pub fn add_text_box(
         &mut self,
         text: &str,
         frame: crate::drawable::Frame,
     ) -> Result<u64, Error> {
         let slide = self.slide.to_string();
-        self.document.add_text_box(
+        crate::drawable::add_text_box(
+            self.document,
             &slide,
             text,
             (frame.x, frame.y),
@@ -457,6 +485,7 @@ impl SlideHandle<'_> {
     }
 
     /// Put a picture on the slide, in a frame — PNG or JPEG bytes.
+    #[deprecated(since = "0.3.0", note = "use `slide.add(Image::new(bytes)…)`")]
     pub fn add_image(
         &mut self,
         bytes: &[u8],
@@ -464,7 +493,8 @@ impl SlideHandle<'_> {
         frame: crate::drawable::Frame,
     ) -> Result<u64, Error> {
         let slide = self.slide.to_string();
-        self.document.add_image(
+        crate::drawable::add_image(
+            self.document,
             &slide,
             bytes,
             name,
@@ -474,9 +504,10 @@ impl SlideHandle<'_> {
     }
 
     /// The same, drawn at the picture's own pixel size.
+    #[deprecated(since = "0.3.0", note = "use `slide.add(Image::new(bytes).at(x, y))`")]
     pub fn add_image_at(&mut self, bytes: &[u8], name: &str, x: f32, y: f32) -> Result<u64, Error> {
         let slide = self.slide.to_string();
-        self.document.add_image(&slide, bytes, name, (x, y), None)
+        crate::drawable::add_image(self.document, &slide, bytes, name, (x, y), None)
     }
 
     /// Put a table on the slide.
@@ -7176,7 +7207,7 @@ impl Document {
     /// }
     /// # Ok(()) }
     /// ```
-    pub fn charts(&self) -> Vec<crate::chart::Chart> {
+    pub fn charts(&self) -> Vec<crate::chart::ChartInfo> {
         crate::chart::charts(self)
     }
 
@@ -7199,7 +7230,7 @@ impl Document {
     /// See [`crate::chart::add_chart`]: a chart is copied rather than invented,
     /// because a dozen theme styles stand behind it and none of them can be
     /// made up honestly.
-    pub fn add_chart(
+    pub fn copy_chart(
         &mut self,
         container: &str,
         from: u64,
@@ -7210,8 +7241,160 @@ impl Document {
         crate::chart::add_chart(self, container, from, data, position, size)
     }
 
+    /// The 0.2 name of [`Document::copy_chart`].
+    #[deprecated(
+        since = "0.3.0",
+        note = "renamed `copy_chart`; to make a chart from data use `slide.add(Chart::new(kind)…)`"
+    )]
+    pub fn add_chart(
+        &mut self,
+        container: &str,
+        from: u64,
+        data: &crate::chart::ChartData,
+        position: (f32, f32),
+        size: (f32, f32),
+    ) -> Result<u64, Error> {
+        self.copy_chart(container, from, data, position, size)
+    }
+
+    /// Put a value on a slide, a sheet or a page, or leave the document
+    /// exactly as it was.
+    pub(crate) fn add_element(
+        &mut self,
+        container: &str,
+        element: &dyn crate::element::Element,
+    ) -> Result<u64, Error> {
+        let (streams, package) = (self.streams.clone(), self.package.clone());
+        let made = element.add_to(self, container);
+        if made.is_err() {
+            self.streams = streams;
+            self.package = package;
+        }
+        made
+    }
+
+    /// A shape, a text box, an image or a chart, to change: its fill, its
+    /// outline, its shadow, where it is, its text.
+    pub fn element_mut(&mut self, element: u64) -> Result<crate::element::ElementMut<'_>, Error> {
+        if self.drawable(element).is_none() {
+            return Err(Error::refused(
+                Refusal::NotFound,
+                format!("no element {element} — `doc.drawables()` lists the ones there are"),
+            ));
+        }
+        Ok(crate::element::ElementMut::new(self, element))
+    }
+
+    /// A chart, to change: its numbers, its title, its legend.
+    pub fn chart_mut(&mut self, chart: u64) -> Result<crate::element::ChartMut<'_>, Error> {
+        if !self.charts().iter().any(|found| found.identifier == chart) {
+            return Err(Error::refused(
+                Refusal::NotFound,
+                format!("no chart {chart} — `doc.charts()` lists the ones there are"),
+            ));
+        }
+        Ok(crate::element::ChartMut::new(self, chart))
+    }
+
+    /// A Numbers sheet, by name, to add things to.
+    pub fn sheet_mut(&mut self, name: &str) -> Result<crate::element::CanvasMut<'_>, Error> {
+        if self.sheet(name).is_none() {
+            return Err(Error::refused(
+                Refusal::NotFound,
+                format!("no sheet {name:?}"),
+            ));
+        }
+        Ok(crate::element::CanvasMut::new(self, name.to_string()))
+    }
+
+    /// A Pages page, counted from 1, to add things to.
+    pub fn page_mut(&mut self, page: usize) -> Result<crate::element::CanvasMut<'_>, Error> {
+        if self.kind() != Kind::Pages || page == 0 {
+            return Err(Error::refused(
+                Refusal::NotFound,
+                format!("no page {page} — pages are a Pages document's, counted from 1"),
+            ));
+        }
+        Ok(crate::element::CanvasMut::new(self, format!("page {page}")))
+    }
+
+    /// Give the document a named paragraph style, and get its identifier —
+    /// what [`crate::TextBox::style`] and [`TextHandle::style`] take.
+    ///
+    /// The style is the document's body style with what the
+    /// [`crate::TextStyle`] says changed, and the app offers it in its style
+    /// menu under its name.
+    pub fn add_text_style(&mut self, style: &crate::element::TextStyle) -> Result<u64, Error> {
+        use style::property;
+        let paragraph_styles: Vec<_> = self
+            .text_styles()
+            .into_iter()
+            .filter(|found| found.kind == StyleKind::Paragraph && found.name.is_some())
+            .collect();
+        let base = paragraph_styles
+            .iter()
+            .find(|found| found.name.as_deref() == Some("Body"))
+            .or(paragraph_styles.first())
+            .map(|found| found.identifier)
+            .ok_or_else(|| {
+                Error::refused(
+                    Refusal::Missing,
+                    "the document has no paragraph style to make a new one from",
+                )
+            })?;
+        let (streams, package) = (self.streams.clone(), self.package.clone());
+        let mut make = || -> Result<u64, Error> {
+            let made = self.create_text_style(base, &style.name)?.identifier;
+            let look = &style.look;
+            let toggles = [
+                (property::BOLD, look.bold),
+                (property::ITALIC, look.italic),
+                (property::UNDERLINE, look.underline),
+                (property::STRIKETHROUGH, look.strikethrough),
+            ];
+            for (path, value) in toggles {
+                if let Some(value) = value {
+                    self.set_text_style_property(
+                        made,
+                        path,
+                        Some(Value::Varint(u64::from(value))),
+                    )?;
+                }
+            }
+            if let Some(size) = look.size {
+                let value = Value::Fixed32(size.to_le_bytes());
+                self.set_text_style_property(made, property::FONT_SIZE, Some(value))?;
+            }
+            if let Some(font) = &look.font {
+                let value = Value::Bytes(font.as_bytes().to_vec());
+                self.set_text_style_property(made, property::FONT_NAME, Some(value))?;
+            }
+            if let Some(colour) = look.colour {
+                self.set_text_style_color(
+                    made,
+                    colour.red,
+                    colour.green,
+                    colour.blue,
+                    colour.alpha,
+                )?;
+            }
+            if let Some(align) = style.align {
+                let value = Value::Varint(align as u64);
+                self.set_text_style_property(made, property::ALIGNMENT, Some(value))?;
+            }
+            Ok(made)
+        };
+        let made = make();
+        if made.is_err() {
+            self.streams = streams;
+            self.package = package;
+        }
+        made
+    }
+
     /// Make a chart from data where there is none to copy. See
     /// [`crate::chart::new_chart`].
+    #[deprecated(since = "0.3.0", note = "use `slide.add(Chart::new(kind)…)`")]
     pub fn new_chart(
         &mut self,
         container: &str,
@@ -7260,16 +7443,18 @@ impl Document {
     /// gives it a style of its own, parented to the one it was sharing, which
     /// is what the app does and the only form that survives the app's own
     /// save — see [`crate::drawable::set_fill`].
+    #[deprecated(since = "0.3.0", note = "use `doc.element_mut(id)?.fill(…)`")]
     pub fn set_object_fill(
         &mut self,
         drawable: u64,
         colour: Option<crate::drawable::Color>,
     ) -> Result<(), Error> {
-        crate::drawable::set_fill(self, drawable, colour)
+        crate::drawable::set_fill(self, drawable, &colour.into())
     }
 
     /// Fill a drawable with a linear gradient. See
     /// [`crate::drawable::set_gradient`].
+    #[deprecated(since = "0.3.0", note = "use `doc.element_mut(id)?.fill(gradient)`")]
     pub fn set_object_gradient(
         &mut self,
         drawable: u64,
@@ -7280,6 +7465,10 @@ impl Document {
 
     /// Give a drawable a drop shadow, or with `None` take it away. See
     /// [`crate::drawable::set_shadow`].
+    #[deprecated(
+        since = "0.3.0",
+        note = "use `doc.element_mut(id)?.shadow(…)` or `.no_shadow()`"
+    )]
     pub fn set_object_shadow(
         &mut self,
         drawable: u64,
@@ -7290,6 +7479,10 @@ impl Document {
 
     /// Fill a drawable with a picture (PNG or JPEG bytes). See
     /// [`crate::drawable::set_image_fill`].
+    #[deprecated(
+        since = "0.3.0",
+        note = "use `doc.element_mut(id)?.fill(Fill::image(bytes, name))`"
+    )]
     pub fn set_object_image_fill(
         &mut self,
         drawable: u64,
@@ -7336,6 +7529,10 @@ impl Document {
     /// Outline a drawable: colour, and width in points.
     ///
     /// See [`crate::drawable::set_stroke`].
+    #[deprecated(
+        since = "0.3.0",
+        note = "use `doc.element_mut(id)?.stroke(…)` or `.no_stroke()`"
+    )]
     pub fn set_object_stroke(
         &mut self,
         drawable: u64,
@@ -7348,6 +7545,7 @@ impl Document {
     /// How opaque a drawable is, 0.0 to 1.0.
     ///
     /// See [`crate::drawable::set_opacity`].
+    #[deprecated(since = "0.3.0", note = "use `doc.element_mut(id)?.opacity(…)`")]
     pub fn set_object_opacity(&mut self, drawable: u64, opacity: f32) -> Result<(), Error> {
         crate::drawable::set_opacity(self, drawable, opacity)
     }
@@ -7923,7 +8121,7 @@ impl Document {
     /// These are the objects the attribute tables of a `TSWP.StorageArchive`
     /// point at; see [`crate::style`] for what is and is not known about their
     /// contents.
-    pub fn text_styles(&self) -> Vec<TextStyle> {
+    pub fn text_styles(&self) -> Vec<TextStyleInfo> {
         let mut out = Vec::new();
         for (stream, object) in self.objects() {
             let Some(message) = object.messages.first() else {
@@ -7935,7 +8133,7 @@ impl Document {
             let Ok(archive) = Message::decode(&message.payload) else {
                 continue;
             };
-            out.push(TextStyle {
+            out.push(TextStyleInfo {
                 identifier: object.identifier,
                 stream: stream.to_string(),
                 kind,
@@ -7950,7 +8148,7 @@ impl Document {
         out
     }
 
-    pub fn text_style(&self, identifier: u64) -> Option<TextStyle> {
+    pub fn text_style(&self, identifier: u64) -> Option<TextStyleInfo> {
         self.text_styles()
             .into_iter()
             .find(|s| s.identifier == identifier)
@@ -8891,6 +9089,7 @@ impl Document {
     /// the theme.
     ///
     /// Returns the drawable, which [`Document::set_geometry`] can then move.
+    #[deprecated(since = "0.3.0", note = "use `slide.add(TextBox::new(text)…)`")]
     pub fn add_text_box(
         &mut self,
         container: &str,
@@ -8906,6 +9105,7 @@ impl Document {
     /// The bytes are copied into the package and registered; `size` is the
     /// rectangle in points, and `None` draws the picture at its own pixel
     /// size. PNG and JPEG only — see [`crate::drawable::add_image`].
+    #[deprecated(since = "0.3.0", note = "use `slide.add(Image::new(bytes)…)`")]
     pub fn add_image(
         &mut self,
         container: &str,
@@ -9004,6 +9204,10 @@ impl Document {
     /// The same archive as [`Document::add_text_box`] with a different path,
     /// and the text may be empty. See [`crate::drawable::Outline`] for the
     /// three outlines this crate can draw.
+    #[deprecated(
+        since = "0.3.0",
+        note = "use `slide.add(Shape::rectangle()…)` — see API.md"
+    )]
     pub fn add_shape(
         &mut self,
         container: &str,
