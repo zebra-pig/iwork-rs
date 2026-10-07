@@ -4,6 +4,8 @@ What changed, and — because this is a reverse-engineered format — **how it w
 established**. An entry that cannot say what the app did is an entry about
 bytes nobody has watched being read.
 
+## 0.3.1 — unreleased
+
 ## 0.3.0 — 2026-10-07
 
 **The API is rebuilt around one idea: values to create, handles to edit.**
