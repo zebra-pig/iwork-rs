@@ -324,11 +324,10 @@ fn creating_copies_a_style_and_allocates_an_identifier_above_the_high_water_mark
         style::get_path(&new.archive, &[11, 12]),
         style::get_path(&template.archive, &[11, 12])
     );
-    assert_eq!(
-        new.style_identifier.as_deref(),
-        Some("body"),
-        "the rest of the copy is intact"
-    );
+    // …and the identifier, which is the template's own key: a copy that kept
+    // it would be a second style claiming to be the body style.
+    assert_eq!(new.style_identifier, None);
+    assert_eq!(template.style_identifier.as_deref(), Some("body"));
 
     // The high-water mark moved, so iWork will not reissue the identifier.
     assert_eq!(doc.last_object_identifier(), Some(created.identifier));

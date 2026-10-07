@@ -8040,6 +8040,16 @@ impl Document {
                 Some(Value::Bytes(name.as_bytes().to_vec())),
             )
             .map_err(|e| Error::Format(format!("style {template}: {e}")))?;
+            // **The copy is not the template, and must not say it is.** A
+            // style's identifier (`text-0-paragraphstyle-Body`) is the key the
+            // theme and the stylesheet know it by; a style somebody adds in
+            // the app has a name and no identifier. Copies that kept the
+            // template's were seventeen styles all claiming to be Body, and
+            // Keynote's paragraph-style menu showed a name and no list.
+            if style::get_path(&archive, style::STYLE_IDENTIFIER).is_some() {
+                style::set_path(&mut archive, style::STYLE_IDENTIFIER, None)
+                    .map_err(|e| Error::Format(format!("style {template}: {e}")))?;
+            }
         }
 
         // Bump the high-water mark first: if there is no package metadata to
@@ -8073,6 +8083,9 @@ impl Document {
                 }
             }
         }
+        // …and wherever the theme offers the template, it offers the copy:
+        // the theme's text presets are the menu the app shows.
+        self.offer_in_theme(identifier, Some(template), 0)?;
         self.declare_external_references();
 
         Ok(CreatedStyle {
@@ -8601,6 +8614,66 @@ impl Document {
         Ok(())
     }
 
+    /// List `style` in the theme's text presets (`TSWP.ThemePresetsArchive`,
+    /// extension 110 of the theme) — after `beside` wherever that is listed,
+    /// or, with no `beside`, at the end of `field` (1 list styles, 6
+    /// character styles, 7 paragraph styles). A document with no theme, or a
+    /// template the theme does not offer, is left as it is.
+    fn offer_in_theme(&mut self, style: u64, beside: Option<u64>, field: u32) -> Result<(), Error> {
+        let Some(theme) = self
+            .objects()
+            .find(|(_, object)| {
+                matches!(
+                    object.message_type(),
+                    crate::keynote::TYPE_THEME | crate::pages::TYPE_THEME | 12009
+                )
+            })
+            .map(|(_, object)| object.identifier)
+        else {
+            return Ok(());
+        };
+        let mut archive = self.archive_of(theme)?;
+        let Some(mut inner) = archive.bytes(1).and_then(crate::pb::decode_nested) else {
+            return Ok(());
+        };
+        let mut presets = inner
+            .bytes(110)
+            .and_then(crate::pb::decode_nested)
+            .unwrap_or_default();
+        let entry = |number: u32| crate::pb::Field {
+            number,
+            value: Value::Bytes(style::reference(style).encode()),
+        };
+        let points_at = |field: &crate::pb::Field, target: u64| match &field.value {
+            Value::Bytes(raw) => crate::pb::decode_nested(raw)
+                .is_some_and(|reference| style::is_reference_to(&reference, target)),
+            _ => false,
+        };
+        if presets.fields.iter().any(|field| points_at(field, style)) {
+            return Ok(());
+        }
+        match beside {
+            Some(beside) => {
+                let Some(at) = presets.fields.iter().rposition(|f| points_at(f, beside)) else {
+                    return Ok(());
+                };
+                let number = presets.fields[at].number;
+                // After the last of its kind, as a style the user adds lands
+                // at the end of the menu.
+                let end = presets
+                    .fields
+                    .iter()
+                    .rposition(|f| f.number == number)
+                    .unwrap_or(at);
+                presets.fields.insert(end + 1, entry(number));
+            }
+            None => presets.append_in_order(field, entry(field).value),
+        }
+        inner.set_in_order(110, Value::Bytes(presets.encode()));
+        archive.set_in_order(1, Value::Bytes(inner.encode()));
+        self.set_archive_for(theme, &archive)
+    }
+
     /// The stylesheet's `character-style-null` — "None", the character style
     /// that changes nothing and that every run's own look is a variation of —
     /// made if the stylesheet has none.
@@ -8637,6 +8710,7 @@ impl Document {
         entry.set_in_order(2, Value::Bytes(style::reference(identifier).encode()));
         sheet.append_in_order(2, Value::Bytes(entry.encode()));
         self.set_archive_for(stylesheet, &sheet)?;
+        self.offer_in_theme(identifier, None, 6)?;
         Ok(identifier)
     }
 

@@ -15,6 +15,13 @@ bytes nobody has watched being read.
   `override_count`, so the app ignored its bag. A text box now names the
   theme's `textbox-…` style, and that style says "no outline" the way
   Keynote's own does.
+- **Keynote's paragraph-style menu was empty on a deck made from nothing**,
+  and a style could be seen by name but not changed. Two causes. Every style
+  `create_text_style` copied kept its template's *identifier*, so a deck could
+  hold seventeen styles all claiming to be `text-0-paragraphstyle-Body`; a
+  copy now has a name and no identifier, as a style added in the app has. And
+  the theme offered nothing: the menu is the theme's text presets, which a
+  blueprint now carries and to which a new style is added.
 - **A character style applied to a run ran on to the end of the text** when
   the storage had no character table yet. The run is closed with a nil entry,
   as Pages closes it.

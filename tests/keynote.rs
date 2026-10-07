@@ -2325,3 +2325,63 @@ fn keynote_keeps_a_slide_background_this_crate_painted() {
     );
     let _ = std::fs::remove_file(&out);
 }
+
+/// **The paragraph-style menu.** What Keynote offers in the Format sidebar is
+/// the theme's text presets (`TSWP.ThemePresetsArchive`, extension 110), and
+/// what it tells styles apart by is their identifier. A deck made from
+/// nothing offered nothing, and every style copied from Body said it *was*
+/// Body — seventeen of them in one deck — so the menu showed the name of the
+/// style a paragraph had and no list to change it from.
+#[test]
+fn a_style_made_here_is_its_own_style_and_the_theme_offers_it() {
+    let mut doc = Document::new(iwork::Kind::Keynote).unwrap();
+    let body = doc
+        .text_styles()
+        .into_iter()
+        .find(|s| s.name.as_deref() == Some("Body"))
+        .unwrap();
+    let title = doc
+        .create_text_style(body.identifier, "Titel")
+        .unwrap()
+        .identifier;
+    let small = doc.create_text_style(title, "Klein").unwrap().identifier;
+
+    // One style per identifier, and the copies have none.
+    let mut identifiers: Vec<String> = doc
+        .text_styles()
+        .into_iter()
+        .filter_map(|s| s.style_identifier)
+        .collect();
+    let all = identifiers.len();
+    identifiers.sort();
+    identifiers.dedup();
+    assert_eq!(identifiers.len(), all, "no two styles share an identifier");
+    assert_eq!(doc.text_style(title).unwrap().style_identifier, None);
+
+    // The theme's paragraph presets: Body, then the two made here, in order.
+    let theme = doc
+        .objects()
+        .find(|(_, object)| object.message_type() == iwork::keynote::TYPE_THEME)
+        .map(|(_, object)| object.identifier)
+        .unwrap();
+    let archive = doc.archive(theme).unwrap();
+    let presets = iwork::pb::decode_nested(
+        iwork::pb::decode_nested(archive.bytes(1).unwrap())
+            .unwrap()
+            .bytes(110)
+            .expect("the theme has text presets"),
+    )
+    .unwrap();
+    let offered: Vec<u64> = presets
+        .all(7)
+        .filter_map(|value| match value {
+            iwork::pb::Value::Bytes(raw) => {
+                iwork::style::reference_target(&iwork::pb::decode_nested(raw)?)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(offered, vec![body.identifier, title, small]);
+    assert_eq!(presets.all(1).count(), 1, "and the one list style");
+    assert!(doc.problems().is_empty(), "{:?}", doc.problems());
+}

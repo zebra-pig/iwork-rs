@@ -1198,7 +1198,7 @@ pub(crate) fn numbers(
     let theme = blueprint.add(
         document,
         TYPE_NUMBERS_THEME,
-        numbers_theme(stylesheet, presets),
+        numbers_theme_with(stylesheet, vec![presets, text_presets(&named)], Vec::new()),
     );
     let support = blueprint.add(document, TYPE_DOCUMENT_SUPPORT, message(Vec::new()));
     // The calculation engine's component, which is also where the table lives:
@@ -2126,6 +2126,27 @@ fn numbers_stylesheet(named: &[(String, u64)]) -> Message {
     message(fields)
 }
 
+/// `TSWP.ThemePresetsArchive`, extension 110 of the theme: the list styles
+/// (1) and paragraph styles (7) the app offers. **This is the list in the
+/// Format sidebar's paragraph-style menu** — a theme without it shows the
+/// name of the style a paragraph has and an empty menu to change it from.
+fn text_presets(named: &[(String, u64)]) -> Field {
+    let find = |identifier: &str| {
+        named
+            .iter()
+            .find(|(name, _)| name == identifier)
+            .map(|(_, style)| *style)
+    };
+    let mut presets = Vec::new();
+    if let Some(list) = find("text-0-liststyle-None") {
+        presets.push(reference(1, list));
+    }
+    if let Some(body) = find(BODY_IDENTIFIER) {
+        presets.push(reference(7, body));
+    }
+    nested(110, presets)
+}
+
 /// `TSD.StrokeArchive` at field 2 of a shape style's bag, saying *no outline*:
 /// black, 1 pt, and the empty pattern (type 2) — field for field what
 /// Keynote's own `textbox-0-shapestyle` carries.
@@ -2259,12 +2280,9 @@ const TYPE_MEDIA_STYLE: u32 = 3016;
 /// three of the thirty go and the rest do not. A palette is indexed by
 /// position, which is the obvious reason a shorter one would not do, so this
 /// writes the count the app was watched insisting on.
-fn numbers_theme(stylesheet: u64, presets: Field) -> Message {
-    numbers_theme_with(stylesheet, vec![presets], Vec::new())
-}
-
-/// The same, with whatever the app puts outside the `TSS.ThemeArchive` — for
-/// Keynote, the master slides.
+///
+/// `presets` are the theme's extensions; `extra` is whatever the app puts
+/// outside the `TSS.ThemeArchive` — for Keynote, the master slides.
 fn numbers_theme_with(stylesheet: u64, presets: Vec<Field>, extra: Vec<Field>) -> Message {
     let mut theme = vec![reference(4, stylesheet)];
     theme.extend(presets);
@@ -2554,7 +2572,7 @@ pub(crate) fn keynote(slide_size: (f32, f32)) -> Blueprint {
         TYPE_KEYNOTE_THEME,
         numbers_theme_with(
             stylesheet,
-            vec![presets],
+            vec![presets, text_presets(&named)],
             vec![
                 // `templates`, and the one to draw a new slide from.
                 reference(2, template_node),
