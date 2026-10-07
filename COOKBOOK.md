@@ -125,9 +125,10 @@ Things worth knowing:
 
 - **Text ranges are UTF-16 code units**, and a paragraph style applies to
   whole paragraphs — the range grows to the paragraphs it touches.
-- **`slide.title(…)` and `slide.body(…)` write a layout's placeholders.** Start
-  from one of Apple's themes with `Document::from_template("…/Wide.kth")` to
-  get layouts worth the name; on a deck from nothing, use text boxes.
+- **`slide.title(…)` and `slide.body(…)` write a layout's placeholders.** A
+  deck from nothing has one plain layout, a title over a body; start from one
+  of Apple's themes with `Document::from_template("…/Wide.kth")` to get
+  layouts worth the name.
 - **A table on a slide** is `slide.add_table("Name", rows, columns)?`, which
   returns an identifier `doc.table_mut(id)?` takes — and then everything in the
   Numbers recipe applies to it.

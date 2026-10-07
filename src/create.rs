@@ -2117,6 +2117,11 @@ fn numbers_stylesheet(named: &[(String, u64)]) -> Message {
     // "Adding style (TSDMediaStyle*) to locked stylesheet" and stopped. Nothing
     // in the file says that; the app's own log does.
     fields.push(varint(4, 0));
+    // `can_cull_styles`, true in every document of this age. Without it the
+    // app says "Found a document stylesheet with canCullStyles == NO in a
+    // document with a document version that is after we decided to set
+    // canCullStyles to YES in all documents" and sets it itself.
+    fields.push(varint(6, 1));
     message(fields)
 }
 
@@ -2214,13 +2219,14 @@ const TYPE_MEDIA_STYLE: u32 = 3016;
 /// position, which is the obvious reason a shorter one would not do, so this
 /// writes the count the app was watched insisting on.
 fn numbers_theme(stylesheet: u64, presets: Field) -> Message {
-    numbers_theme_with(stylesheet, presets, Vec::new())
+    numbers_theme_with(stylesheet, vec![presets], Vec::new())
 }
 
 /// The same, with whatever the app puts outside the `TSS.ThemeArchive` — for
 /// Keynote, the master slides.
-fn numbers_theme_with(stylesheet: u64, presets: Field, extra: Vec<Field>) -> Message {
-    let mut theme = vec![reference(4, stylesheet), presets];
+fn numbers_theme_with(stylesheet: u64, presets: Vec<Field>, extra: Vec<Field>) -> Message {
+    let mut theme = vec![reference(4, stylesheet)];
+    theme.extend(presets);
     for (red, green, blue) in PALETTE {
         theme.push(nested(
             10,
@@ -2440,13 +2446,47 @@ pub(crate) fn keynote(slide_size: (f32, f32)) -> Blueprint {
     let (template_component, template) = blueprint.component("TemplateSlide", true);
     // All three of them: a master has a title, a body and an object
     // placeholder, and a slide drawn from it inherits the frames.
+    //
+    // Each is a whole text shape — a style, an outline, a storage — because a
+    // placeholder is one. Bare frames opened, and Keynote said what it thought
+    // of them: "Missing storage archive in shape", "Upgrading nil style",
+    // "Ignoring invalid bezier path", once per placeholder per slide.
+    let box_style = named
+        .iter()
+        .find(|(name, _)| name == "textbox-style-preset-0")
+        .map(|(_, style)| *style)
+        .expect("the theme presets were just made");
+    // A title across the top, the body under it, and the object placeholder
+    // over the whole slide — proportions, so any slide size gets them.
+    let (width, height) = slide_size;
+    let frame = |kind: u64| match kind {
+        2 => (
+            (width * 0.0625, height * 0.06),
+            (width * 0.875, height * 0.2),
+        ),
+        3 => (
+            (width * 0.0625, height * 0.3),
+            (width * 0.875, height * 0.6),
+        ),
+        _ => ((0.0, 0.0), slide_size),
+    };
     let placeholders: Vec<u64> = [2u64, 3, 4]
         .iter()
         .map(|kind| {
+            // Kind 3, as a text box's: the kind a placeholder's storage has
+            // in every deck Keynote wrote (the field's default, left unsaid).
+            // A body storage (0) wants a section, is lent a placeholder one,
+            // and Keynote aborts saving it — "We should never archive the
+            // placeholder section".
+            let storage = blueprint.add(
+                template_component,
+                TYPE_STORAGE,
+                text_box_storage(stylesheet, body, list, ""),
+            );
             blueprint.add(
                 template_component,
                 TYPE_PLACEHOLDER,
-                object_placeholder(template, slide_size, *kind),
+                placeholder(template, box_style, storage, frame(*kind), *kind),
             )
         })
         .collect();
@@ -2473,7 +2513,7 @@ pub(crate) fn keynote(slide_size: (f32, f32)) -> Blueprint {
         TYPE_KEYNOTE_THEME,
         numbers_theme_with(
             stylesheet,
-            presets,
+            vec![presets],
             vec![
                 // `templates`, and the one to draw a new slide from.
                 reference(2, template_node),
@@ -2561,35 +2601,26 @@ fn master_archive(style: u64, placeholders: &[u64]) -> Message {
     ])
 }
 
-/// `KN.PlaceholderArchive` for the object placeholder: a shape covering the
-/// slide, and nothing in it.
-///
-/// Four archives deep — `KN.Placeholder` over `TSWP.ShapeInfo` over `TSD.Shape`
-/// over `TSD.Drawable` — because each one's `super` is `required` and the app
-/// says so by name when it is not there.
-fn object_placeholder(slide: u64, size: (f32, f32), kind: u64) -> Message {
+/// `KN.PlaceholderArchive`: a text shape, and which of the layout's roles it
+/// plays.
+fn placeholder(
+    slide: u64,
+    style: u64,
+    storage: u64,
+    (position, size): ((f32, f32), (f32, f32)),
+    kind: u64,
+) -> Message {
+    let shape = text_box(
+        Some(slide),
+        style,
+        storage,
+        crate::drawable::Outline::Rectangle,
+        position,
+        size,
+        false,
+    );
     message(vec![
-        nested(
-            1,
-            vec![nested(
-                1,
-                vec![nested(
-                    1,
-                    vec![
-                        nested(
-                            1,
-                            vec![
-                                nested(1, vec![float(1, 0.0), float(2, 0.0)]),
-                                nested(2, vec![float(1, size.0), float(2, size.1)]),
-                                varint(3, 0),
-                                float(4, 0.0),
-                            ],
-                        ),
-                        reference(2, slide),
-                    ],
-                )],
-            )],
-        ),
+        nested(1, shape.fields),
         // 2 title, 3 body, 4 object.
         varint(2, kind),
     ])

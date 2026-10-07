@@ -19,6 +19,11 @@ The release in which a document made here stops looking unfinished.
   templates. Read from the apps' own assertion log, which
   `scripts/assertions.sh` now prints for any document; `iwork check` reports a
   file without the lists. **If you generate Keynote decks, upgrade.**
+- **The placeholders of a deck made from nothing were bare frames** — no
+  style, no outline, no text — which Keynote repaired on every load, saying so
+  nine times. They are whole text shapes now, with a title across the top and
+  a body under it, so `slide.title(…)` and `slide.body(…)` work on a deck from
+  nothing where they used to be refused.
 - **No text style this crate applied was drawn in a document it made.** It was
   one table. A storage's paragraph-style table has an entry for *every*
   paragraph — 4 for 4, 12 for 12, in every storage of the corpus — and it was

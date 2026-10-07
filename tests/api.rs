@@ -266,20 +266,19 @@ fn only_a_pages_document_has_a_body() {
 
 /// A slide is addressed by its position in the deck or by an identifier, and
 /// **a slide is not a page with a title slot**: a title is a placeholder the
-/// *layout* defines, so a layout that defines none refuses the write by name
-/// rather than inventing a text box and calling it a title.
+/// *layout* defines. The one layout of a deck made from nothing defines a
+/// title and a body, so both can be written.
 #[test]
 fn a_slide_is_what_its_layout_makes_it() {
-    // A deck from nothing: one slide, a layout with no placeholders at all.
     let mut doc = Document::new(iwork::Kind::Keynote).unwrap();
     let mut slide = doc.slide_mut(0).unwrap();
     assert_eq!(slide.read().layout_name, "Title");
-    let error = slide
-        .title("Hallo")
-        .expect_err("no placeholder")
-        .to_string();
-    assert!(error.contains("gives it no title"), "{error}");
-    assert!(error.contains("a box and not a title"), "{error}");
+    slide.title("Hallo").unwrap();
+    slide.body("Welt").unwrap();
+    assert_eq!(
+        slide.read().title.map(|title| title.text).as_deref(),
+        Some("Hallo")
+    );
 
     // What it *can* hold: drawables of its own, and a transition.
     let box_ = slide
