@@ -7690,10 +7690,19 @@ impl Document {
             .iter()
             .any(|found| found.identifier == style)
         {
-            return Err(Error::refused(
-                Refusal::NotFound,
-                format!("no cell style {style} — `doc.cell_styles()` lists the ones there are"),
-            ));
+            // Something that exists and is not a cell style is the wrong
+            // thing, not a missing one.
+            return Err(match self.object(style) {
+                Some((_, object)) => Error::refused(
+                    Refusal::WrongSlot,
+                    format!(
+                        "object {style} is message type {}, not a cell style — \
+                         `doc.cell_styles()` lists the ones there are",
+                        object.message_type()
+                    ),
+                ),
+                None => Error::refused(Refusal::NotFound, format!("no cell style {style}")),
+            });
         }
         Ok(crate::element::CellStyleMut::new(self, style))
     }
