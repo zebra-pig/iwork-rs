@@ -138,7 +138,7 @@ fn painting_something_that_is_not_a_cell_style_is_refused() {
     let mut doc = doc;
     let error = doc
         .set_cell_style_fill(
-            table,
+            table.get(),
             Some(Color {
                 red: 1.0,
                 green: 0.0,

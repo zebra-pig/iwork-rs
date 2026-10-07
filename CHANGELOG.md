@@ -18,6 +18,19 @@ bytes nobody has watched being read.
   `delete_column`, `set_block`, `add_build`, `add_table`. The
   work is done by `table_mut`, `text_mut`, `slide_mut`, `element_mut`,
   `chart_mut`, `text_style_mut` and `container.add(value)`.
+- **The rest of the flat functions, moved to the handle of the thing they
+  change**: `set_cells`, `fill_formula`, `set_filter_enabled`,
+  `set_conditional_threshold` → `table_mut`; `set_chart_data`, `bind_chart`
+  → `chart_mut(id)?.data(…)`, `.bind(…)`; `set_geometry` →
+  `element_mut(id)?.set_geometry(…)`; `add_comment` →
+  `text_mut(id)?.comment(range, …)`; `create_text_style`,
+  `update_text_style`, `copy_text_style_property` →
+  `text_style_mut(id)?.copy(name)`, `.update(…)`, `.copy_property(from, …)`;
+  `set_cell_style_fill` → `cell_style_mut(id)?.fill(…)`; `copy_chart` →
+  `container.add(Chart::copy_of(id)…)`.
+- **The module-level functions that took `&mut Document`** —
+  `drawable::set_fill`, `chart::new_chart`, `keynote::set_transition` and
+  thirty more. They were a second way to do everything.
 - `CellText` and `TableMut::text_look` — `table.look(range, &TextLook)` and
   `table.align(range, Align)`.
 - The 0.2 names `SlideHandle`, `TableHandle`, `TextHandle`, and
@@ -25,9 +38,13 @@ bytes nobody has watched being read.
 
 ### Changed — breaking
 
-- **`add` returns an `ElementId` and `add_text_style` a `StyleId`.** Both
-  convert from and to `u64`, compare with one, and print as one; what takes
-  an identifier says which kind it wants (`TextBox::style(impl Into<StyleId>)`).
+- **Identifiers are typed.** `add` returns an `ElementId` and
+  `add_text_style` a `StyleId`; `ElementInfo`, `ChartInfo` and `TableInfo`
+  report an `ElementId`, `TextStyleInfo` a `StyleId`. Both convert from and
+  to `u64` (`.get()`), compare with one, and print as one; what takes an
+  identifier says which kind it wants.
+- `ChartMut::data` takes a `ChartData` (`chart.data()?` makes one from a
+  `Chart` value).
 - **Snapshots**: `Drawable` is `ElementInfo`, read with `doc.elements()` and
   `doc.element(id)`; `keynote::Slide` is `SlideInfo`; `table::Sheet` is
   `SheetInfo`.
@@ -41,6 +58,8 @@ bytes nobody has watched being read.
 - `doc.canvas_mut("…")` — a slide, a sheet or a page named the way a tool
   names one, to `add` to.
 - `slide.add_build_with(element, &BuildEdit)`.
+- `Chart::copy_of(id)`, `Chart::with_data(ChartData)`,
+  `TextStyle::based_on(id)`, `doc.cell_style_mut(id)`.
 
 ## 0.3.0 — 2026-10-07
 

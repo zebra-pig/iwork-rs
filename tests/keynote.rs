@@ -2385,7 +2385,7 @@ fn a_style_made_here_is_its_own_style_and_the_theme_offers_it() {
             _ => None,
         })
         .collect();
-    assert_eq!(offered, vec![body.identifier, title, small]);
+    assert_eq!(offered, vec![body.identifier.get(), title, small]);
     assert_eq!(presets.all(1).count(), 1, "and the one list style");
     assert!(doc.problems().is_empty(), "{:?}", doc.problems());
 }

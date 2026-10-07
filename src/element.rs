@@ -850,14 +850,13 @@ impl<'a> ChartMut<'a> {
     /// of what the mediator's formulas last evaluated to. What this adds is the
     /// formulas — one per series and per label, each a reference to the table
     /// wrapped in function 175 — and the owner that makes the calculation
-    /// engine know about them. See [`crate::element::ChartMut::bind`].
+    /// engine know about them.
     ///
     /// ```no_run
     /// # fn main() -> Result<(), iwork::Error> {
     /// # let mut doc = iwork::Document::open("Budget.numbers")?;
     /// use iwork::chart::ChartBinding;
-    /// doc.bind_chart(
-    ///     905245,
+    /// doc.chart_mut(905245)?.bind(
     ///     "Umsatz",
     ///     &ChartBinding {
     ///         series: vec!["B2:B13".into(), "C2:C13".into()],
@@ -1034,8 +1033,9 @@ impl TextStyleMut<'_> {
     /// # fn main() -> Result<(), iwork::Error> {
     /// # let mut doc = iwork::Document::open("Report.pages")?;
     /// use iwork::style::property;
-    /// doc.copy_text_style_property(3712, 3801, property::FONT_COLOR)?;
-    /// doc.text_style_mut(3801)?.property(property::RED,
+    /// let mut style = doc.text_style_mut(3801)?;
+    /// style.copy_property(3712, property::FONT_COLOR)?;
+    /// style.property(property::RED,
     ///     Some(iwork::pb::Value::Fixed32(0.85f32.to_le_bytes())))?;
     /// # Ok(()) }
     /// ```

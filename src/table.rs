@@ -1048,7 +1048,7 @@ impl SheetInfo {
         let mut tables: Vec<TableInfo> = document
             .tables()
             .into_iter()
-            .filter(|table| self.drawables.contains(&table.identifier))
+            .filter(|table| self.drawables.contains(&table.identifier.get()))
             .collect();
         tables.sort_by_key(|table| {
             self.drawables
@@ -2550,7 +2550,7 @@ impl HiddenStates {
 #[derive(Debug, Clone)]
 pub struct TableInfo {
     /// `TST.TableInfoArchive` object identifier — the handle callers use.
-    pub identifier: u64,
+    pub identifier: crate::element::ElementId,
     /// `TST.TableModelArchive` object identifier.
     pub model: u64,
     pub stream: String,
@@ -3200,7 +3200,7 @@ fn read_table(
     let (column_states, row_states) = hidden_states(model, &uids);
 
     let mut table = TableInfo {
-        identifier,
+        identifier: identifier.into(),
         model: model_id,
         stream: stream.to_string(),
         name: string_field(model, 8),
@@ -3805,7 +3805,7 @@ pub fn formulas(tables: &[TableInfo]) -> Vec<FormulaCell> {
         for (row, column, formula) in table.formula_cells() {
             let at = crate::formula::Site::new(&index, Some(position), (column as i64, row as i64));
             out.push(FormulaCell {
-                table: table.identifier,
+                table: table.identifier.get(),
                 table_name: table.name.clone(),
                 sheet: table.sheet.clone(),
                 row,

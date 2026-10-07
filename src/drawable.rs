@@ -906,7 +906,7 @@ impl Placement {
 /// One placed object.
 #[derive(Debug, Clone)]
 pub struct ElementInfo {
-    pub identifier: u64,
+    pub identifier: crate::element::ElementId,
     pub stream: String,
     pub message_type: u32,
     pub kind: Kind,
@@ -1309,7 +1309,7 @@ pub fn drawables(document: &crate::Document) -> Vec<ElementInfo> {
             .unwrap_or(0);
 
         out.push(ElementInfo {
-            identifier: object.identifier,
+            identifier: object.identifier.into(),
             stream: stream.to_string(),
             message_type,
             kind,

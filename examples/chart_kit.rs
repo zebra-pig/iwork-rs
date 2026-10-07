@@ -58,7 +58,7 @@ fn main() {
         .find(|chart| chart.chart_type == 1 && chart.mediator.is_none())
         .expect("a column chart");
 
-    let mut kit = vec![chart.identifier];
+    let mut kit = vec![chart.identifier.get()];
     let mut map = BTreeMap::new();
     let mut at = 0;
     while at < kit.len() {

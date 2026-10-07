@@ -122,13 +122,14 @@ Color::rgb(0.07, 0.17, 0.29)   Color::hex("#122B4A")?   Color::WHITE
 Fill::None | Fill::Color(c) | Fill::Gradient(g) | Fill::Image(i)      // From<Color>, From<Gradient>
 Gradient::linear(from, to, angle)   Shadow::default()   Stroke::new(colour, width)
 TextLook::new().font("AvenirNext-Bold").size(60.0).colour(c).bold()
-TextStyle::new("Title").look(look).align(Align::Centre)
+TextStyle::new("Title").look(look).align(Align::Centre).based_on(id)
 
 Shape::rectangle() / ::ellipse() / ::line()   .fill() .stroke() .no_stroke() .shadow() .opacity() .text()
 TextBox::new("words")                         .style(id) .look(look) .format(range, look)
 Image::new(bytes).named("photo.png")
 Table::new("Name", rows, columns)             Table::with_rows("Name", [[…], […]])   (only .at)
 Chart::new(ChartKind::Column)                 .categories([…]) .series("2025", […]) .title("…") .legend()
+Chart::copy_of(id)                            a copy of a chart the document has, with new data
 // every one of them but Table: .at(x, y) .size(w, h) .frame(Frame)
 
 // document
@@ -137,11 +138,12 @@ let id = doc.slide_mut(0)?.add(Chart::new(…)…)?;       // also sheet_mut(nam
 doc.slide_mut(0)?.background(Fill)?;
 
 // handles
-doc.element_mut(id)?   .fill() .stroke() .shadow() .opacity() .move_to() .resize() .text()
-doc.chart_mut(id)?     .data(…) .kind(…) .title(…) .legend() + everything on element_mut
-doc.table_mut(name)?   .set() .formula() .currency() .format() .fill(range, Fill) .look(range, &TextLook) .align() …
-doc.text_mut(id)?      .set() .insert() .delete() .replace() .style() .format()
-doc.text_style_mut(id)? .look() .align() .rename() .property() .delete()
+doc.element_mut(id)?   .fill() .stroke() .shadow() .opacity() .move_to() .resize() .set_geometry() .text()
+doc.chart_mut(id)?     .data(&ChartData) .bind(table, &binding) .title(…) .legend() .element()
+doc.table_mut(name)?   .set() .set_cells() .formula() .fill_formula() .currency() .format() .fill() .look() .align() .filter() …
+doc.text_mut(id)?      .set() .insert() .delete() .replace() .style() .format() .comment()
+doc.text_style_mut(id)? .look() .align() .rename() .property() .copy() .copy_property() .update() .delete()
+doc.cell_style_mut(id)? .fill()
 ```
 
 ## How it got here
@@ -151,17 +153,23 @@ doc.text_style_mut(id)? .look() .align() .rename() .property() .delete()
 | 0.3.0 | values + `add`; one `Fill`; `TextLook` and typed `TextStyle`; handles for elements, charts, tables, text and text styles; snapshots `ChartInfo`, `TextStyleInfo`, `TableInfo`. Every flat function on `Document` that a handle covers deprecated, with the replacement named. |
 | 0.4.0 | The flat layer **removed** from the public API, with `CellText` and the 0.2 aliases: there is one way to do each thing. Snapshots `ElementInfo` (`doc.elements()`), `SlideInfo`, `SheetInfo`. Typed identifiers: `add` returns an `ElementId`, `add_text_style` a `StyleId`. The `iwork` binary goes through the handles like any other caller. |
 
-Still flat on `Document`, because no handle is yet the better home:
-`set_cells`, `fill_formula`, `set_filter_enabled`,
-`set_conditional_threshold`, `bind_chart`, `copy_chart`, `add_comment`,
-`replace_media`, `set_geometry`, `create_text_style`,
-`copy_text_style_property`, `update_text_style`, `add_slide`, `add_sheet`
-and the Pages structure. Each moves when it gets a handle method, and by
-rule 1 of the checklist below nothing new is added there.
+What `Document` still does itself is what belongs to the document rather
+than to a thing in it: opening, saving and reading; `add_slide` and
+`add_sheet`, which make a container; `replace_media`, which swaps a stored
+file whether named by the image that shows it or by itself; `set_link_url`;
+and the low level (`objects`, `archive`, `set_archive_for`, `problems`). The
+modules' own functions that took `&mut Document` — `drawable::set_fill`,
+`chart::new_chart` and thirty more — are crate-private: there was a second
+flat layer under the first.
 
-Identifiers a snapshot reports are still `u64` — `ElementInfo::identifier`,
-`TextStyleInfo::identifier` — and convert into the typed ones. Typing them at
-the source is the next step, with a `StorageId` for text.
+There is no `section_mut`: nothing writes a Pages section, header or column
+layout yet, and their text is edited through `text_mut` like any other. The
+handle arrives with the first thing it would do (rule 8).
+
+Identifiers are typed where they are reported as well as where they are
+taken: `ElementInfo`, `ChartInfo` and `TableInfo` carry an `ElementId`,
+`TextStyleInfo` a `StyleId`. A text storage's is still a `u64`, as is every
+identifier of the low level.
 
 **The tests written against the flat calls still run**, through
 `tests/common`, which spells each old call as the handle call it became. So

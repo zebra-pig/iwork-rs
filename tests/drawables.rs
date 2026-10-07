@@ -126,7 +126,7 @@ fn every_geometry_re_encodes_to_the_bytes_it_came_from() {
     for path in every_fixture() {
         let doc = Document::open(&path).unwrap();
         for drawable in doc.elements() {
-            let (_, object) = doc.object(drawable.identifier).unwrap();
+            let (_, object) = doc.object(drawable.identifier.get()).unwrap();
             let archive = Message::decode(object.payload()).unwrap();
             let mut at: Vec<u32> = drawable.path.clone();
             at.push(drawable::field::GEOMETRY);
@@ -391,8 +391,12 @@ fn moving_a_drawable_rewrites_only_the_stream_it_lives_in() {
         .into_iter()
         .find(|d| d.kind == Kind::Shape && d.geometry.width == 300.0)
         .expect("the fixture has a 300-point shape");
-    doc.set_geometry(shape.identifier, Some((250.0, 300.0)), Some((400.0, 120.0)))
-        .unwrap();
+    doc.set_geometry(
+        shape.identifier.get(),
+        Some((250.0, 300.0)),
+        Some((400.0, 120.0)),
+    )
+    .unwrap();
     assert_eq!(
         doc.changed_streams(),
         vec![shape.stream.as_str()],
@@ -402,7 +406,7 @@ fn moving_a_drawable_rewrites_only_the_stream_it_lives_in() {
     let mut doc = Document::open(&path).unwrap();
     let frame = shape.frame(None);
     doc.set_geometry(
-        shape.identifier,
+        shape.identifier.get(),
         Some((frame.x, frame.y)),
         Some((frame.width, frame.height)),
     )
@@ -432,7 +436,7 @@ fn resizing_a_masked_image_scales_the_whole_assembly() {
 
     let change = doc
         .set_geometry(
-            image.identifier,
+            image.identifier.get(),
             Some((60.0, 123.0)),
             Some((300.0, 241.894_73)),
         )
@@ -498,7 +502,7 @@ fn a_geometry_write_leaves_every_other_object_alone() {
         .find(|d| d.kind == Kind::Shape && d.geometry.width == 300.0)
         .unwrap();
     after
-        .set_geometry(shape.identifier, Some((11.0, 22.0)), None)
+        .set_geometry(shape.identifier.get(), Some((11.0, 22.0)), None)
         .unwrap();
 
     let mut compared = 0usize;
@@ -534,7 +538,7 @@ fn replacing_media_brings_the_registry_and_the_drawables_into_step() {
     // A 4 x 4 PNG, built here so the test needs no files.
     let png = tiny_png(4, 4);
     let replacement = doc
-        .replace_media(image.identifier, &png, "tiny.png", None)
+        .replace_media(image.identifier.get(), &png, "tiny.png", None)
         .unwrap();
 
     assert_eq!(replacement.data, data);
@@ -543,7 +547,7 @@ fn replacing_media_brings_the_registry_and_the_drawables_into_step() {
         "Data/tiny-9076.png".replace("9076", &data.to_string())
     );
     assert_eq!(replacement.new_pixel_size, (4.0, 4.0));
-    assert!(replacement.drawables.contains(&image.identifier));
+    assert!(replacement.drawables.contains(&image.identifier.get()));
     assert!(
         replacement.aspect_changed,
         "32 x 24 became 4 x 4, which is a different shape"
@@ -589,7 +593,7 @@ fn replacing_media_refuses_an_image_that_is_cropped() {
         .map(|(_, object)| object.payload().to_vec())
         .collect();
     let error = doc
-        .replace_media(cropped.identifier, &tiny_png(4, 4), "tiny.png", None)
+        .replace_media(cropped.identifier.get(), &tiny_png(4, 4), "tiny.png", None)
         .unwrap_err();
     match &error {
         iwork::Error::NonDestructiveEdit { drawable, reasons } => {
@@ -634,7 +638,7 @@ fn a_crop_slid_to_the_origin_is_still_a_crop() {
 
     // And so replace_media refuses it, as it would any crop.
     let error = doc
-        .replace_media(image.identifier, &tiny_png(4, 4), "tiny.png", None)
+        .replace_media(image.identifier.get(), &tiny_png(4, 4), "tiny.png", None)
         .unwrap_err();
     assert!(
         matches!(error, iwork::Error::NonDestructiveEdit { .. }),
@@ -694,7 +698,7 @@ fn replacing_media_refuses_an_image_with_a_thumbnail() {
         "the thumbnail is one of the derived renderings"
     );
     let error = doc
-        .replace_media(image.identifier, &tiny_png(4, 4), "tiny.png", None)
+        .replace_media(image.identifier.get(), &tiny_png(4, 4), "tiny.png", None)
         .unwrap_err();
     match &error {
         iwork::Error::NonDestructiveEdit { reasons, .. } => {
@@ -841,7 +845,7 @@ fn the_app_agrees_about_every_rectangle() {
         let doc = Document::open(&path).unwrap();
         let all = doc.elements();
         let by_id: std::collections::BTreeMap<u64, &iwork::ElementInfo> =
-            all.iter().map(|d| (d.identifier, d)).collect();
+            all.iter().map(|d| (d.identifier.get(), d)).collect();
 
         let mut compared = 0usize;
         for drawable in &all {
@@ -914,9 +918,13 @@ fn keynote_reads_back_a_moved_drawable() {
         .into_iter()
         .find(|d| d.kind == Kind::Image && d.mask().is_none())
         .unwrap();
-    doc.set_geometry(shape.identifier, Some((211.0, 322.0)), Some((444.0, 128.0)))
-        .unwrap();
-    doc.set_geometry(image.identifier, Some((640.0, 240.0)), None)
+    doc.set_geometry(
+        shape.identifier.get(),
+        Some((211.0, 322.0)),
+        Some((444.0, 128.0)),
+    )
+    .unwrap();
+    doc.set_geometry(image.identifier.get(), Some((640.0, 240.0)), None)
         .unwrap();
 
     let out = std::env::temp_dir().join("iwork-set-geometry.key");
@@ -962,8 +970,13 @@ fn keynote_opens_a_document_whose_image_was_replaced() {
         .find(|d| d.kind == Kind::Image && d.mask().is_none())
         .unwrap();
     let frame = image.frame(None);
-    doc.replace_media(image.identifier, &tiny_png(48, 36), "swapped.png", None)
-        .unwrap();
+    doc.replace_media(
+        image.identifier.get(),
+        &tiny_png(48, 36),
+        "swapped.png",
+        None,
+    )
+    .unwrap();
 
     let out = std::env::temp_dir().join("iwork-replace-media.key");
     let _ = std::fs::remove_file(&out);

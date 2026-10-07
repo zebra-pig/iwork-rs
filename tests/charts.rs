@@ -817,7 +817,7 @@ fn a_document_with_charts_survives_a_no_op_save() {
         let before: Vec<Vec<u8>> = doc
             .charts()
             .iter()
-            .map(|c| c.identifier.to_le_bytes().to_vec())
+            .map(|c| c.identifier.get().to_le_bytes().to_vec())
             .collect();
         assert!(!before.is_empty(), "{name} has no charts");
 
@@ -835,7 +835,7 @@ fn a_document_with_charts_survives_a_no_op_save() {
         let after: Vec<Vec<u8>> = reopened
             .charts()
             .iter()
-            .map(|c| c.identifier.to_le_bytes().to_vec())
+            .map(|c| c.identifier.get().to_le_bytes().to_vec())
             .collect();
         assert_eq!(before, after, "{name}: the charts moved");
         let _ = std::fs::remove_file(&out);

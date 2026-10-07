@@ -654,7 +654,7 @@ fn a_copied_style_is_grouped_under_its_parent() {
         .unwrap();
         assert_eq!(
             style::count_references(&sheet, created.identifier),
-            style::count_references(&sheet, template.identifier),
+            style::count_references(&sheet, template.identifier.get()),
             "{}: the copy of {} is listed in fewer places than its template",
             path.display(),
             template.identifier

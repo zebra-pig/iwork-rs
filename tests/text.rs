@@ -577,7 +577,7 @@ fn styling_from_the_middle_gives_the_table_a_head_entry_at_zero() {
         .text_styles()
         .into_iter()
         .filter(|s| s.kind == StyleKind::Character)
-        .map(|s| s.identifier)
+        .map(|s| s.identifier.get())
         .collect();
     character.sort_unstable();
     let style = character[0];
@@ -990,7 +990,7 @@ fn the_app_opens_an_edited_document_and_reads_the_new_words_back() {
         .next()
         .unwrap()
         .identifier;
-    let places: Vec<(u64, f32, f32)> = before
+    let places: Vec<(iwork::ElementId, f32, f32)> = before
         .elements()
         .iter()
         .map(|d| (d.identifier, d.geometry.x, d.geometry.y))
@@ -1381,7 +1381,11 @@ fn styling_one_paragraph_leaves_an_entry_for_every_paragraph() {
     // The paragraph after the range was inheriting `Body` through an entry
     // with no object. What it inherits from has just changed, so it is given
     // the reference it had — which is what keeps it drawn as it was.
-    assert_eq!(entries[1].1, Some(body), "the next one keeps what it had");
+    assert_eq!(
+        entries[1].1,
+        Some(body.get()),
+        "the next one keeps what it had"
+    );
     assert!(doc.problems().is_empty(), "{:?}", doc.problems());
 
     // Styling the middle one, and then all three, keeps the shape.
@@ -1490,7 +1494,7 @@ fn a_paragraph_table_short_of_an_entry_is_a_problem_the_checker_names() {
     entry.set_in_order(1, iwork::pb::Value::Varint(0));
     entry.set_in_order(
         2,
-        iwork::pb::Value::Bytes(iwork::style::reference(body).encode()),
+        iwork::pb::Value::Bytes(iwork::style::reference(body.get()).encode()),
     );
     let mut table = iwork::pb::Message::default();
     table.fields.push(iwork::pb::Field {
@@ -1603,7 +1607,7 @@ fn a_style_made_from_nothing_has_a_fill_for_its_colour_to_go_in() {
             panic!("{kind:?}: no named paragraph style to copy");
         };
         let made = doc
-            .create_text_style(template.identifier, "Akzent")
+            .create_text_style(template.identifier.get(), "Akzent")
             .unwrap()
             .identifier;
         doc.set_text_style_color(made, 0.83, 0.18, 0.18, 1.0)

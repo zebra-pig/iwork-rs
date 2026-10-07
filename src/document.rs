@@ -1506,7 +1506,7 @@ fn mint_row_uuid(
     // splitmix64 seeded from the table id and the insertion point.
     let mut state = 0x9E37_79B9_7F4A_7C15u64
         ^ (at as u64).wrapping_mul(0xD1B5_4A32_D192_ED03)
-        ^ table.identifier.wrapping_mul(0x2545_F491_4F6C_DD1D);
+        ^ table.identifier.get().wrapping_mul(0x2545_F491_4F6C_DD1D);
     for byte in table.table_id.bytes() {
         state = state
             .wrapping_mul(0x0000_0100_0000_01B3)
@@ -2580,7 +2580,7 @@ impl Document {
         let by_id: Option<u64> = wanted.parse().ok();
         self.tables()
             .into_iter()
-            .find(|t| Some(t.identifier) == by_id || t.name == wanted)
+            .find(|t| Some(t.identifier.get()) == by_id || t.name == wanted)
     }
 
     /// Every named cell format the document defines.
@@ -3011,15 +3011,15 @@ impl Document {
         let mut matches = self
             .tables()
             .into_iter()
-            .filter(|t| Some(t.identifier) == by_id || t.name == wanted);
+            .filter(|t| Some(t.identifier.get()) == by_id || t.name == wanted);
         let first = matches.next().ok_or_else(|| {
             Error::refused(Refusal::NotFound, format!("no table called '{wanted}'"))
         })?;
         // An id names one table; only a name can be ambiguous.
         if by_id.is_none() {
-            let also: Vec<u64> = matches.map(|t| t.identifier).collect();
+            let also: Vec<u64> = matches.map(|t| t.identifier.get()).collect();
             if !also.is_empty() {
-                let mut ids = vec![first.identifier];
+                let mut ids = vec![first.identifier.get()];
                 ids.extend(also);
                 let list = ids
                     .iter()
@@ -3985,7 +3985,7 @@ impl Document {
                 .collect(),
         };
         match matches.len() {
-            1 => Ok(matches[0].identifier),
+            1 => Ok(matches[0].identifier.get()),
             0 => Err(Error::Format(format!("no table {wanted}"))),
             _ => {
                 let where_ = matches
@@ -4022,8 +4022,7 @@ impl Document {
     /// # fn main() -> Result<(), iwork::Error> {
     /// # let mut doc = iwork::Document::open("Budget.numbers")?;
     /// use iwork::chart::ChartBinding;
-    /// doc.bind_chart(
-    ///     905245,
+    /// doc.chart_mut(905245)?.bind(
     ///     "Umsatz",
     ///     &ChartBinding {
     ///         series: vec!["B2:B13".into(), "C2:C13".into()],
@@ -7604,7 +7603,7 @@ impl Document {
                     .iter()
                     .find(|found| found.name.as_deref() == Some("Body"))
                     .or(paragraph_styles.first())
-                    .map(|found| found.identifier)
+                    .map(|found| found.identifier.get())
             })
             .ok_or_else(|| {
                 Error::refused(
@@ -7844,7 +7843,7 @@ impl Document {
             .ok_or(Error::NoSuchObject(identifier))?;
         let mask = drawable.mask().and_then(|id| self.element(id));
         let before = drawable.frame(mask.as_ref());
-        for object in [Some(identifier), mask.as_ref().map(|m| m.identifier)]
+        for object in [Some(identifier), mask.as_ref().map(|m| m.identifier.get())]
             .into_iter()
             .flatten()
         {
@@ -7905,11 +7904,11 @@ impl Document {
                 mask_geometry.height = base.height;
                 geometry.x = base.x - mask_geometry.x;
                 geometry.y = base.y - mask_geometry.y;
-                self.write_geometry(mask.identifier, &mask.path, mask_geometry)?;
+                self.write_geometry(mask.identifier.get(), &mask.path, mask_geometry)?;
                 if resizing {
                     self.scale_path_source(mask, base.width, base.height)?;
                 }
-                rewritten.push(mask.identifier);
+                rewritten.push(mask.identifier.get());
             }
             None => {
                 geometry.x = base.x;
@@ -7970,7 +7969,7 @@ impl Document {
             drawable: identifier,
             before,
             after,
-            mask: mask.map(|m| m.identifier),
+            mask: mask.map(|m| m.identifier.get()),
             rewritten,
         })
     }
@@ -8046,7 +8045,7 @@ impl Document {
                 .unwrap_or_default();
             if !objections.is_empty() {
                 return Err(Error::NonDestructiveEdit {
-                    drawable: drawable.identifier,
+                    drawable: drawable.identifier.get(),
                     reasons: objections,
                 });
             }
@@ -8161,7 +8160,7 @@ impl Document {
             if drawable.kind != crate::drawable::Kind::Image {
                 continue;
             }
-            let mut archive = self.archive_of(drawable.identifier)?;
+            let mut archive = self.archive_of(drawable.identifier.get())?;
             let body_path: Vec<u32> =
                 drawable.path[..drawable.path.len().saturating_sub(1)].to_vec();
             let mut body = if body_path.is_empty() {
@@ -8200,8 +8199,8 @@ impl Document {
                 style::set_path(&mut archive, &body_path, Some(Value::Bytes(body.encode())))
                     .map_err(|e| Error::Format(format!("drawable {}: {e}", drawable.identifier)))?;
             }
-            self.set_archive(drawable.identifier, &archive)?;
-            updated.push(drawable.identifier);
+            self.set_archive(drawable.identifier.get(), &archive)?;
+            updated.push(drawable.identifier.get());
         }
 
         // Prefer the registry's recorded size, fall back to the drawable's
@@ -8278,7 +8277,7 @@ impl Document {
         width: f32,
         height: f32,
     ) -> Result<(), Error> {
-        let identifier = drawable.identifier;
+        let identifier = drawable.identifier.get();
         let mut archive = self.archive_of(identifier)?;
         // The path source hangs off the concrete class — field 3 of a shape,
         // field 2 of a mask — which is one level above the drawable archive.
@@ -8363,7 +8362,7 @@ impl Document {
                 continue;
             };
             out.push(TextStyleInfo {
-                identifier: object.identifier,
+                identifier: object.identifier.into(),
                 stream: stream.to_string(),
                 kind,
                 name: style::string_at(&archive, style::NAME),
@@ -8391,7 +8390,11 @@ impl Document {
     ///
     /// This reads all six attribute tables rather than only the one belonging
     /// to the style's kind, so a style used somewhere unexpected still shows up.
-    pub fn text_style_usage(&self, identifier: u64) -> Vec<StyleUse> {
+    pub fn text_style_usage(
+        &self,
+        identifier: impl Into<crate::element::StyleId>,
+    ) -> Vec<StyleUse> {
+        let identifier = identifier.into().get();
         let mut out = Vec::new();
         for (stream, object) in self.objects() {
             let Some(message) = object.messages.first() else {
@@ -8650,8 +8653,9 @@ impl Document {
     /// # fn main() -> Result<(), iwork::Error> {
     /// # let mut doc = iwork::Document::open("Report.pages")?;
     /// use iwork::style::property;
-    /// doc.copy_text_style_property(3712, 3801, property::FONT_COLOR)?;
-    /// doc.text_style_mut(3801)?.property(property::RED,
+    /// let mut style = doc.text_style_mut(3801)?;
+    /// style.copy_property(3712, property::FONT_COLOR)?;
+    /// style.property(property::RED,
     ///     Some(iwork::pb::Value::Fixed32(0.85f32.to_le_bytes())))?;
     /// # Ok(()) }
     /// ```
@@ -9611,7 +9615,7 @@ impl Document {
         let styles: BTreeMap<u64, StyleKind> = self
             .text_styles()
             .into_iter()
-            .map(|s| (s.identifier, s.kind))
+            .map(|s| (s.identifier.get(), s.kind))
             .collect();
 
         for (stream, object) in self.objects() {
@@ -9793,7 +9797,7 @@ impl Document {
             let Ok(archive) = self.archive_of(sheet) else {
                 continue;
             };
-            if style::count_references(&archive, style.identifier) == 1 {
+            if style::count_references(&archive, style.identifier.get()) == 1 {
                 problems.push(format!(
                     "style {}: listed in stylesheet {sheet} but not grouped under \
                      its parent {parent}",
@@ -10455,7 +10459,8 @@ impl Document {
             }
             if let Some(mask) = drawable.mask() {
                 match self.element(mask) {
-                    Some(mask_drawable) if mask_drawable.parent == Some(drawable.identifier) => {}
+                    Some(mask_drawable)
+                        if mask_drawable.parent == Some(drawable.identifier.get()) => {}
                     Some(mask_drawable) => problems.push(format!(
                         "image {} is masked by {mask}, whose parent is {:?}",
                         drawable.identifier, mask_drawable.parent
@@ -10484,7 +10489,7 @@ impl Document {
             if used.is_empty() {
                 continue;
             }
-            let Some((_, object)) = self.object(drawable.identifier) else {
+            let Some((_, object)) = self.object(drawable.identifier.get()) else {
                 continue;
             };
             let declared: BTreeSet<u64> = object

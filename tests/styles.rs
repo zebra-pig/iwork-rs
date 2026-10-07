@@ -196,7 +196,7 @@ fn runs_of(doc: &Document, table: u32) -> Vec<(u64, Option<u64>)> {
 fn names(doc: &Document) -> Vec<(u64, String)> {
     doc.text_styles()
         .into_iter()
-        .map(|s| (s.identifier, s.name.clone().unwrap_or_default()))
+        .map(|s| (s.identifier.get(), s.name.clone().unwrap_or_default()))
         .collect()
 }
 

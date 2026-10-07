@@ -54,7 +54,7 @@ pub trait Flat {
         &mut self,
         storage: u64,
         range: Range<u64>,
-        style: u64,
+        style: impl Into<iwork::StyleId>,
     ) -> Result<(), Error> {
         self.doc().text_mut(storage)?.style(range, style)
     }
@@ -68,12 +68,16 @@ pub trait Flat {
     }
 
     // -- text styles --------------------------------------------------------
-    fn rename_text_style(&mut self, style: u64, name: &str) -> Result<(), Error> {
+    fn rename_text_style(
+        &mut self,
+        style: impl Into<iwork::StyleId>,
+        name: &str,
+    ) -> Result<(), Error> {
         self.doc().text_style_mut(style)?.rename(name)
     }
     fn set_text_style_property(
         &mut self,
-        style: u64,
+        style: impl Into<iwork::StyleId>,
         path: &[u32],
         value: Option<Value>,
     ) -> Result<(), Error> {
@@ -81,7 +85,7 @@ pub trait Flat {
     }
     fn set_text_style_color(
         &mut self,
-        style: u64,
+        style: impl Into<iwork::StyleId>,
         red: f32,
         green: f32,
         blue: f32,
@@ -94,7 +98,7 @@ pub trait Flat {
     }
     fn delete_text_style(
         &mut self,
-        style: u64,
+        style: impl Into<iwork::StyleId>,
         replace_with: Option<u64>,
     ) -> Result<StyleDeletion, Error> {
         self.doc()
@@ -225,7 +229,7 @@ pub trait Flat {
     fn add_build(
         &mut self,
         identifier: u64,
-        element: u64,
+        element: impl Into<iwork::ElementId>,
         edit: &iwork::keynote::BuildEdit,
     ) -> Result<u64, Error> {
         self.doc()
@@ -312,7 +316,7 @@ pub trait Flat {
     fn add_chart(
         &mut self,
         container: &str,
-        from: u64,
+        from: impl Into<iwork::ElementId>,
         data: &ChartData,
         position: (f32, f32),
         size: (f32, f32),
@@ -323,12 +327,16 @@ pub trait Flat {
             .size(size.0, size.1);
         self.doc().canvas_mut(container)?.add(chart).map(Into::into)
     }
-    fn set_chart_data(&mut self, chart: u64, data: &ChartData) -> Result<(), Error> {
+    fn set_chart_data(
+        &mut self,
+        chart: impl Into<iwork::ElementId>,
+        data: &ChartData,
+    ) -> Result<(), Error> {
         self.doc().chart_mut(chart)?.data(data)
     }
     fn bind_chart(
         &mut self,
-        chart: u64,
+        chart: impl Into<iwork::ElementId>,
         table: &str,
         binding: &iwork::chart::ChartBinding,
     ) -> Result<u64, Error> {
@@ -336,7 +344,7 @@ pub trait Flat {
     }
     fn set_geometry(
         &mut self,
-        element: u64,
+        element: impl Into<iwork::ElementId>,
         position: Option<(f32, f32)>,
         size: Option<(f32, f32)>,
     ) -> Result<iwork::drawable::GeometryChange, Error> {
@@ -355,19 +363,24 @@ pub trait Flat {
     }
     fn create_text_style(
         &mut self,
-        template: u64,
+        template: impl Into<iwork::StyleId>,
         name: &str,
     ) -> Result<iwork::CreatedStyle, Error> {
         self.doc().text_style_mut(template)?.copy(name)
     }
     fn update_text_style(
         &mut self,
-        style: u64,
+        style: impl Into<iwork::StyleId>,
         edit: impl FnOnce(&mut iwork::pb::Message),
     ) -> Result<(), Error> {
         self.doc().text_style_mut(style)?.update(edit)
     }
-    fn copy_text_style_property(&mut self, from: u64, to: u64, path: &[u32]) -> Result<(), Error> {
+    fn copy_text_style_property(
+        &mut self,
+        from: impl Into<iwork::StyleId>,
+        to: impl Into<iwork::StyleId>,
+        path: &[u32],
+    ) -> Result<(), Error> {
         self.doc().text_style_mut(to)?.copy_property(from, path)
     }
     fn set_cell_style_fill(&mut self, style: u64, colour: Option<Color>) -> Result<(), Error> {
@@ -411,15 +424,23 @@ pub trait Flat {
     }
 
     // -- how an element looks -----------------------------------------------
-    fn set_object_fill(&mut self, element: u64, colour: Option<Color>) -> Result<(), Error> {
+    fn set_object_fill(
+        &mut self,
+        element: impl Into<iwork::ElementId>,
+        colour: Option<Color>,
+    ) -> Result<(), Error> {
         self.doc().element_mut(element)?.fill(colour)
     }
-    fn set_object_gradient(&mut self, element: u64, gradient: &Gradient) -> Result<(), Error> {
+    fn set_object_gradient(
+        &mut self,
+        element: impl Into<iwork::ElementId>,
+        gradient: &Gradient,
+    ) -> Result<(), Error> {
         self.doc().element_mut(element)?.fill(gradient.clone())
     }
     fn set_object_image_fill(
         &mut self,
-        element: u64,
+        element: impl Into<iwork::ElementId>,
         bytes: &[u8],
         name: &str,
         fit: ImageFit,
@@ -433,17 +454,30 @@ pub trait Flat {
         });
         self.doc().element_mut(element)?.fill(fill)
     }
-    fn set_object_shadow(&mut self, element: u64, shadow: Option<Shadow>) -> Result<(), Error> {
+    fn set_object_shadow(
+        &mut self,
+        element: impl Into<iwork::ElementId>,
+        shadow: Option<Shadow>,
+    ) -> Result<(), Error> {
         let mut handle = self.doc().element_mut(element)?;
         match shadow {
             Some(shadow) => handle.shadow(shadow),
             None => handle.no_shadow(),
         }
     }
-    fn set_object_stroke(&mut self, element: u64, colour: Color, width: f32) -> Result<(), Error> {
+    fn set_object_stroke(
+        &mut self,
+        element: impl Into<iwork::ElementId>,
+        colour: Color,
+        width: f32,
+    ) -> Result<(), Error> {
         self.doc().element_mut(element)?.stroke(colour, width)
     }
-    fn set_object_opacity(&mut self, element: u64, opacity: f32) -> Result<(), Error> {
+    fn set_object_opacity(
+        &mut self,
+        element: impl Into<iwork::ElementId>,
+        opacity: f32,
+    ) -> Result<(), Error> {
         self.doc().element_mut(element)?.opacity(opacity)
     }
 

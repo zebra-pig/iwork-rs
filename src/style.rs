@@ -143,7 +143,7 @@ pub struct Label {
 pub struct TextStyleInfo {
     /// Object identifier — the handle every style method on
     /// [`crate::Document`] takes.
-    pub identifier: u64,
+    pub identifier: crate::element::StyleId,
     /// Stream the object lives in.
     pub stream: String,
     pub kind: StyleKind,

@@ -540,7 +540,7 @@ impl DataReferences {
 /// A chart, as read.
 #[derive(Debug, Clone)]
 pub struct ChartInfo {
-    pub identifier: u64,
+    pub identifier: crate::element::ElementId,
     pub stream: String,
     /// 5021 for a modern chart, 5000 for the pre-UFF one.
     pub message_type: u32,
@@ -692,7 +692,7 @@ pub fn charts(document: &crate::Document) -> Vec<ChartInfo> {
         if drawable.message_type != TYPE_CHART_DRAWABLE {
             continue;
         }
-        let Some((_, payload)) = objects.get(&drawable.identifier) else {
+        let Some((_, payload)) = objects.get(&drawable.identifier.get()) else {
             continue;
         };
         let Some(archive) = payload.bytes(EXTENSION).and_then(decode_nested) else {
@@ -737,16 +737,18 @@ fn decode(
     // (fields 10 and 11), not on the `TSCH` archive read through `reference`
     // above. Reach the drawable archive through the path the drawable was found
     // by, and read them.
-    let drawable_archive = objects.get(&drawable.identifier).and_then(|(_, payload)| {
-        if drawable.path.is_empty() {
-            Some(payload.clone())
-        } else {
-            crate::style::get_path(payload, &drawable.path).and_then(|value| match value {
-                Value::Bytes(raw) => decode_nested(&raw),
-                _ => None,
-            })
-        }
-    });
+    let drawable_archive = objects
+        .get(&drawable.identifier.get())
+        .and_then(|(_, payload)| {
+            if drawable.path.is_empty() {
+                Some(payload.clone())
+            } else {
+                crate::style::get_path(payload, &drawable.path).and_then(|value| match value {
+                    Value::Bytes(raw) => decode_nested(&raw),
+                    _ => None,
+                })
+            }
+        });
     let drawable_ref = |number: u32| -> Option<u64> {
         drawable_archive
             .as_ref()
@@ -1077,7 +1079,7 @@ mod tests {
             ..Grid::default()
         };
         let chart = |direction: u32| ChartInfo {
-            identifier: 0,
+            identifier: 0.into(),
             stream: String::new(),
             message_type: TYPE_CHART_DRAWABLE,
             chart_type: 1,

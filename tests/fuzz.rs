@@ -474,7 +474,7 @@ fn read_everything(doc: &mut Document) {
         let _ = slide.transition;
     }
     for drawable in doc.elements() {
-        let _ = doc.object_style(drawable.identifier);
+        let _ = doc.object_style(drawable.identifier.get());
     }
     // And the write path, on a document whose bytes are nonsense: re-encoding
     // every object is what `iwork roundtrip` does, and a document that only

@@ -2151,7 +2151,8 @@ fn drawables(path: &str) -> Result<(), Error> {
         println!("no drawables");
         return Ok(());
     }
-    let by_id: BTreeMap<u64, &iwork::ElementInfo> = all.iter().map(|d| (d.identifier, d)).collect();
+    let by_id: BTreeMap<u64, &iwork::ElementInfo> =
+        all.iter().map(|d| (d.identifier.get(), d)).collect();
     let mut place = String::new();
 
     for drawable in &all {
@@ -3564,7 +3565,7 @@ fn find_table_size(doc: &Document, wanted: &str) -> Result<(usize, usize), Error
     let by_id: Option<u64> = wanted.parse().ok();
     doc.tables()
         .into_iter()
-        .find(|t| Some(t.identifier) == by_id || t.name == wanted)
+        .find(|t| Some(t.identifier.get()) == by_id || t.name == wanted)
         .map(|t| (t.rows, t.columns))
         .ok_or_else(|| Error::Format(format!("no table called '{wanted}'")))
 }
@@ -3573,7 +3574,7 @@ fn find_table_rows(doc: &Document, wanted: &str) -> Result<usize, Error> {
     let by_id: Option<u64> = wanted.parse().ok();
     doc.tables()
         .into_iter()
-        .find(|t| Some(t.identifier) == by_id || t.name == wanted)
+        .find(|t| Some(t.identifier.get()) == by_id || t.name == wanted)
         .map(|t| t.rows)
         .ok_or_else(|| Error::Format(format!("no table called '{wanted}'")))
 }
