@@ -4,7 +4,7 @@ What changed, and — because this is a reverse-engineered format — **how it w
 established**. An entry that cannot say what the app did is an entry about
 bytes nobody has watched being read.
 
-## 0.4.0 — unreleased
+## 0.4.0 — 2026-10-08
 
 **One way to do each thing.** What 0.3 deprecated is gone, not kept.
 
