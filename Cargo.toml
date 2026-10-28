@@ -2,7 +2,7 @@
 name = "iwork"
 version = "0.4.1"
 edition = "2021"
-rust-version = "1.74"
+rust-version = "1.88"
 description = "Read and write Apple iWork documents (Pages, Numbers, Keynote)"
 license = "MIT"
 repository = "https://github.com/zebra-pig/iwork-rs"
@@ -24,7 +24,7 @@ all-features = true
 
 [dependencies]
 snap = "1.1"
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [[bin]]
 name = "iwork"
